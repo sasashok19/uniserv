@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:mvnrepository.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:repo1.maven.org)",
+      "Bash(curl -s --max-time 30 \"https://docs.quarkiverse.io/quarkus-jdbc-sqlite/dev/index.html\")"
+    ]
+  }
+}

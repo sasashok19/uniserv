@@ -42,10 +42,10 @@
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-rest-jackson</artifactId>
         </dependency>
-        <!-- Security / JWT -->
+        <!-- Security / JWT (MicroProfile JWT via SmallRye) -->
         <dependency>
             <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-security-jwt</artifactId>
+            <artifactId>quarkus-smallrye-jwt</artifactId>
         </dependency>
         <!-- Event bus client (Valkey is Redis-compatible) -->
         <dependency>

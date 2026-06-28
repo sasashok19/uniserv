@@ -16,8 +16,8 @@
         <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
         <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
         <quarkus.platform.version>3.15.1</quarkus.platform.version>
-        <sqlite-jdbc.version>3.47.0.0</sqlite-jdbc.version>
-        <hibernate-community-dialects.version>6.6.1.Final</hibernate-community-dialects.version>
+        <!-- Quarkiverse SQLite JDBC extension; 3.0.11 targets Quarkus 3.15.1 -->
+        <quarkus-jdbc-sqlite.version>3.0.11</quarkus-jdbc-sqlite.version>
         <skipITs>true</skipITs>
         <surefire-plugin.version>3.5.0</surefire-plugin.version>
     </properties>
@@ -49,22 +49,14 @@
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-hibernate-orm-panache</artifactId>
         </dependency>
-        <!-- Generic JDBC datasource (SQLite is not an officially supported kind) -->
+        <!-- SQLite JDBC datasource (Quarkiverse). Bundles the xerial driver and
+             Hibernate community dialects; provides db-kind=sqlite. SQLite is not
+             an officially supported Quarkus db-kind, so this extension fills the
+             role of the generic "other" JDBC driver named in the spec. -->
         <dependency>
-            <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-jdbc-other</artifactId>
-        </dependency>
-        <!-- SQLite JDBC driver -->
-        <dependency>
-            <groupId>org.xerial</groupId>
-            <artifactId>sqlite-jdbc</artifactId>
-            <version>${sqlite-jdbc.version}</version>
-        </dependency>
-        <!-- Community Hibernate dialect for SQLite -->
-        <dependency>
-            <groupId>org.hibernate.orm</groupId>
-            <artifactId>hibernate-community-dialects</artifactId>
-            <version>${hibernate-community-dialects.version}</version>
+            <groupId>io.quarkiverse.jdbc</groupId>
+            <artifactId>quarkus-jdbc-sqlite</artifactId>
+            <version>${quarkus-jdbc-sqlite.version}</version>
         </dependency>
         <!-- Schema migrations -->
         <dependency>
