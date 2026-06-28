@@ -1,0 +1,106 @@
+# ============================================================
+# UniServe :: local development stack (Phase 1)
+# Usage (from repo root):
+#   docker compose -f infrastructure/compose/docker-compose.dev.yml up --build
+#
+# Ports (host):
+#   api-gateway 8080 | db-writer 8090 | ai-core 8001 | dashboard 3000 | valkey 6379
+# ============================================================
+
+name: uniserve-dev
+
+services:
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: uniserve-valkey
+    ports:
+      - "6379:6379"
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  db-writer:
+    build:
+      context: ../../services/db-writer
+      dockerfile: Dockerfile
+    container_name: uniserve-db-writer
+    environment:
+      APP_ENV: development
+      TENANT_ID: default
+      DB_WRITER_DB_PATH: /data/uniserve.db
+    ports:
+      - "8090:8090"
+    volumes:
+      - db-data:/data
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8090/q/health/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  ai-core:
+    build:
+      context: ../../services/ai-core
+      dockerfile: Dockerfile
+    container_name: uniserve-ai-core
+    environment:
+      APP_ENV: development
+      TENANT_ID: default
+      VALKEY_URL: redis://valkey:6379
+      DB_WRITER_URL: http://db-writer:8090
+      DEFAULT_LLM_PROVIDER: anthropic
+    ports:
+      - "8001:8001"
+    depends_on:
+      valkey:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8001/q/health/ready').status==200 else sys.exit(1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  api-gateway:
+    build:
+      context: ../../services/api-gateway
+      dockerfile: Dockerfile
+    container_name: uniserve-api-gateway
+    environment:
+      APP_ENV: development
+      TENANT_ID: default
+      GATEWAY_VALKEY_URL: redis://valkey:6379
+      AI_CORE_URL: http://ai-core:8001
+      DB_WRITER_URL: http://db-writer:8090
+    ports:
+      - "8080:8080"
+    depends_on:
+      valkey:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8080/q/health/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  dashboard:
+    build:
+      context: ../../apps/dashboard
+      dockerfile: Dockerfile
+    container_name: uniserve-dashboard
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_GATEWAY_URL: http://localhost:8080
+      NEXT_PUBLIC_TENANT_ID: default
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api-gateway
+
+volumes:
+  db-data:

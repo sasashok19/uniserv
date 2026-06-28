@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(cd \"c:\\\\Users\\\\Ashok Srinivasan\\\\Desktop\\\\Ashok\\\\AI\\\\CapStone\\\\UniServe\\\\services\\\\ai-core\"; python -m venv .venv; .\\\\.venv\\\\Scripts\\\\python.exe -m pip install --quiet --disable-pip-version-check fastapi==0.115.5 \"uvicorn[standard]==0.32.1\" httpx==0.28.1 pydantic-settings==2.7.0 pytest==8.3.4 2>&1 | Select-Object -Last 5; \"pip-exit=$LASTEXITCODE\")",
+      "PowerShell(cd \"c:\\\\Users\\\\Ashok Srinivasan\\\\Desktop\\\\Ashok\\\\AI\\\\CapStone\\\\UniServe\\\\services\\\\ai-core\"; .\\\\.venv\\\\Scripts\\\\python.exe -m pytest -q 2>&1 | Select-Object -Last 20; \"pytest-exit=$LASTEXITCODE\")",
+      "PowerShell(cd \"c:\\\\Users\\\\Ashok Srinivasan\\\\Desktop\\\\Ashok\\\\AI\\\\CapStone\\\\UniServe\\\\apps\\\\dashboard\"; npm install --no-audit --no-fund 2>&1 | Select-Object -Last 8; \"npm-install-exit=$LASTEXITCODE\")",
+      "PowerShell(cd \"c:\\\\Users\\\\Ashok Srinivasan\\\\Desktop\\\\Ashok\\\\AI\\\\CapStone\\\\UniServe\\\\apps\\\\dashboard\"; npm run build 2>&1 | Select-Object -Last 40; \"build-exit=$LASTEXITCODE\")",
+      "PowerShell(docker info --format '{{.ServerVersion}}' 2>&1; \"exit=$LASTEXITCODE\")",
+      "PowerShell(cd \"c:\\\\Users\\\\Ashok Srinivasan\\\\Desktop\\\\Ashok\\\\AI\\\\CapStone\\\\UniServe\"; docker compose -f infrastructure/compose/docker-compose.dev.yml build db-writer ai-core api-gateway 2>&1 | Tee-Object -FilePath \"$env:TEMP\\\\uniserve-build.log\" | Select-Object -Last 15; \"build-exit=$LASTEXITCODE\")",
+      "WebFetch(domain:search.maven.org)"
+    ]
+  }
+}

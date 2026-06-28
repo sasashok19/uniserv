@@ -1,0 +1,36 @@
+### UniServe — health checks for all services (Phase 1 scaffold)
+### Ports: api-gateway 8080, db-writer 8090, ai-core 8001, dashboard 3000
+
+### api-gateway
+GET http://localhost:8080/api/v1/health
+Accept: application/json
+
+### api-gateway — liveness
+GET http://localhost:8080/q/health/live
+
+### api-gateway — readiness
+GET http://localhost:8080/q/health/ready
+
+### db-writer
+GET http://localhost:8090/api/v1/health
+Accept: application/json
+
+### db-writer — liveness
+GET http://localhost:8090/q/health/live
+
+### db-writer — readiness
+GET http://localhost:8090/q/health/ready
+
+### ai-core
+GET http://localhost:8001/api/v1/health
+Accept: application/json
+
+### ai-core — liveness
+GET http://localhost:8001/q/health/live
+
+### ai-core — readiness
+GET http://localhost:8001/q/health/ready
+
+### dashboard
+GET http://localhost:3000/api/health
+Accept: application/json

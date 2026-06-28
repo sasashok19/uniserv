@@ -1,0 +1,8 @@
+target/
+.git/
+.idea/
+*.iml
+.env
+*.db
+*.db-*
+README.md

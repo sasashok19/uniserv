@@ -1,0 +1,32 @@
+# Secrets
+.env
+**/.env
+!**/.env.example
+
+# Java / Quarkus
+target/
+*.class
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+
+# SQLite
+*.db
+*.db-shm
+*.db-wal
+
+# IDE / OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db

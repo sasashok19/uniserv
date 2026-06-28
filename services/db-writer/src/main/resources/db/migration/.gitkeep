@@ -1,0 +1,2 @@
+# Flyway migrations live here (V1__*.sql onward).
+# PHASE_1: ticket schema migrations are added in 05_TICKET_SCHEMA.

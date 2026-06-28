@@ -1,0 +1,64 @@
+# db-writer is the SOLE SQLite writer — exactly one replica, backed by a PVC.
+# PHASE_1: backup sidecar (GCS/S3 copy) is added in 16_DEPLOYMENT.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: db-writer-data
+  namespace: uniserve
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: db-writer
+  namespace: uniserve
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # single writer — never run two pods at once
+  selector:
+    matchLabels: { app: db-writer }
+  template:
+    metadata:
+      labels: { app: db-writer }
+    spec:
+      containers:
+        - name: db-writer
+          image: uniserve/db-writer:dev
+          ports:
+            - containerPort: 8090
+          env:
+            - name: APP_ENV
+              value: "production"
+            - name: DB_WRITER_DB_PATH
+              value: "/data/uniserve.db"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            httpGet: { path: /q/health/live, port: 8090 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /q/health/ready, port: 8090 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: db-writer-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: db-writer
+  namespace: uniserve
+spec:
+  selector: { app: db-writer }
+  ports:
+    - port: 8090
+      targetPort: 8090
