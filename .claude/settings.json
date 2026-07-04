@@ -5,7 +5,12 @@
       "WebFetch(domain:mvnrepository.com)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:repo1.maven.org)",
-      "Bash(curl -s --max-time 30 \"https://docs.quarkiverse.io/quarkus-jdbc-sqlite/dev/index.html\")"
+      "Bash(curl -s --max-time 30 \"https://docs.quarkiverse.io/quarkus-jdbc-sqlite/dev/index.html\")",
+      "PowerShell(npm view next@14 version 2>&1)",
+      "PowerShell(npm view next dist-tags --json 2>&1)",
+      "PowerShell(docker builder prune -af 2>&1)",
+      "PowerShell(cd \"c:\\\\Users\\\\Ashok Srinivasan\\\\Desktop\\\\Ashok\\\\AI\\\\CapStone\\\\UniServe\\\\services\\\\ai-core\"; if\\(Test-Path \".venv\\\\Scripts\\\\python.exe\"\\){ $py=\".venv\\\\Scripts\\\\python.exe\" } else { $py=\"python\" }; & $py -c \"import valkey, fastapi, pytest; print\\('deps ok, valkey', valkey.__version__\\)\" 2>&1)",
+      "PowerShell(docker ps --format 'table {{.Names}}\\\\t{{.Status}}' 2>&1; Write-Host \"--- free ---\"; \"{0:N2} GB free\" -f \\(\\(Get-PSDrive C\\).Free/1GB\\))"
     ]
   }
 }

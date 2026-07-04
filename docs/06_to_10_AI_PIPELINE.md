@@ -442,3 +442,11 @@ Content-Type: application/json
 HTTP/1.1 200 OK
 { "score": 8.7, "label": "critical" }
 ```
+
+---
+
+## Phase 1 Implementation Notes (deviations & corrections)
+- **No LLM API key in dev**, so classification (08) and info-gathering/summary (06) use the documented **rule-based fallback**; `test-llm-health` reports `{llmAvailable:false, fallback:"rule_based_classification"}`.
+- **07 PII scrubber** uses **regex + a "name is" heuristic + a Valkey token store** (TTL) rather than Presidio — Presidio needs a spaCy model not shipped in the image. Entity labels/token format match the spec (PERSON, PHONE_NUMBER, IN_AADHAAR, ...).
+- `DB_WRITER_URL` is `http://db-writer:8090` (doc says 8081).
+- **09 dedup** matches on the identity reference passed as `masterId` against `tickets.identity_id`.

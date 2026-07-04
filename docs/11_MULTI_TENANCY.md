@@ -212,3 +212,11 @@ HTTP/1.1 401 Unauthorized
 - Agent token → all-tickets endpoint returns 403, own-tickets returns 200
 - Expired token → 401
 - Refresh token rotated → old refresh token rejected after use
+
+---
+
+## Phase 1 Implementation Notes (deviations & corrections)
+- JWTs are **HS256 via `com.auth0:java-jwt`** with a shared `JWT_SECRET`, verified by a custom `AuthFilter`; password hashing/verification uses Quarkus `BcryptUtil`.
+- `quarkus.smallrye-jwt.enabled=false` — the built-in MP-JWT mechanism would otherwise intercept and reject our HS256 Bearer tokens before the custom filter runs.
+- On dev startup the gateway **reseeds the seed agents' bcrypt password hashes** (admin/lead/agent) so the documented dev credentials work.
+- Refresh tokens are rotated with a Valkey-backed revocation entry. A dev-only helper `GET /api/v1/auth/_dev/expired-token` exists to exercise the `TOKEN_EXPIRED` path.

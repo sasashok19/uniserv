@@ -189,3 +189,10 @@ HTTP/1.1 200 OK
 - Same phone second time → existing profile returned, not duplicated
 - Anonymous declared → ANON-XXXX generated, unique per tenant
 - Pending queue → 48hr timeout marks ticket as timeout status
+
+---
+
+## Phase 1 Implementation Notes (deviations & corrections)
+- `DB_WRITER_URL` is **http://db-writer:8090** (doc says 8081); db-writer runs on 8090 across the stack.
+- Anon-ref uniqueness is checked via db-writer `GET /api/v1/db/identities/anon-check`.
+- Pending-queue timeout job is **partial**: enqueue + timed-out query exist, but the ticket-status timeout sweep is deferred (tickets don't link to pending entries until later features).

@@ -11,8 +11,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app import __version__
+from app.classify.router import router as classify_router
 from app.config import settings
+from app.conversation.router import router as conversation_router
+from app.dedup.router import router as dedup_router
 from app.health import router as health_router
+from app.identity.router import router as identity_router
+from app.pii.router import router as pii_router
+from app.priority.router import router as priority_router
 
 # Structured-ish logging (ORCHESTRATOR convention: JSON enforced in Phase 2).
 logging.basicConfig(
@@ -34,6 +40,12 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="UniServe ai-core", version=__version__, lifespan=lifespan)
 app.include_router(health_router)
+app.include_router(identity_router)
+app.include_router(conversation_router)
+app.include_router(pii_router)
+app.include_router(classify_router)
+app.include_router(dedup_router)
+app.include_router(priority_router)
 
 
 @app.get("/")

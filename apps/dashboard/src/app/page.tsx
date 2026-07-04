@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 export default function Home() {
   return (
     <main className="container flex min-h-screen flex-col items-center justify-center gap-4 py-16">
@@ -5,10 +7,14 @@ export default function Home() {
       <p className="text-muted-foreground">
         Multi-tenant AI-powered complaint &amp; feedback portal
       </p>
-      <span className="rounded-full border px-3 py-1 text-sm">
-        Phase 1 scaffold — dashboard is healthy
-      </span>
-      {/* PHASE_1: Analytics, Ticket Queue, and Administration tabs are built in 12_AGENT_DASHBOARD. */}
+      <div className="flex gap-3">
+        <Link href="/login" className="rounded-full border px-4 py-1 text-sm">
+          Agent sign in
+        </Link>
+        <Link href="/status/ANON-TEST" className="rounded-full border px-4 py-1 text-sm">
+          Track a complaint
+        </Link>
+      </div>
     </main>
   );
 }

@@ -1,0 +1,18 @@
+# Non-secret configuration shared across services (Feature 16).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: uniserve-config
+  namespace: uniserve
+data:
+  APP_ENV: "production"
+  TENANT_ID: "default"
+  GATEWAY_VALKEY_URL: "redis://valkey:6379"
+  VALKEY_URL: "redis://valkey:6379"
+  AI_CORE_URL: "http://ai-core:8001"
+  DB_WRITER_URL: "http://db-writer:8090"
+  DB_WRITER_DB_PATH: "/data/uniserve.db"
+  EVENT_BUS_MAX_RETRIES: "3"
+  EVENT_BUS_RETRY_DELAY_MS: "1000"
+  EVENT_BUS_CONSUMER_GROUP: "uniserve"
+  BACKUP_INTERVAL_MINUTES: "15"

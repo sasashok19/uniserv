@@ -436,3 +436,12 @@ X-Internal-Key: {{internal_api_key}}
 HTTP/1.1 200 OK
 { "lastBackup": "2025-06-27T10:15:00Z", "backupSizeKb": 2048, "destination": "gs://..." }
 ```
+
+---
+
+## Phase 1 Implementation Notes (deviations & corrections)
+- **Ports:** all analytics/backup/health endpoints are on the running ports (db-writer **8090**, gateway **8080**) — docs say 8081.
+- **13:** `analytics/volume` emits both `day` and `date` (+ `count` + `byChannel`); `analytics/sla` and `analytics/priority` implemented. SLA figures are data-dependent (0s until tickets have `sla_due_at` + `resolved_at`); the doc numbers are illustrative.
+- **14:** message templates are **inline** (subject + HTML body per event type) rather than Qute `.html` files; the mailer runs in **mock mode** in dev (`{sent:true, channel:email}`).
+- **15 Encryption:** **not implemented — Phase 2 only**, as the doc states.
+- **16:** aggregate health is exposed at **`GET /api/v1/health`** (probes gateway/valkey/db-writer/ai-core). Phase-1 images are **JVM/Next-standalone** (native-image build is documented but not used). The **backup sidecar is k8s-only** (no-op in compose); `backup/status` reports live DB size + destination with `lastBackup:null`. Added k8s `configmap.yaml`, `secrets.yaml` (placeholders), `ingress.yaml`, `hpa.yaml`.

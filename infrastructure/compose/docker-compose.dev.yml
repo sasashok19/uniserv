@@ -51,6 +51,9 @@ services:
       APP_ENV: development
       TENANT_ID: default
       VALKEY_URL: redis://valkey:6379
+      EVENT_BUS_MAX_RETRIES: "3"
+      EVENT_BUS_RETRY_DELAY_MS: "1000"
+      EVENT_BUS_CONSUMER_GROUP: uniserve
       DB_WRITER_URL: http://db-writer:8090
       DEFAULT_LLM_PROVIDER: anthropic
     ports:
@@ -76,6 +79,9 @@ services:
       GATEWAY_VALKEY_URL: redis://valkey:6379
       AI_CORE_URL: http://ai-core:8001
       DB_WRITER_URL: http://db-writer:8090
+      # WhatsApp adapter (Feature 02b) — dev handshake/HMAC bypass token
+      WHATSAPP_VERIFY_TOKEN: dev-verify-token
+      # Email adapter (Feature 02a): EMAIL_IMAP_HOST unset in dev => poll is a no-op
     ports:
       - "8080:8080"
     depends_on:
@@ -96,6 +102,8 @@ services:
     environment:
       NODE_ENV: production
       NEXT_PUBLIC_API_GATEWAY_URL: http://localhost:8080
+      # Server-side (SSR / route handlers) reach the gateway by service name.
+      API_GATEWAY_INTERNAL_URL: http://api-gateway:8080
       NEXT_PUBLIC_TENANT_ID: default
     ports:
       - "3000:3000"

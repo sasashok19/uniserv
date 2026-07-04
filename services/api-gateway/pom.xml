@@ -47,6 +47,17 @@
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-smallrye-jwt</artifactId>
         </dependency>
+        <!-- HS256 JWT issue/verify (Feature 11) -->
+        <dependency>
+            <groupId>com.auth0</groupId>
+            <artifactId>java-jwt</artifactId>
+            <version>4.4.0</version>
+        </dependency>
+        <!-- BcryptUtil for password hashing/verification (Feature 11) -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-elytron-security-common</artifactId>
+        </dependency>
         <!-- Event bus client (Valkey is Redis-compatible) -->
         <dependency>
             <groupId>io.quarkus</groupId>
@@ -56,6 +67,12 @@
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-mailer</artifactId>
+        </dependency>
+        <!-- Inbound email: IMAP polling + MIME parsing (Feature 02a) -->
+        <dependency>
+            <groupId>org.eclipse.angus</groupId>
+            <artifactId>angus-mail</artifactId>
+            <version>2.0.3</version>
         </dependency>
         <!-- Scheduler (IMAP poll, SLA jobs) -->
         <dependency>
@@ -82,6 +99,12 @@
         <dependency>
             <groupId>io.rest-assured</groupId>
             <artifactId>rest-assured</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Plain unit tests (no Quarkus boot / no Valkey) for event-bus logic -->
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

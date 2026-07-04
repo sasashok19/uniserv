@@ -1,0 +1,65 @@
+### UniServe — channel adapter stubs (Features 02a/02b/02f)
+### Base: api-gateway on http://localhost:8080
+
+### 02f — validate adapter contract shape (expect 200 {"valid": true})
+POST http://localhost:8080/api/v1/internal/validate-event
+Content-Type: application/json
+
+{
+  "type": "channel.message.received",
+  "channel": "email",
+  "channelIdentity": { "type": "email", "value": "test@example.com", "verified": false },
+  "rawText": "My bill is wrong",
+  "threadId": "thread-001",
+  "sentAt": "2025-06-27T10:00:00Z"
+}
+
+### 02f — invalid event (missing rawText + sentAt) => expect 400 {"valid": false, ...}
+POST http://localhost:8080/api/v1/internal/validate-event
+Content-Type: application/json
+
+{
+  "type": "channel.message.received",
+  "channel": "email",
+  "channelIdentity": { "type": "email", "value": "test@example.com", "verified": false }
+}
+
+### 02b — WhatsApp handshake (expect 200, echoes challenge)
+GET http://localhost:8080/api/v1/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=dev-verify-token&hub.challenge=CHALLENGE_123
+
+### 02b — simulate inbound WhatsApp text (expect 200)
+POST http://localhost:8080/api/v1/webhooks/whatsapp
+Content-Type: application/json
+X-Hub-Signature-256: sha256=test_bypass_in_dev
+
+{
+  "object": "whatsapp_business_account",
+  "entry": [{ "changes": [{ "value": {
+    "messages": [{ "from": "919876543210", "id": "wamid.test001", "timestamp": "1719475200",
+      "text": { "body": "My electricity bill is double this month" }, "type": "text" }],
+    "contacts": [{ "profile": { "name": "Rajesh Kumar" } }]
+  }}]}]
+}
+
+### 02b — invalid HMAC (expect 401, event NOT published)
+POST http://localhost:8080/api/v1/webhooks/whatsapp
+Content-Type: application/json
+X-Hub-Signature-256: sha256=deadbeef
+
+{ "object": "whatsapp_business_account", "entry": [] }
+
+### 02b — read latest published event (expect 200 with channel/channelIdentity/rawText)
+GET http://localhost:8080/api/v1/internal/events/latest?stream=channel.message.received
+
+### 02a — trigger manual email poll (expect 200 {"messagesProcessed":N,"errors":0})
+POST http://localhost:8080/api/v1/internal/adapters/email/poll
+
+### 02a — send test outbound email (expect 200 {"sent": true})
+POST http://localhost:8080/api/v1/internal/adapters/email/test-send
+Content-Type: application/json
+
+{
+  "to": "test@example.com",
+  "subject": "Test reply from UniServe",
+  "body": "Your complaint reference is TKT-00001"
+}

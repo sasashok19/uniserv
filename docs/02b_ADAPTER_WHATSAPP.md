@@ -128,3 +128,10 @@ HTTP/1.1 200 OK
 - Phone normalised to E.164 (`+91...`)
 - `verified = true` always for WhatsApp
 - 200 returned within 100ms (async processing)
+
+---
+
+## Phase 1 Implementation Notes (deviations & corrections)
+- Dev HMAC bypass token `sha256=test_bypass_in_dev` is accepted **only** when `APP_ENV=development`; otherwise real HMAC-SHA256 over the raw body is required.
+- `events/latest` returns the reconstructed envelope + channel payload; `threadId` is `null` in Phase 1.
+- Webhook/inspector endpoints are unauthenticated in Phase 1.

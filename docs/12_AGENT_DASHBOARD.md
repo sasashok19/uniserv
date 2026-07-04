@@ -590,3 +590,10 @@ When `APP_ENV=development`, the seed data provides:
 - Reopen → resolution field cleared in UI
 - Mobile view → detail opens as full page, not side-sheet
 - Citizen portal `/status/ANON-TEST` → loads without authentication
+
+---
+
+## Phase 1 Implementation Notes (deviations & corrections)
+- Next.js **API routes proxy to the api-gateway**, forwarding the `access_token` cookie as a Bearer token; a readable `role` cookie drives client-side tab gating.
+- **UI is functional-minimal**: login, role-gated dashboard (Analytics / Ticket Queue / Administration), a queue table, and the public citizen portal. The full component set (side-sheet detail, charts, expandable filter panel) is scaffolded, not pixel-complete — the verified acceptance is the **HTTP stubs** (API routes + citizen portal SSR).
+- Citizen portal `/status/[ref]` (SSR, public) reads from the gateway's public endpoint `GET /api/v1/public/status/{ref}` (anon-ref or email), returning non-PII ticket status.

@@ -287,3 +287,12 @@ HTTP/1.1 503 Service Unavailable
 - Transition `in_progress→resolved` without 20-char note → 422
 - Transition `closed→reopened` → resolution field cleared, assignee preserved
 - SQLite WAL → concurrent GET requests while write in progress succeed
+
+---
+
+## Phase 1 Implementation Notes (deviations & corrections)
+- **Port 8090** (doc says 8081) — consistent across the stack.
+- Data access is **plain JDBC over the Agroal `DataSource`** (not Hibernate Panache) for predictable SQLite behaviour. `db-kind=sqlite` via the Quarkiverse `quarkus-jdbc-sqlite` extension (the spec's `db-kind=other` + `org.sqlite.JDBC` does not exist as a Quarkus combo).
+- `X-Internal-Key` is enforced **only when `DB_WRITER_INTERNAL_API_KEY` is set** (dev no-op).
+- `generate-resolution-summary` returns **503 AI_UNAVAILABLE** in Phase 1 (AI summariser not wired to db-writer yet).
+- Analytics: `volume` (04) + `sla`/`priority` (13) implemented; per-agent analytics deferred.

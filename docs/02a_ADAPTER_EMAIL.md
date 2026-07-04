@@ -113,3 +113,10 @@ HTTP/1.1 200 OK
 - HTML email → strips tags, extracts plain text
 - Reply email → `threadId` matches parent
 - SMTP send → no exception thrown
+
+---
+
+## Phase 1 Implementation Notes (deviations & corrections)
+- IMAP polling uses `org.eclipse.angus:angus-mail`. When `EMAIL_IMAP_HOST` is unset (dev), `poll` is a no-op returning `{messagesProcessed:0, errors:0}` — the doc's `3` is illustrative of a populated mailbox.
+- SMTP send uses the Quarkus mailer in **mock mode** (dev) — `test-send` returns `{sent:true}` without real delivery.
+- MIME parsing is pure/unit-tested: From→identity (`verified:false`), HTML→text, `In-Reply-To`/`References`→`threadId`.

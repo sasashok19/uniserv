@@ -5,18 +5,21 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.CoreMatchers.notNullValue;
 
 @QuarkusTest
 class HealthResourceTest {
 
     @Test
-    void healthEndpointReportsUp() {
+    void healthEndpointReportsAggregate() {
+        // Feature 16: aggregate health. api-gateway (self) is always healthy;
+        // downstream services may be unavailable in an isolated @QuarkusTest.
         given()
                 .when().get("/api/v1/health")
                 .then()
                 .statusCode(200)
-                .body("service", is("api-gateway"))
-                .body("status", is("UP"));
+                .body("services.apiGateway", is("healthy"))
+                .body("status", is(notNullValue()));
     }
 
     @Test

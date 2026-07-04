@@ -112,3 +112,10 @@ No seed needed — event bus is infrastructure, not data.
 
 ### Integration Test
 - Publish event → consumer receives within 500ms → ACK confirmed
+
+---
+
+## Phase 1 Implementation Notes (deviations & corrections)
+- Health endpoint `/api/v1/health/eventbus` returns the **full 7-stream catalogue**; the doc's 2-item example is a representative subset.
+- All event-bus endpoints are **unauthenticated** in Phase 1 (JWT arrives in 11_MULTI_TENANCY).
+- Java unit tests run via a Maven container — the service image builds with `-DskipTests`.

@@ -1,0 +1,27 @@
+# HTTPS ingress (Feature 16). Routes the dashboard and the api-gateway.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: uniserve-ingress
+  namespace: uniserve
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+spec:
+  rules:
+    - host: uniserve.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  number: 8080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dashboard
+                port:
+                  number: 3000

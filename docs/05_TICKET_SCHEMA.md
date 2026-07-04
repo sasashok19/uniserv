@@ -266,3 +266,11 @@ INSERT INTO agents(id, tenant_id, name, email, password_hash, role) VALUES
 - Admin: `admin@tneb.demo` / `Admin@123`
 - Lead: `lead@tneb.demo` / `Lead@123`
 - Agent: `agent@tneb.demo` / `Agent@123`
+
+---
+
+## Phase 1 Implementation Notes (deviations & corrections)
+- **Port 8090** (doc says 8081).
+- `schema/version` reports the real latest migration version (**"3"**, i.e. V1+V2+V3); the doc's `"1"` predates the V2/V3 split. `appliedMigrations:3` matches.
+- The dev seed **omits the 25 demo tickets** so the first created ticket per tenant is deterministically `TKT-00001` (matches the 04 stub). Seeded agents carry placeholder `password_hash` values that the api-gateway **reseeds to real bcrypt hashes on dev startup** (Feature 11) so login works.
+- Flyway runs with `migrate-at-start=true` + `baseline-on-migrate=true`.

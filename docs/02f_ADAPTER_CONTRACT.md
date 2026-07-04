@@ -101,3 +101,9 @@ HTTP/1.1 200 OK
 - Email adapter emits `verified: false`
 - WhatsApp adapter emits `verified: true`
 - Missing required fields → validation rejects with 400
+
+---
+
+## Phase 1 Implementation Notes (deviations & corrections)
+- `validate-event` required fields: `type == "channel.message.received"`, `channel` ∈ {email, whatsapp}, `channelIdentity.type`, `rawText`, `sentAt`. Missing → 400 `{valid:false, errors:[...]}`.
+- Endpoint unauthenticated in Phase 1 (JWT in 11_MULTI_TENANCY).

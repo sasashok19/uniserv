@@ -1,6 +1,8 @@
 """Health check router for ai-core."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Response
+
+from app.events.client import valkey_ping
 
 router = APIRouter()
 
@@ -18,10 +20,17 @@ async def liveness() -> dict:
 
 
 @router.get("/q/health/ready")
-async def readiness() -> dict:
+async def readiness(response: Response, valkey_ok: bool = Depends(valkey_ping)) -> dict:
     """Kubernetes readiness probe.
 
-    PHASE_1: returns UP once the app is serving. Valkey connectivity is added
-    as a readiness dependency in 01_EVENT_BUS.
+    Feature 01: readiness now depends on Valkey (the event bus). Returns 503
+    when Valkey is unreachable so the service is pulled from rotation.
     """
-    return {"status": "UP", "checks": [{"name": "ai-core", "status": "UP"}]}
+    checks = [
+        {"name": "ai-core", "status": "UP"},
+        {"name": "valkey", "status": "UP" if valkey_ok else "DOWN"},
+    ]
+    if not valkey_ok:
+        response.status_code = 503
+        return {"status": "DOWN", "checks": checks}
+    return {"status": "UP", "checks": checks}
