@@ -56,6 +56,9 @@ services:
       EVENT_BUS_CONSUMER_GROUP: uniserve
       DB_WRITER_URL: http://db-writer:8090
       DEFAULT_LLM_PROVIDER: anthropic
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_ASSISTANT_ID: ${OPENAI_ASSISTANT_ID:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
     ports:
       - "8001:8001"
     depends_on:
@@ -81,11 +84,14 @@ services:
       DB_WRITER_URL: http://db-writer:8090
       # WhatsApp adapter (Feature 02b) — dev handshake/HMAC bypass token
       WHATSAPP_VERIFY_TOKEN: dev-verify-token
-      # Email adapter (Feature 02a): EMAIL_IMAP_HOST unset in dev => poll is a no-op
+      # Email adapter (Feature 02a): webhook-only ingestion (EMAIL_WEBHOOK_SECRET
+      # defaults to "dev-webhook-secret" — see EmailWebhookResource)
     ports:
       - "8080:8080"
     depends_on:
       valkey:
+        condition: service_healthy
+      db-writer:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8080/q/health/ready || exit 1"]

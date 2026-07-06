@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     default_llm_provider: str = "anthropic"
     anthropic_api_key: str = ""
     openai_api_key: str = ""
+    openai_assistant_id: str = ""
+    openai_model: str = "gpt-4o-mini"
 
     # PII scrubber (Feature 07)
     pii_scrubber_enabled: bool = True
