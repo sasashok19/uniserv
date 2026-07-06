@@ -1,7 +1,7 @@
 package com.uniserve.dbwriter.schema;
 
-import com.uniserve.dbwriter.db.Db;
 import jakarta.inject.Inject;
+import jakarta.persistence.EntityManager;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
@@ -19,6 +19,9 @@ import java.util.Map;
  *   <li>{@code GET /api/v1/internal/schema/tables} — the created tables.</li>
  * </ul>
  *
+ * <p>These query Flyway/SQLite metadata tables that have no Panache entity, so
+ * they run as native SQL over the Hibernate-managed {@link EntityManager}.
+ *
  * <p>PHASE_1: unauthenticated (the doc's {@code Authorization: Bearer} guard arrives
  * with JWT in 11_MULTI_TENANCY).
  */
@@ -31,16 +34,19 @@ public class SchemaResource {
             "ticket_messages", "ticket_notes", "ticket_events", "identity_pending_queue");
 
     @Inject
-    Db db;
+    EntityManager em;
 
     @GET
     @Path("/version")
     @Produces(MediaType.APPLICATION_JSON)
     public Map<String, Object> version() {
-        Object version = db.scalar(
-                "SELECT version FROM flyway_schema_history WHERE success = 1 ORDER BY installed_rank DESC LIMIT 1");
-        Object applied = db.scalar(
-                "SELECT COUNT(*) FROM flyway_schema_history WHERE success = 1");
+        Object version = singleOrNull(em.createNativeQuery(
+                "SELECT version FROM flyway_schema_history WHERE success = 1 ORDER BY installed_rank DESC LIMIT 1")
+                .getResultList());
+        Object applied = em.createNativeQuery(
+                "SELECT COUNT(*) FROM flyway_schema_history WHERE success = 1")
+                .getSingleResult();
+
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("version", version == null ? null : String.valueOf(version));
         body.put("appliedMigrations", applied == null ? 0 : ((Number) applied).intValue());
@@ -50,13 +56,15 @@ public class SchemaResource {
     @GET
     @Path("/tables")
     @Produces(MediaType.APPLICATION_JSON)
+    @SuppressWarnings("unchecked")
     public Map<String, Object> tables() {
-        List<Map<String, Object>> rows = db.query(
+        List<Object> rows = em.createNativeQuery(
                 "SELECT name FROM sqlite_master WHERE type = 'table' "
-                        + "AND name NOT LIKE 'sqlite_%' AND name <> 'flyway_schema_history'");
+                        + "AND name NOT LIKE 'sqlite_%' AND name <> 'flyway_schema_history'")
+                .getResultList();
         List<String> found = new ArrayList<>();
-        for (Map<String, Object> row : rows) {
-            found.add(String.valueOf(row.get("name")));
+        for (Object row : rows) {
+            found.add(String.valueOf(row));
         }
         // Present in the canonical order, then any extras.
         List<String> ordered = new ArrayList<>();
@@ -67,5 +75,9 @@ public class SchemaResource {
         }
         ordered.addAll(found);
         return Map.of("tables", ordered);
+    }
+
+    private static Object singleOrNull(List<?> results) {
+        return results.isEmpty() ? null : results.get(0);
     }
 }

@@ -1,9 +1,11 @@
 package com.uniserve.dbwriter.agents;
 
 import com.uniserve.dbwriter.common.ApiException;
-import com.uniserve.dbwriter.db.Db;
+import com.uniserve.dbwriter.model.Agent;
+import io.quarkus.hibernate.orm.panache.Panache;
+import io.quarkus.panache.common.Sort;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.inject.Inject;
+import jakarta.transaction.Transactional;
 
 import java.util.List;
 import java.util.Map;
@@ -11,15 +13,14 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Agent CRUD (Feature 04/11). api-gateway owns auth/RBAC; this owns the writes.
- * Lookups by email include {@code password_hash} for login verification.
+ * Agent CRUD (Feature 04/11), backed by Hibernate ORM with Panache. api-gateway
+ * owns auth/RBAC; this owns the writes. Lookups by email include
+ * {@code password_hash} for login verification.
  */
 @ApplicationScoped
 public class AgentService {
 
-    @Inject
-    Db db;
-
+    @Transactional
     public Map<String, Object> create(Map<String, Object> body) {
         String tenantId = str(body, "tenantId");
         String name = str(body, "name");
@@ -30,41 +31,64 @@ public class AgentService {
             throw new ApiException(400, "AGENT_FIELDS_REQUIRED",
                     "tenantId, name, email and role are required");
         }
-        String id = strOr(body, "id", UUID.randomUUID().toString());
-        db.update("""
-                INSERT INTO agents (id, tenant_id, name, email, password_hash, role, is_active)
-                VALUES (?,?,?,?,?,?,1)
-                """, id, tenantId, name, email, passwordHash == null ? "" : passwordHash, role);
-        return getById(id).orElseThrow();
+        Agent a = new Agent();
+        a.id = strOr(body, "id", UUID.randomUUID().toString());
+        a.tenantId = tenantId;
+        a.name = name;
+        a.email = email;
+        a.passwordHash = passwordHash == null ? "" : passwordHash;
+        a.role = role;
+        a.persistAndFlush();
+        return a.toMap();
     }
 
     public Optional<Map<String, Object>> getById(String id) {
-        return db.queryOne("SELECT * FROM agents WHERE id = ?", id);
+        Agent a = Agent.findById(id);
+        return Optional.ofNullable(a).map(Agent::toMap);
     }
 
     public Optional<Map<String, Object>> findByEmail(String email) {
-        return db.queryOne("SELECT * FROM agents WHERE email = ?", email);
+        return Agent.<Agent>find("email", email).firstResultOptional().map(Agent::toMap);
     }
 
     public List<Map<String, Object>> list(String tenantId) {
-        return db.query("SELECT * FROM agents WHERE tenant_id = ? ORDER BY created_at", tenantId);
+        return Agent.<Agent>find("tenantId", Sort.by("createdAt"), tenantId)
+                .list().stream().map(Agent::toMap).toList();
     }
 
+    @Transactional
     public Map<String, Object> update(String id, Map<String, Object> body) {
-        getById(id).orElseThrow(() -> new ApiException(404, "NOT_FOUND", "agent not found: " + id));
-        Map<String, String> updatable = Map.of(
-                "name", "name", "role", "role", "email", "email",
-                "isActive", "is_active", "passwordHash", "password_hash");
-        for (Map.Entry<String, String> e : updatable.entrySet()) {
-            if (body.containsKey(e.getKey())) {
-                Object value = body.get(e.getKey());
-                if ("is_active".equals(e.getValue()) && value instanceof Boolean b) {
-                    value = b ? 1 : 0;
-                }
-                db.update("UPDATE agents SET " + e.getValue() + " = ? WHERE id = ?", value, id);
-            }
+        Agent a = Agent.findById(id);
+        if (a == null) {
+            throw new ApiException(404, "NOT_FOUND", "agent not found: " + id);
         }
-        return getById(id).orElseThrow();
+        if (body.containsKey("name")) {
+            a.name = str(body, "name");
+        }
+        if (body.containsKey("role")) {
+            a.role = str(body, "role");
+        }
+        if (body.containsKey("email")) {
+            a.email = str(body, "email");
+        }
+        if (body.containsKey("isActive")) {
+            a.isActive = boolInt(body.get("isActive"));
+        }
+        if (body.containsKey("passwordHash")) {
+            a.passwordHash = str(body, "passwordHash");
+        }
+        Panache.getEntityManager().flush();
+        return a.toMap();
+    }
+
+    private static int boolInt(Object v) {
+        if (v instanceof Boolean b) {
+            return b ? 1 : 0;
+        }
+        if (v instanceof Number n) {
+            return n.intValue();
+        }
+        return 0;
     }
 
     private static String str(Map<String, Object> body, String key) {

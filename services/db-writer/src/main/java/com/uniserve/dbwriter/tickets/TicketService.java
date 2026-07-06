@@ -1,10 +1,20 @@
 package com.uniserve.dbwriter.tickets;
 
 import com.uniserve.dbwriter.common.ApiException;
-import com.uniserve.dbwriter.db.Db;
+import com.uniserve.dbwriter.model.Ticket;
+import com.uniserve.dbwriter.model.TicketEvent;
+import com.uniserve.dbwriter.model.TicketMessage;
+import com.uniserve.dbwriter.model.TicketNote;
+import com.uniserve.dbwriter.util.SqliteTime;
+import io.quarkus.hibernate.orm.panache.Panache;
+import io.quarkus.panache.common.Page;
+import io.quarkus.panache.common.Sort;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.transaction.Transactional;
 
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -12,8 +22,9 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Ticket CRUD + status transitions (Feature 04). All writes go through here;
- * reads for a single ticket are cached in {@link TicketCache}.
+ * Ticket CRUD + status transitions (Feature 04), backed by Hibernate ORM with
+ * Panache (active-record entities under {@code com.uniserve.dbwriter.model}).
+ * Reads for a single ticket are cached in {@link TicketCache}.
  */
 @ApplicationScoped
 public class TicketService {
@@ -25,12 +36,10 @@ public class TicketService {
             "closed->reopened");
 
     @Inject
-    Db db;
-
-    @Inject
     TicketCache cache;
 
     /** Create a ticket; ticket_number is sequential per tenant (TKT-00001, ...). */
+    @Transactional
     public Map<String, Object> create(Map<String, Object> body) {
         String tenantId = str(body, "tenantId");
         if (tenantId == null) {
@@ -41,38 +50,35 @@ public class TicketService {
             throw new ApiException(400, "CHANNEL_REQUIRED", "channelOrigin is required");
         }
 
-        String id = UUID.randomUUID().toString();
-        String ticketNumber = nextTicketNumber(tenantId);
+        Ticket t = new Ticket();
+        t.id = UUID.randomUUID().toString();
+        t.tenantId = tenantId;
+        t.ticketNumber = nextTicketNumber(tenantId);
+        t.identityId = str(body, "identityId");
+        t.identityStatus = strOr(body, "identityStatus", "pending");
+        t.identitySource = str(body, "identitySource");
+        t.assignedTo = str(body, "assignedTo");
+        t.status = strOr(body, "status", "open");
+        t.category = str(body, "category");
+        t.subcategory = str(body, "subcategory");
+        t.priorityScore = num(body, "priorityScore");
+        t.priorityLabel = str(body, "priorityLabel");
+        t.sentimentScore = num(body, "sentimentScore");
+        t.channelOrigin = channelOrigin;
+        t.isDuplicate = intOr(body, "isDuplicate", 0);
+        t.parentTicketId = str(body, "parentTicketId");
+        t.slaDueAt = str(body, "slaDueAt");
+        // Flush immediately so any CHECK-constraint violation (bad status/priority
+        // label/etc.) surfaces here rather than being deferred to commit time.
+        t.persistAndFlush();
 
-        db.update("""
-                INSERT INTO tickets
-                  (id, tenant_id, ticket_number, identity_id, identity_status, identity_source,
-                   assigned_to, status, category, subcategory, priority_score, priority_label,
-                   sentiment_score, channel_origin, is_duplicate, parent_ticket_id, sla_due_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                id, tenantId, ticketNumber,
-                str(body, "identityId"),
-                strOr(body, "identityStatus", "pending"),
-                str(body, "identitySource"),
-                str(body, "assignedTo"),
-                strOr(body, "status", "open"),
-                str(body, "category"),
-                str(body, "subcategory"),
-                num(body, "priorityScore"),
-                str(body, "priorityLabel"),
-                num(body, "sentimentScore"),
-                channelOrigin,
-                intOr(body, "isDuplicate", 0),
-                str(body, "parentTicketId"),
-                str(body, "slaDueAt"));
-
-        event(tenantId, id, "ticket.created", "system", null);
-        return getById(id).orElseThrow();
+        recordEvent(tenantId, t.id, "ticket.created", "system", null);
+        return t.toMap();
     }
 
     public Optional<Map<String, Object>> getById(String id) {
-        return db.queryOne("SELECT * FROM tickets WHERE id = ?", id);
+        Ticket t = Ticket.findById(id);
+        return Optional.ofNullable(t).map(Ticket::toMap);
     }
 
     /** Read-through cache: returns the ticket and whether it was a cache hit. */
@@ -92,60 +98,82 @@ public class TicketService {
     public List<Map<String, Object>> list(String tenantId, String status, String assignedTo,
                                           String channel, String category, String identityId,
                                           int page, int pageSize) {
-        StringBuilder sql = new StringBuilder("SELECT * FROM tickets WHERE tenant_id = ?");
-        List<Object> params = new java.util.ArrayList<>();
-        params.add(tenantId);
+        StringBuilder query = new StringBuilder("tenantId = :tenantId");
+        Map<String, Object> params = new HashMap<>();
+        params.put("tenantId", tenantId);
         if (status != null && !status.isBlank()) {
-            List<String> vals = List.of(status.split(","));
-            sql.append(" AND status IN (").append("?,".repeat(vals.size() - 1)).append("?)");
-            params.addAll(vals);
+            query.append(" and status in :statuses");
+            params.put("statuses", List.of(status.split(",")));
         }
         if (assignedTo != null && !assignedTo.isBlank()) {
-            sql.append(" AND assigned_to = ?");
-            params.add(assignedTo);
+            query.append(" and assignedTo = :assignedTo");
+            params.put("assignedTo", assignedTo);
         }
         if (identityId != null && !identityId.isBlank()) {
-            sql.append(" AND identity_id = ?");
-            params.add(identityId);
+            query.append(" and identityId = :identityId");
+            params.put("identityId", identityId);
         }
         if (channel != null && !channel.isBlank()) {
-            sql.append(" AND channel_origin = ?");
-            params.add(channel);
+            query.append(" and channelOrigin = :channel");
+            params.put("channel", channel);
         }
         if (category != null && !category.isBlank()) {
-            sql.append(" AND category = ?");
-            params.add(category);
+            query.append(" and category = :category");
+            params.put("category", category);
         }
-        sql.append(" ORDER BY priority_score DESC LIMIT ? OFFSET ?");
-        params.add(pageSize);
-        params.add((page - 1) * pageSize);
-        return db.query(sql.toString(), params.toArray());
+
+        List<Ticket> rows = Ticket.find(query.toString(), Sort.by("priorityScore", Sort.Direction.Descending), params)
+                .page(Page.of(Math.max(page - 1, 0), pageSize))
+                .list();
+        return rows.stream().map(Ticket::toMap).toList();
     }
 
+    @Transactional
     public Map<String, Object> update(String id, Map<String, Object> body) {
-        Map<String, Object> ticket = getById(id)
-                .orElseThrow(() -> new ApiException(404, "NOT_FOUND", "ticket not found: " + id));
-        // Whitelist of updatable columns (camelCase -> snake_case).
-        Map<String, String> updatable = Map.of(
-                "status", "status", "category", "category", "subcategory", "subcategory",
-                "priorityScore", "priority_score", "priorityLabel", "priority_label",
-                "assignedTo", "assigned_to", "resolution", "resolution", "slaDueAt", "sla_due_at");
-        for (Map.Entry<String, String> e : updatable.entrySet()) {
-            if (body.containsKey(e.getKey())) {
-                db.update("UPDATE tickets SET " + e.getValue() + " = ?, updated_at = datetime('now') WHERE id = ?",
-                        body.get(e.getKey()), id);
-            }
+        Ticket t = Ticket.findById(id);
+        if (t == null) {
+            throw new ApiException(404, "NOT_FOUND", "ticket not found: " + id);
+        }
+        if (body.containsKey("status")) {
+            t.status = str(body, "status");
+        }
+        if (body.containsKey("category")) {
+            t.category = str(body, "category");
+        }
+        if (body.containsKey("subcategory")) {
+            t.subcategory = str(body, "subcategory");
+        }
+        if (body.containsKey("priorityScore")) {
+            t.priorityScore = num(body, "priorityScore");
+        }
+        if (body.containsKey("priorityLabel")) {
+            t.priorityLabel = str(body, "priorityLabel");
+        }
+        if (body.containsKey("assignedTo")) {
+            t.assignedTo = str(body, "assignedTo");
+        }
+        if (body.containsKey("resolution")) {
+            t.resolution = str(body, "resolution");
+        }
+        if (body.containsKey("slaDueAt")) {
+            t.slaDueAt = str(body, "slaDueAt");
         }
         cache.invalidate(id);
-        return getById(id).orElseThrow();
+        // Force the flush (and the @PreUpdate updated_at refresh) before we read
+        // the entity back into the response map.
+        Panache.getEntityManager().flush();
+        return t.toMap();
     }
 
     /** Perform a status transition with mandatory-note enforcement. */
+    @Transactional
     public Map<String, Object> transition(String id, Map<String, Object> body) {
-        Map<String, Object> ticket = getById(id)
-                .orElseThrow(() -> new ApiException(404, "NOT_FOUND", "ticket not found: " + id));
+        Ticket t = Ticket.findById(id);
+        if (t == null) {
+            throw new ApiException(404, "NOT_FOUND", "ticket not found: " + id);
+        }
 
-        String fromStatus = strOr(body, "fromStatus", String.valueOf(ticket.get("status")));
+        String fromStatus = strOr(body, "fromStatus", t.status);
         String toStatus = str(body, "toStatus");
         if (toStatus == null) {
             throw new ApiException(400, "TO_STATUS_REQUIRED", "toStatus is required");
@@ -161,73 +189,80 @@ public class TicketService {
             }
         }
 
-        String tenantId = String.valueOf(ticket.get("tenant_id"));
-
         // Record the mandatory note (when supplied with an agent).
         if (noteContent != null && !noteContent.isBlank() && agentId != null) {
-            db.update("""
-                    INSERT INTO ticket_notes
-                      (id, tenant_id, ticket_id, agent_id, content, is_mandatory, transition_from, transition_to)
-                    VALUES (?,?,?,?,?,1,?,?)
-                    """,
-                    UUID.randomUUID().toString(), tenantId, id, agentId, noteContent, fromStatus, toStatus);
+            TicketNote note = new TicketNote();
+            note.id = UUID.randomUUID().toString();
+            note.tenantId = t.tenantId;
+            note.ticketId = t.id;
+            note.agentId = agentId;
+            note.content = noteContent;
+            note.isMandatory = 1;
+            note.transitionFrom = fromStatus;
+            note.transitionTo = toStatus;
+            note.persist();
         }
 
         // Apply the status change and side effects.
-        db.update("UPDATE tickets SET status = ?, updated_at = datetime('now') WHERE id = ?", toStatus, id);
+        t.status = toStatus;
         if ("resolved".equals(toStatus)) {
-            db.update("UPDATE tickets SET resolved_at = datetime('now') WHERE id = ?", id);
+            t.resolvedAt = SqliteTime.now();
         } else if ("closed".equals(toStatus)) {
-            db.update("UPDATE tickets SET closed_at = datetime('now') WHERE id = ?", id);
+            t.closedAt = SqliteTime.now();
         } else if ("reopened".equals(toStatus)) {
             // Clear resolution, bump counter, record who reopened — assignee preserved.
-            db.update("""
-                    UPDATE tickets
-                       SET resolution = NULL,
-                           resolved_at = NULL,
-                           closed_at = NULL,
-                           reopened_count = reopened_count + 1,
-                           reopened_by = ?
-                     WHERE id = ?
-                    """, agentId, id);
+            t.resolution = null;
+            t.resolvedAt = null;
+            t.closedAt = null;
+            t.reopenedCount = (t.reopenedCount == null ? 0 : t.reopenedCount) + 1;
+            t.reopenedBy = agentId;
         }
 
-        event(tenantId, id, "status." + toStatus, agentId == null ? "system" : "agent", agentId);
+        recordEvent(t.tenantId, t.id, "status." + toStatus, agentId == null ? "system" : "agent", agentId);
         cache.invalidate(id);
+        Panache.getEntityManager().flush();
 
-        Map<String, Object> updated = getById(id).orElseThrow();
-        Map<String, Object> result = new java.util.LinkedHashMap<>();
+        Map<String, Object> result = new LinkedHashMap<>();
         result.put("status", toStatus);
-        result.put("resolvedAt", updated.get("resolved_at"));
+        result.put("resolvedAt", t.resolvedAt);
         return result;
     }
 
+    @Transactional
     public Map<String, Object> addNote(String id, Map<String, Object> body) {
-        Map<String, Object> ticket = getById(id)
-                .orElseThrow(() -> new ApiException(404, "NOT_FOUND", "ticket not found: " + id));
+        Ticket t = Ticket.findById(id);
+        if (t == null) {
+            throw new ApiException(404, "NOT_FOUND", "ticket not found: " + id);
+        }
         String agentId = str(body, "agentId");
         String content = str(body, "content");
         if (content == null || content.trim().isEmpty()) {
             throw new ApiException(422, "NOTE_EMPTY", "Note content is required");
         }
-        String noteId = UUID.randomUUID().toString();
-        db.update("""
-                INSERT INTO ticket_notes (id, tenant_id, ticket_id, agent_id, content, is_mandatory)
-                VALUES (?,?,?,?,?,0)
-                """, noteId, ticket.get("tenant_id"), id, agentId, content);
-        return db.queryOne("SELECT * FROM ticket_notes WHERE id = ?", noteId).orElseThrow();
+        TicketNote note = new TicketNote();
+        note.id = UUID.randomUUID().toString();
+        note.tenantId = t.tenantId;
+        note.ticketId = id;
+        note.agentId = agentId;
+        note.content = content;
+        note.isMandatory = 0;
+        note.persistAndFlush();
+        return note.toMap();
     }
 
     public List<Map<String, Object>> messages(String id) {
-        return db.query("SELECT * FROM ticket_messages WHERE ticket_id = ? ORDER BY created_at", id);
+        return TicketMessage.<TicketMessage>find("ticketId", Sort.by("createdAt"), id)
+                .list().stream().map(TicketMessage::toMap).toList();
     }
 
     public List<Map<String, Object>> notes(String id) {
-        return db.query("SELECT * FROM ticket_notes WHERE ticket_id = ? ORDER BY created_at", id);
+        return TicketNote.<TicketNote>find("ticketId", Sort.by("createdAt"), id)
+                .list().stream().map(TicketNote::toMap).toList();
     }
 
     public List<Map<String, Object>> events(String id) {
-        return db.query("SELECT * FROM ticket_events WHERE ticket_id = ? ORDER BY created_at", id);
+        return TicketEvent.<TicketEvent>find("ticketId", Sort.by("createdAt"), id)
+                .list().stream().map(TicketEvent::toMap).toList();
     }
 
     /**
@@ -236,7 +271,9 @@ public class TicketService {
      * documented "AI unavailable" fallback.
      */
     public Map<String, Object> resolutionSummary(String id) {
-        getById(id).orElseThrow(() -> new ApiException(404, "NOT_FOUND", "ticket not found: " + id));
+        if (Ticket.findById(id) == null) {
+            throw new ApiException(404, "NOT_FOUND", "ticket not found: " + id);
+        }
         throw new ApiException(503, "AI_UNAVAILABLE",
                 "AI summary unavailable. Please write resolution manually.");
     }
@@ -244,18 +281,23 @@ public class TicketService {
     // ---- helpers ---------------------------------------------------------
 
     private String nextTicketNumber(String tenantId) {
-        Object max = db.scalar(
-                "SELECT MAX(CAST(SUBSTR(ticket_number, 5) AS INTEGER)) FROM tickets WHERE tenant_id = ?",
-                tenantId);
+        Object max = Panache.getEntityManager()
+                .createNativeQuery("SELECT MAX(CAST(SUBSTR(ticket_number, 5) AS INTEGER)) FROM tickets WHERE tenant_id = ?1")
+                .setParameter(1, tenantId)
+                .getSingleResult();
         int next = (max == null ? 0 : ((Number) max).intValue()) + 1;
         return String.format("TKT-%05d", next);
     }
 
-    private void event(String tenantId, String ticketId, String type, String actorType, String actorId) {
-        db.update("""
-                INSERT INTO ticket_events (id, tenant_id, ticket_id, event_type, actor_type, actor_id)
-                VALUES (?,?,?,?,?,?)
-                """, UUID.randomUUID().toString(), tenantId, ticketId, type, actorType, actorId);
+    private void recordEvent(String tenantId, String ticketId, String type, String actorType, String actorId) {
+        TicketEvent event = new TicketEvent();
+        event.id = UUID.randomUUID().toString();
+        event.tenantId = tenantId;
+        event.ticketId = ticketId;
+        event.eventType = type;
+        event.actorType = actorType;
+        event.actorId = actorId;
+        event.persist();
     }
 
     private static String str(Map<String, Object> body, String key) {

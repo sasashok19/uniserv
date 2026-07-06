@@ -292,7 +292,43 @@ HTTP/1.1 503 Service Unavailable
 
 ## Phase 1 Implementation Notes (deviations & corrections)
 - **Port 8090** (doc says 8081) — consistent across the stack.
-- Data access is **plain JDBC over the Agroal `DataSource`** (not Hibernate Panache) for predictable SQLite behaviour. `db-kind=sqlite` via the Quarkiverse `quarkus-jdbc-sqlite` extension (the spec's `db-kind=other` + `org.sqlite.JDBC` does not exist as a Quarkus combo).
+- Data access is **Hibernate ORM with Panache** (active-record entities under
+  `com.uniserve.dbwriter.model`), matching the doc's "Quarkus + Hibernate Panache +
+  SQLite" design. `db-kind=sqlite` via the Quarkiverse `quarkus-jdbc-sqlite` extension
+  (the spec's `db-kind=other` + `org.sqlite.JDBC` does not exist as a Quarkus combo).
+  `quarkus.hibernate-orm.database.generation=none` — Flyway (not Hibernate) owns the
+  schema/DDL; entities map onto the Flyway-created tables.
+  - An earlier iteration used plain JDBC over the Agroal `DataSource` directly; it has
+    been replaced by this Panache layer. Reporting/meta queries with no natural entity
+    (analytics GROUP BYs in `AnalyticsResource`, `flyway_schema_history`/`sqlite_master`
+    lookups in `SchemaResource`) run as native SQL over the injected `EntityManager` —
+    idiomatic even in a Panache-heavy app, since these aren't single-entity CRUD reads.
+  - Timestamp columns (`created_at`, `updated_at`, `resolved_at`, `closed_at`,
+    `timeout_at`) are plain `String` fields formatted to match SQLite's
+    `datetime('now')` output (`yyyy-MM-dd HH:mm:ss`, UTC) via a small `SqliteTime`
+    helper, set through `@PrePersist`/`@PreUpdate` lifecycle callbacks — Hibernate's
+    INSERT/UPDATE statements list every mapped column, so relying on the schema's
+    SQL-level `DEFAULT`/manual `datetime('now')` (as the JDBC version did) would send
+    NULLs instead.
+  - REST responses still serialise entities to `snake_case`-keyed maps (via a
+    `toMap()` method per entity) — matching the original wire shape exactly — because
+    api-gateway already parses these responses with those exact keys
+    (`tenant_id`, `ticket_number`, `is_active`, etc.); changing the shape would have
+    required touching api-gateway too, which is out of scope for this pass.
+  - `is_active` / `is_anonymous` / `is_duplicate` / `is_ai_generated` / `is_mandatory`
+    are mapped as `Integer` (0/1), not `boolean` — again to preserve the exact JSON
+    wire format (`1`/`0`) that api-gateway's helpers already parse.
+  - Writes that mutate an entity and immediately return it (`update`, `transition`,
+    tenant config update) call `Panache.getEntityManager().flush()` before building the
+    response map, so the `@PreUpdate`-refreshed `updated_at` (and any other
+    flush-triggered state) is visible in the same response rather than the pre-flush
+    in-memory value.
 - `X-Internal-Key` is enforced **only when `DB_WRITER_INTERNAL_API_KEY` is set** (dev no-op).
 - `generate-resolution-summary` returns **503 AI_UNAVAILABLE** in Phase 1 (AI summariser not wired to db-writer yet).
 - Analytics: `volume` (04) + `sla`/`priority` (13) implemented; per-agent analytics deferred.
+- Re-verified against a **freshly migrated + seeded** database (Flyway V1-V3 on an
+  empty volume): ticket creation (`TKT-00001`, `TKT-00002`, ...), cache MISS→HIT,
+  valid/short-note transitions (200 / 422), `closed→reopened` (resolution cleared,
+  assignee preserved), concurrent GETs during a write (SQLite WAL), notes/events/
+  messages sub-resources, identity create/find, agent create, and schema
+  version/tables all pass against the real Panache-backed database.

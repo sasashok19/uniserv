@@ -1,8 +1,9 @@
 package com.uniserve.dbwriter.tenants;
 
 import com.uniserve.dbwriter.common.ApiException;
-import com.uniserve.dbwriter.db.Db;
-import jakarta.inject.Inject;
+import com.uniserve.dbwriter.model.Tenant;
+import io.quarkus.hibernate.orm.panache.Panache;
+import jakarta.transaction.Transactional;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.PUT;
@@ -18,27 +19,31 @@ import java.util.Map;
 @Produces(MediaType.APPLICATION_JSON)
 public class TenantResource {
 
-    @Inject
-    Db db;
-
     @GET
     @Path("/{id}")
     public Map<String, Object> get(@PathParam("id") String id) {
-        return db.queryOne("SELECT * FROM tenants WHERE id = ?", id)
-                .orElseThrow(() -> new ApiException(404, "NOT_FOUND", "tenant not found: " + id));
+        Tenant t = Tenant.findById(id);
+        if (t == null) {
+            throw new ApiException(404, "NOT_FOUND", "tenant not found: " + id);
+        }
+        return t.toMap();
     }
 
     @PUT
     @Path("/{id}/config")
     @Consumes(MediaType.APPLICATION_JSON)
+    @Transactional
     public Map<String, Object> updateConfig(@PathParam("id") String id, Map<String, Object> body) {
-        db.queryOne("SELECT id FROM tenants WHERE id = ?", id)
-                .orElseThrow(() -> new ApiException(404, "NOT_FOUND", "tenant not found: " + id));
+        Tenant t = Tenant.findById(id);
+        if (t == null) {
+            throw new ApiException(404, "NOT_FOUND", "tenant not found: " + id);
+        }
         Object configJson = body.get("configJson");
         if (configJson == null) {
             throw new ApiException(400, "CONFIG_REQUIRED", "configJson is required");
         }
-        db.update("UPDATE tenants SET config_json = ? WHERE id = ?", String.valueOf(configJson), id);
-        return db.queryOne("SELECT * FROM tenants WHERE id = ?", id).orElseThrow();
+        t.configJson = String.valueOf(configJson);
+        Panache.getEntityManager().flush();
+        return t.toMap();
     }
 }

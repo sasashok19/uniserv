@@ -274,3 +274,12 @@ INSERT INTO agents(id, tenant_id, name, email, password_hash, role) VALUES
 - `schema/version` reports the real latest migration version (**"3"**, i.e. V1+V2+V3); the doc's `"1"` predates the V2/V3 split. `appliedMigrations:3` matches.
 - The dev seed **omits the 25 demo tickets** so the first created ticket per tenant is deterministically `TKT-00001` (matches the 04 stub). Seeded agents carry placeholder `password_hash` values that the api-gateway **reseeds to real bcrypt hashes on dev startup** (Feature 11) so login works.
 - Flyway runs with `migrate-at-start=true` + `baseline-on-migrate=true`.
+- Flyway remains the **single source of schema truth**: the 8 tables (+ indexes) are
+  created purely by `V1__initial_schema.sql`/`V2__add_indexes.sql`, never by Hibernate.
+  db-writer's Java layer maps Hibernate ORM Panache entities onto these tables
+  (`quarkus.hibernate-orm.database.generation=none`, so Hibernate never generates or
+  validates DDL against them) — the schema itself is unchanged from what's documented
+  here; only the *access layer* moved from plain JDBC to Panache. Re-verified on a
+  fresh volume: Flyway applies V1→V2→V3 cleanly, `schema/version` and `schema/tables`
+  report correctly, and all 5 seeded identity profiles / 3 seeded agents / 1 pending
+  entry are readable through the new entity layer.

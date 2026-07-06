@@ -202,6 +202,28 @@ confirmed build error**). So the fixes are written but **not yet proven** to bui
 
 ## 9. Update Log
 
+### 2026-07-06 — db-writer: plain JDBC → Hibernate ORM with Panache
+Scoped rewrite of the db-writer data-access layer only (no other service touched).
+- Added 8 Panache active-record entities under `com.uniserve.dbwriter.model`
+  (`Tenant`, `Agent`, `IdentityProfile`, `Ticket`, `TicketMessage`, `TicketNote`,
+  `TicketEvent`, `IdentityPendingQueue`), one-to-one with the Flyway-owned schema
+  (`quarkus.hibernate-orm.database.generation=none` unchanged — Flyway still the only
+  schema authority). Added `SqliteTime` (formats timestamps to match SQLite's
+  `datetime('now')`, set via `@PrePersist`/`@PreUpdate`).
+- Rewrote `TicketService`, `IdentityService`, `AgentService`, `TenantResource` to use
+  Panache finders/active-record methods instead of the raw `Db` JDBC bean; deleted
+  `Db.java`. `AnalyticsResource`/`SchemaResource` (GROUP BY reporting + Flyway/SQLite
+  metadata queries — no natural entity) now run native SQL over an injected
+  `EntityManager` instead of the JDBC bean.
+- REST responses still serialise to the exact `snake_case` wire shape the old JDBC
+  version produced (via a `toMap()` per entity) so api-gateway needed zero changes.
+- **Verified end-to-end on a freshly migrated + reseeded volume:** every 04 test stub
+  (create → `TKT-00001`, cache MISS→HIT, valid/short-note transitions, `sla`/`volume`
+  analytics, `generate-resolution-summary` → 503) plus the "Testing" bullets
+  (`closed→reopened` clears resolution/keeps assignee, concurrent GETs during a write)
+  and the 05 schema endpoints (`version`/`tables`) all pass. `mvn test`
+  (`HealthResourceTest`, full Quarkus boot) — 2 passed.
+
 ### 2026-07-04 — Features 13/14/16 (Analytics, Notifications, Deployment); 15 deferred
 - **13 Analytics (db-writer):** `/api/v1/db/analytics/volume` (now emits both `day` and
   `date` + `byChannel`), `/sla` (met/breached/total/slaMetPercent), `/priority` (label
