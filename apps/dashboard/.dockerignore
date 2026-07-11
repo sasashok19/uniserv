@@ -1,6 +1,9 @@
-node_modules
-.next
-.git
-.env
+node_modules/
+.next/
+.git/
+**/*.md
+**/*.test.*
+coverage/
 npm-debug.log
-README.md
+.env*
+!.env.example

@@ -1,8 +1,6 @@
 target/
+.mvn/
+!.mvn/wrapper/maven-wrapper.jar
+**/*.md
+**/*.txt
 .git/
-.idea/
-*.iml
-.env
-*.db
-*.db-*
-README.md

@@ -6,7 +6,7 @@
 FROM node:20-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm install --no-audit --no-fund
+RUN npm ci --no-audit --no-fund
 
 # ---- build ----
 FROM node:20-alpine AS build
@@ -28,4 +28,5 @@ COPY --from=build /app/.next/static ./.next/static
 EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
+USER node
 CMD ["node", "server.js"]

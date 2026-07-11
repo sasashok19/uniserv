@@ -1,7 +1,11 @@
 __pycache__/
 *.pyc
+*.pyo
 .venv/
 venv/
 .env
 .pytest_cache/
-README.md
+*.egg-info/
+.git/
+**/*.md
+tests/

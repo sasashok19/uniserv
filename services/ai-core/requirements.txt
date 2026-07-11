@@ -8,9 +8,6 @@ uvicorn[standard]==0.32.1
 pydantic==2.10.3
 pydantic-settings==2.7.0
 
-# LLM orchestration (LLM gateway wired in 06_AI_CONVERSATION)
-langchain==0.3.12
-
 # OpenAI Assistants API (Feature 06 conversation agent)
 openai==2.44.0
 
