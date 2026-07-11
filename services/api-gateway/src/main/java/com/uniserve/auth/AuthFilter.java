@@ -21,6 +21,10 @@ import java.util.Map;
 @Provider
 public class AuthFilter implements ContainerRequestFilter {
 
+    // MIGRATION NOTE: If @RolesAllowed annotations are needed in future,
+    // migrate to quarkus-security-jwt with scoped path matching to avoid
+    // smallrye-jwt Bearer token interception conflict.
+
     @Inject
     JwtService jwt;
 

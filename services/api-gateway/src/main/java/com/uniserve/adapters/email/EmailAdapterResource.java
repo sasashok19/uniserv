@@ -1,5 +1,10 @@
 package com.uniserve.adapters.email;
 
+// Email ingestion is webhook-only.
+// Make.com watches Gmail/Outlook and POSTs to POST /api/v1/webhooks/email.
+// IMAP polling was removed — do not re-add it.
+// PHASE_2: WhatsApp webhook follows the same pattern in 02b_ADAPTER_WHATSAPP.md
+
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
@@ -11,11 +16,8 @@ import jakarta.ws.rs.core.Response;
 import java.util.Map;
 
 /**
- * Dev/ops endpoints for the email adapter (Feature 02a test stubs):
- * <ul>
- *   <li>{@code POST /api/v1/internal/adapters/email/poll} — trigger a manual IMAP poll.</li>
- *   <li>{@code POST /api/v1/internal/adapters/email/test-send} — send a test outbound email.</li>
- * </ul>
+ * Dev/ops endpoint for the email adapter (Feature 02a test stubs):
+ * {@code POST /api/v1/internal/adapters/email/test-send} — send a test outbound email.
  *
  * <p>PHASE_1: unauthenticated (see 11_MULTI_TENANCY).
  */
@@ -26,16 +28,6 @@ public class EmailAdapterResource {
     EmailAdapter emailAdapter;
 
     public record TestSendRequest(String to, String subject, String body) {
-    }
-
-    @POST
-    @Path("/poll")
-    @Produces(MediaType.APPLICATION_JSON)
-    public Response poll() {
-        EmailAdapter.PollResult result = emailAdapter.pollOnce();
-        return Response.ok(Map.of(
-                "messagesProcessed", result.messagesProcessed(),
-                "errors", result.errors())).build();
     }
 
     @POST
