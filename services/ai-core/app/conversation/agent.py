@@ -141,6 +141,14 @@ class TestEventRequest(BaseModel):
     # dispatcher.py before process() is called for the live pipeline; absent
     # for direct test-endpoint calls, which skip stub tracking entirely.
     ticketId: Optional[str] = None
+    # Human-facing ticket number for the same stub (e.g. "TKT-00042") — set
+    # alongside ticketId so outbound replies can embed it in the subject
+    # line (Feature 15); citizens replying to that subject let
+    # ensure_ticket_stub route the reply straight back to this ticket.
+    ticketNumber: Optional[str] = None
+    # Email subject line of the inbound message, when the channel has one
+    # (Feature 15) — used to detect a ticket number the citizen replied to.
+    subject: Optional[str] = None
 
 
 class ConversationAgent:
@@ -456,6 +464,7 @@ class ConversationAgent:
                 "messageText": text,
                 "isIdentityRequest": is_identity_request,
                 "isAnonymousAck": req.declaredAnonymous,
+                "ticketNumber": req.ticketNumber,
             }, trace_id=req.traceId))
 
     async def _load_state(self, thread_key: str) -> Optional[dict]:

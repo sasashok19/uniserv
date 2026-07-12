@@ -55,7 +55,27 @@ async def create_ticket_from_complaint(
     category = classification.get("category") or category_hint
     sentiment = classification.get("sentimentScore", 0.0)
 
-    if master_id:
+    existing_stub: Optional[dict] = None
+    if stub_ticket_id:
+        # Feature 12/15: this thread already has its own ticket — resolved
+        # either by thread tracking or (for email) a subject-line ticket
+        # reference (see app/tickets/intake.py). Whether THIS is a
+        # continuation or the ticket's first-ever complaint.ready is decided
+        # by the ticket's own state (does it already have a category?), not
+        # by matching against OTHER tickets — category-based cross-ticket
+        # dedup was removed because it risked folding an unrelated NEW
+        # complaint from the same citizen into an old open ticket just
+        # because it happened to classify into the same category.
+        existing_stub = await db.get_ticket(stub_ticket_id, trace_id=trace_id)
+        if existing_stub.get("category"):
+            dedup_result = {"action": "append_to_existing", "existingTicketId": stub_ticket_id,
+                            "confidence": "high", "reason": "continuing this ticket's own thread"}
+        else:
+            dedup_result = {"action": "new_ticket", "confidence": "high", "reason": "first complaint on this stub"}
+    elif master_id:
+        # No stub for this thread (only possible for callers that bypass the
+        # live pipeline, e.g. direct/test calls) — fall back to the coarser
+        # same-identity/same-category heuristic.
         dedup_result = await check_duplicate(db, tenant_id, master_id, category, trace_id=trace_id)
     else:
         # No resolved identity (e.g. anonymous resolution failed upstream) —
@@ -82,7 +102,8 @@ async def create_ticket_from_complaint(
                 "parentTicketId": existing_ticket_id,
                 "status": "closed",
             }, trace_id=trace_id)
-        existing_ticket = await db.get_ticket(existing_ticket_id, trace_id=trace_id)
+        existing_ticket = existing_stub if existing_stub is not None and existing_stub.get("id") == existing_ticket_id \
+            else await db.get_ticket(existing_ticket_id, trace_id=trace_id)
         logger.info("complaint appended to existing ticket traceId=%s ticketId=%s category=%s",
                     trace_id, existing_ticket_id, category)
         return {
@@ -96,6 +117,7 @@ async def create_ticket_from_complaint(
     priority = score(ScoreRequest(
         tenantId=tenant_id, sentimentScore=sentiment, categoryLabel=category, channel=channel,
     ))
+    intake = extracted.get("intake") or {}
     ticket_fields = {
         "identityId": master_id,
         "identityStatus": identity_status,
@@ -106,6 +128,8 @@ async def create_ticket_from_complaint(
         "priorityLabel": priority["label"],
         "sentimentScore": sentiment,
     }
+    if intake.get("serviceId"):
+        ticket_fields["serviceId"] = intake["serviceId"]
 
     if stub_ticket_id:
         ticket = await db.update_ticket(stub_ticket_id, ticket_fields, trace_id=trace_id)

@@ -145,6 +145,16 @@ public class IdentityService {
                 .list().stream().map(IdentityProfile::toMap).toList();
     }
 
+    /** Typeahead for the analytics "by customer" filter (Feature 15) — partial match on name/email/phone. */
+    public List<Map<String, Object>> search(String tenantId, String q) {
+        String like = "%" + q + "%";
+        return IdentityProfile.<IdentityProfile>find(
+                        "tenantId = ?1 and mergedInto is null and "
+                                + "(name like ?2 or email like ?2 or phone like ?2)",
+                        tenantId, like)
+                .page(0, 10).list().stream().map(IdentityProfile::toMap).toList();
+    }
+
     /** Enqueue a pending-identity entry (email flow, Feature 03). */
     @Transactional
     public Map<String, Object> enqueuePending(Map<String, Object> body) {

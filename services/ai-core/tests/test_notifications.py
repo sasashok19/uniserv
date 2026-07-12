@@ -41,6 +41,23 @@ def test_deliver_reply_sends_email_for_email_channel():
     assert kwargs["headers"]["X-Trace-Id"] == "trace-1"
 
 
+def test_deliver_reply_embeds_ticket_number_in_subject_and_adds_do_not_remove_note():
+    ctx, client = _mock_async_client({"sent": True})
+    payload = {
+        "channel": "email",
+        "channelIdentityValue": "citizen@example.com",
+        "messageText": "Please share your name and mobile number.",
+        "isIdentityRequest": True,
+        "ticketNumber": "TKT-00050",
+    }
+    with patch("app.notifications.sender.httpx.AsyncClient", return_value=ctx):
+        _run(deliver_reply(payload, trace_id="trace-ticket"))
+
+    kwargs = client.post.await_args.kwargs
+    assert "TKT-00050" in kwargs["json"]["subject"]
+    assert "do not remove" in kwargs["json"]["body"].lower()
+
+
 def test_deliver_reply_skips_whatsapp_no_outbound_send():
     payload = {
         "channel": "whatsapp",

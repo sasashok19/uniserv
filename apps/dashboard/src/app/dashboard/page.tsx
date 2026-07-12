@@ -3,6 +3,10 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import AnalyticsPanel from "@/components/analytics/AnalyticsPanel";
+import TeamPanel from "@/components/admin/TeamPanel";
+import { priorityBadgeClass, statusBadgeClass } from "@/lib/badges";
+
 type Ticket = {
   id: string;
   ticket_number: string;
@@ -11,6 +15,7 @@ type Ticket = {
   priority_label: string | null;
   channel_origin: string;
   assigned_to: string | null;
+  assigned_to_name: string | null;
 };
 
 function readCookie(name: string): string {
@@ -36,17 +41,23 @@ export default function DashboardPage() {
   ];
 
   return (
-    <main className="mx-auto max-w-4xl p-6">
+    <main className="mx-auto max-w-4xl bg-slate-50 p-6">
       <div className="mb-2 flex items-center justify-between">
-        <h1 className="text-xl font-bold">UniServe</h1>
-        <span className="rounded-full border px-3 py-1 text-xs uppercase">{role || "guest"}</span>
+        <h1 className="text-xl font-bold text-indigo-700">UniServe</h1>
+        <span className="rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs uppercase text-indigo-700">
+          {role || "guest"}
+        </span>
       </div>
-      <nav className="mb-6 flex gap-2 border-b">
+      <nav className="mb-6 flex gap-2 rounded-lg bg-white p-1 shadow-sm">
         {tabs.map((t) => (
           <button
             key={t.key}
             onClick={() => setTab(t.key)}
-            className={`px-3 py-2 text-sm ${tab === t.key ? "border-b-2 border-black font-semibold" : "text-muted-foreground"}`}
+            className={`rounded-md px-3 py-2 text-sm transition-colors ${
+              tab === t.key
+                ? "bg-indigo-600 font-semibold text-white"
+                : "text-slate-600 hover:bg-slate-100"
+            }`}
           >
             {t.label}
           </button>
@@ -54,7 +65,7 @@ export default function DashboardPage() {
       </nav>
 
       {tab === "queue" && <TicketQueue role={role} />}
-      {tab === "analytics" && <Analytics />}
+      {tab === "analytics" && <AnalyticsPanel canViewAll={role === "admin" || role === "lead"} />}
       {tab === "admin" && role === "admin" && <Administration />}
     </main>
   );
@@ -76,89 +87,71 @@ function TicketQueue({ role }: { role: string }) {
   if (tickets.length === 0) return <p className="text-sm">No tickets.</p>;
 
   return (
-    <table className="w-full text-left text-sm">
-      <thead className="text-muted-foreground">
-        <tr>
-          <th className="p-2">Ticket</th>
-          <th className="p-2">Status</th>
-          <th className="p-2">Priority</th>
-          <th className="p-2">Category</th>
-          <th className="p-2">Channel</th>
-        </tr>
-      </thead>
-      <tbody>
-        {tickets.map((t) => (
-          <tr key={t.id} className="border-t hover:bg-muted/30">
-            <td className="p-2 font-medium">
-              <Link href={`/dashboard/tickets/${t.id}`} className="hover:underline">
-                {t.ticket_number}
-              </Link>
-            </td>
-            <td className="p-2">{t.status}</td>
-            <td className="p-2">{t.priority_label ?? "—"}</td>
-            <td className="p-2">{t.category ?? "—"}</td>
-            <td className="p-2">{t.channel_origin}</td>
+    <div className="overflow-hidden rounded-lg border bg-white shadow-sm">
+      <table className="w-full text-left text-sm">
+        <thead className="bg-slate-50 text-muted-foreground">
+          <tr>
+            <th className="p-2">Ticket</th>
+            <th className="p-2">Status</th>
+            <th className="p-2">Priority</th>
+            <th className="p-2">Category</th>
+            <th className="p-2">Channel</th>
+            <th className="p-2">Assigned to</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
-
-function Analytics() {
-  return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-      {["Ticket volume", "SLA performance", "Priority distribution", "Agent performance"].map(
-        (title) => (
-          <div key={title} className="rounded-lg border p-4">
-            <h3 className="text-sm font-semibold">{title}</h3>
-            <p className="mt-2 text-xs text-muted-foreground">
-              Chart renders from analytics API (Phase 1: data available via db-writer).
-            </p>
-          </div>
-        ),
-      )}
+        </thead>
+        <tbody>
+          {tickets.map((t) => (
+            <tr key={t.id} className="border-t hover:bg-indigo-50/40">
+              <td className="p-2 font-medium">
+                <Link href={`/dashboard/tickets/${t.id}`} className="text-indigo-700 hover:underline">
+                  {t.ticket_number}
+                </Link>
+              </td>
+              <td className="p-2">
+                <span className={statusBadgeClass(t.status)}>{t.status.replace("_", " ")}</span>
+              </td>
+              <td className="p-2">
+                {t.priority_label ? (
+                  <span className={priorityBadgeClass(t.priority_label)}>{t.priority_label}</span>
+                ) : (
+                  "—"
+                )}
+              </td>
+              <td className="p-2">{t.category ?? "—"}</td>
+              <td className="p-2 capitalize">{t.channel_origin}</td>
+              <td className="p-2">
+                {t.assigned_to_name ?? (
+                  <span className="text-muted-foreground">Unassigned</span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
 
 function Administration() {
-  const [msg, setMsg] = useState("");
-  const [form, setForm] = useState({ name: "", email: "", role: "agent", password: "" });
-
-  async function addAgent(e: React.FormEvent) {
-    e.preventDefault();
-    const resp = await fetch("/api/agents", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(form),
-    });
-    setMsg(resp.ok ? "Agent created." : "Failed to create agent.");
-  }
+  const [subTab, setSubTab] = useState<"team">("team");
+  const subTabs: { key: typeof subTab; label: string }[] = [{ key: "team", label: "Team" }];
 
   return (
-    <form onSubmit={addAgent} className="max-w-sm space-y-3">
-      <h3 className="text-sm font-semibold">Add agent</h3>
-      {(["name", "email", "password"] as const).map((f) => (
-        <input
-          key={f}
-          className="w-full rounded border p-2 text-sm"
-          placeholder={f}
-          value={form[f]}
-          onChange={(e) => setForm({ ...form, [f]: e.target.value })}
-        />
-      ))}
-      <select
-        className="w-full rounded border p-2 text-sm"
-        value={form.role}
-        onChange={(e) => setForm({ ...form, role: e.target.value })}
-      >
-        <option value="agent">agent</option>
-        <option value="lead">lead</option>
-        <option value="admin">admin</option>
-      </select>
-      <button className="rounded bg-black px-3 py-2 text-sm text-white">Create</button>
-      {msg && <p className="text-sm">{msg}</p>}
-    </form>
+    <div>
+      <nav className="mb-4 flex gap-2 border-b">
+        {subTabs.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setSubTab(t.key)}
+            className={`px-3 py-2 text-sm ${
+              subTab === t.key ? "border-b-2 border-indigo-600 font-semibold text-indigo-700" : "text-muted-foreground"
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </nav>
+      {subTab === "team" && <TeamPanel />}
+    </div>
   );
 }

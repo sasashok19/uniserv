@@ -62,6 +62,7 @@ public class TicketResource {
                                     @QueryParam("identityId") String identityId,
                                     @QueryParam("identityStatus") String identityStatus,
                                     @QueryParam("threadId") String threadId,
+                                    @QueryParam("ticketNumber") String ticketNumber,
                                     @QueryParam("includeArchived") @DefaultValue("false") boolean includeArchived,
                                     @QueryParam("page") @DefaultValue("1") int page,
                                     @QueryParam("pageSize") @DefaultValue("20") int pageSize) {
@@ -70,7 +71,7 @@ public class TicketResource {
         }
         int size = Math.min(Math.max(pageSize, 1), 100);
         List<Map<String, Object>> data = tickets.list(tenantId, status, assignedTo, channel, category, identityId,
-                identityStatus, threadId, includeArchived, page, size);
+                identityStatus, threadId, ticketNumber, includeArchived, page, size);
         return Map.of("data", data, "page", page, "pageSize", size, "total", data.size());
     }
 

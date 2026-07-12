@@ -4,6 +4,7 @@ import com.uniserve.adapters.email.EmailAdapter;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
+import jakarta.ws.rs.PATCH;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
@@ -76,7 +77,36 @@ public class TicketsResource {
         append(q, "pageSize", pageSize);
 
         List<Map<String, Object>> tickets = db.listTickets(q.toString());
+        Map<String, String> agentNames = agentDirectory();
+        for (Map<String, Object> t : tickets) {
+            String assignedAgentId = str(t, "assigned_to");
+            t.put("assigned_to_name", assignedAgentId == null ? null : agentNames.get(assignedAgentId));
+        }
         return Response.ok(Map.of("tickets", tickets, "total", tickets.size(), "page", 1)).build();
+    }
+
+    /** Lead/Admin only — reassign (or unassign, with a null/blank body value) a ticket. */
+    @PATCH
+    @Path("/{id}/assign")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response assign(@PathParam("id") String id, Map<String, Object> input) {
+        if (!user.can("ticket.assignee.edit")) {
+            return forbidden("INSUFFICIENT_ROLE", "Only leads and admins can assign tickets");
+        }
+        String assignedTo = input == null ? null : str(input, "assignedTo");
+        Map<String, Object> patch = new LinkedHashMap<>();
+        patch.put("assignedTo", (assignedTo == null || assignedTo.isBlank()) ? null : assignedTo);
+        DbWriterClient.ApiResult result = db.call("PATCH", "/api/v1/db/tickets/" + id, patch);
+        return Response.status(result.status()).entity(result.body()).build();
+    }
+
+    /** id -> name for every agent/lead/admin in the tenant, for the assign-to dropdown and queue display. */
+    private Map<String, String> agentDirectory() {
+        Map<String, String> names = new LinkedHashMap<>();
+        for (Map<String, Object> a : db.listAgents(user.tenantId())) {
+            names.put(str(a, "id"), str(a, "name"));
+        }
+        return names;
     }
 
     /** Admin-only: archive (soft-delete) unconfirmed tickets older than N days (default 60). */
@@ -128,6 +158,25 @@ public class TicketsResource {
                 }
             }
         }
+        String identityId = str(t, "identity_id");
+        String citizenName = null;
+        String citizenEmail = null;
+        String citizenPhone = null;
+        if (identityId != null) {
+            DbWriterClient.ApiResult identity = db.call("GET", "/api/v1/db/identities/" + identityId, null);
+            if (identity.status() < 400) {
+                citizenName = str(identity.body(), "name");
+                citizenEmail = str(identity.body(), "email");
+                citizenPhone = str(identity.body(), "phone");
+            }
+        }
+
+        String serviceId = str(t, "service_id");
+        if (serviceId == null && !messages.isEmpty()) {
+            Object firstContent = messages.get(0).get("content");
+            serviceId = extractServiceId(firstContent == null ? null : String.valueOf(firstContent));
+        }
+
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("id", t.get("id"));
         body.put("ticketNumber", t.get("ticket_number"));
@@ -135,9 +184,16 @@ public class TicketsResource {
         body.put("resolution", t.get("resolution"));
         body.put("category", t.get("category"));
         body.put("channelOrigin", t.get("channel_origin"));
-        body.put("identityId", t.get("identity_id"));
+        body.put("identityId", identityId);
+        body.put("citizenName", citizenName);
+        body.put("citizenEmail", citizenEmail);
+        body.put("citizenPhone", citizenPhone);
+        body.put("serviceId", serviceId);
         body.put("priorityLabel", t.get("priority_label"));
-        body.put("assignedTo", t.get("assigned_to"));
+        String assignedTo = str(t, "assigned_to");
+        body.put("assignedTo", assignedTo);
+        body.put("assignedToName", assignedTo == null ? null : agentDirectory().get(assignedTo));
+        body.put("canAssign", user.can("ticket.assignee.edit"));
         body.put("notes", notes);
         body.put("messages", messages);
         return Response.ok(body).build();
@@ -275,6 +331,19 @@ public class TicketsResource {
     }
 
     // ---- helpers ---------------------------------------------------------
+
+    private static final java.util.regex.Pattern SERVICE_ID_RE =
+            java.util.regex.Pattern.compile("Service/Customer ID:\\s*(.+)");
+
+    /** Fallback for tickets created before the {@code service_id} column existed
+     * (Feature 12/15) — the value was only ever embedded as text in the first message. */
+    private static String extractServiceId(String firstMessageContent) {
+        if (firstMessageContent == null) {
+            return null;
+        }
+        java.util.regex.Matcher m = SERVICE_ID_RE.matcher(firstMessageContent);
+        return m.find() ? m.group(1).trim() : null;
+    }
 
     private static String transitionAction(String toStatus) {
         return switch (toStatus == null ? "" : toStatus) {

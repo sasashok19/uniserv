@@ -162,6 +162,7 @@ public class EmailAdapter {
         String from = extractFrom(message);
         String rawText = extractText(message);
         String threadId = extractThreadId(message);
+        String subject = message.getSubject();
         String nowIso = Instant.now().toString();
         String sentAt = message.getSentDate() != null
                 ? message.getSentDate().toInstant().toString() : nowIso;
@@ -180,7 +181,8 @@ public class EmailAdapter {
                 threadId,           // inReplyTo == parent message id
                 sentAt,
                 nowIso,
-                UUID.randomUUID().toString());
+                UUID.randomUUID().toString(),
+                subject);
     }
 
     static String extractFrom(Message message) throws Exception {

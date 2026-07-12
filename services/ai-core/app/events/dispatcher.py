@@ -36,6 +36,7 @@ async def _handle_channel_message(tenant_id: str, event: dict) -> None:
         ),
         rawText=payload.get("rawText") or "",
         threadId=payload.get("threadId"),
+        subject=payload.get("subject"),
         traceId=trace_id,
     )
     thread_key = ConversationAgent._thread_key(req)
@@ -43,9 +44,13 @@ async def _handle_channel_message(tenant_id: str, event: dict) -> None:
         "channel.message.received received traceId=%s tenantId=%s channel=%s threadId=%s",
         trace_id, tenant_id, req.channel, thread_key,
     )
-    # Feature 12: a ticket exists from the very first message, not only once
-    # identity is confirmed — see app/tickets/intake.py.
-    req.ticketId = await ensure_ticket_stub(DbWriterClient(), tenant_id, thread_key, req.channel, trace_id=trace_id)
+    # Feature 12/15: a ticket exists from the very first message, not only
+    # once identity is confirmed — see app/tickets/intake.py. A subject-line
+    # ticket reference (email only) takes priority over thread matching.
+    stub = await ensure_ticket_stub(
+        DbWriterClient(), tenant_id, thread_key, req.channel, subject=req.subject, trace_id=trace_id)
+    req.ticketId = stub["id"]
+    req.ticketNumber = stub.get("ticketNumber")
     try:
         result = await ConversationAgent(tenant_id).process(req)
     except Exception:

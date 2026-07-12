@@ -68,9 +68,8 @@ public class AgentService {
         if (body.containsKey("role")) {
             a.role = str(body, "role");
         }
-        if (body.containsKey("email")) {
-            a.email = str(body, "email");
-        }
+        // email is the agent's immutable key — intentionally not settable via update().
+        // api-gateway's AgentAdminResource already rejects it; this is defense in depth.
         if (body.containsKey("isActive")) {
             a.isActive = boolInt(body.get("isActive"));
         }

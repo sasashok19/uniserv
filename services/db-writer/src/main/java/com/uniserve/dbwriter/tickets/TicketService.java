@@ -68,6 +68,7 @@ public class TicketService {
         t.threadId = str(body, "threadId");
         t.isDuplicate = intOr(body, "isDuplicate", 0);
         t.parentTicketId = str(body, "parentTicketId");
+        t.serviceId = str(body, "serviceId");
         t.slaDueAt = str(body, "slaDueAt");
         // Flush immediately so any CHECK-constraint violation (bad status/priority
         // label/etc.) surfaces here rather than being deferred to commit time.
@@ -98,8 +99,8 @@ public class TicketService {
 
     public List<Map<String, Object>> list(String tenantId, String status, String assignedTo,
                                           String channel, String category, String identityId,
-                                          String identityStatus, String threadId, boolean includeArchived,
-                                          int page, int pageSize) {
+                                          String identityStatus, String threadId, String ticketNumber,
+                                          boolean includeArchived, int page, int pageSize) {
         StringBuilder query = new StringBuilder("tenantId = :tenantId");
         Map<String, Object> params = new HashMap<>();
         params.put("tenantId", tenantId);
@@ -122,6 +123,10 @@ public class TicketService {
         if (threadId != null && !threadId.isBlank()) {
             query.append(" and threadId = :threadId");
             params.put("threadId", threadId);
+        }
+        if (ticketNumber != null && !ticketNumber.isBlank()) {
+            query.append(" and ticketNumber = :ticketNumber");
+            params.put("ticketNumber", ticketNumber);
         }
         if (channel != null && !channel.isBlank()) {
             query.append(" and channelOrigin = :channel");
@@ -188,6 +193,9 @@ public class TicketService {
         }
         if (body.containsKey("parentTicketId")) {
             t.parentTicketId = str(body, "parentTicketId");
+        }
+        if (body.containsKey("serviceId")) {
+            t.serviceId = str(body, "serviceId");
         }
         if (body.containsKey("archivedAt")) {
             t.archivedAt = str(body, "archivedAt");

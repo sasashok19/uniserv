@@ -24,6 +24,7 @@ resolution workflow and full audit trail.
 - [Data model](#data-model)
 - [Queue separation & ticket lifecycle](#queue-separation--ticket-lifecycle)
 - [Citizen-facing notifications](#citizen-facing-notifications)
+- [Subject-line ticket threading & dedup](#subject-line-ticket-threading--dedup)
 - [HTTP API reference](#http-api-reference)
 - [Environment variables](#environment-variables)
 - [Logging, log levels & transaction tracing](#logging-log-levels--transaction-tracing)
@@ -186,9 +187,11 @@ cd services/db-writer  && mvn quarkus:dev
 - **Adapters** (`com.uniserve.adapters.email`, `...whatsapp`) — turn a raw
   inbound message into the canonical `ChannelMessageReceived` event and
   publish it. Email polls IMAP on a schedule (`EmailAdapter.scheduledPoll`)
-  using the same Gmail App Password as outbound SMTP; WhatsApp is a
-  Meta Business webhook validated via HMAC-SHA256
-  (`WhatsAppSignatureValidator`).
+  using the same Gmail App Password as outbound SMTP, and now also carries
+  the message's `subject` line on the event (nullable — see
+  [Subject-line ticket threading & dedup](#subject-line-ticket-threading--dedup));
+  WhatsApp is a Meta Business webhook validated via HMAC-SHA256
+  (`WhatsAppSignatureValidator`) and has no subject concept.
 - **Auth** (`com.uniserve.auth`) — JWT issuance/refresh/logout, RBAC-scoped
   ticket/agent/tenant endpoints, and the public citizen status lookup
   (`PublicStatusResource`).
@@ -256,12 +259,14 @@ cd services/db-writer  && mvn quarkus:dev
   message — see
   [Queue separation & ticket lifecycle](#queue-separation--ticket-lifecycle).
 - `app/tickets/service.py` — consumes `complaint.ready` (a second background
-  consumer): runs the dedup check, scores priority, and either updates the
-  stub ticket already created for this thread in place, or appends the
-  message to a different existing open ticket it deduped against (in which
-  case the thread's own stub is linked as a duplicate rather than left
-  stranded pending forever). Falls back to creating a fresh ticket only for
-  callers that bypass the live pipeline (direct/test calls with no stub).
+  consumer): scores priority and updates the stub ticket already created
+  for this thread in place — either as that ticket's first-ever complaint
+  (sets category/priority/etc.) or as a continuation (just appends the
+  message), decided purely from the ticket's own state, never by comparing
+  against other tickets. Falls back to the coarser identity+category dedup
+  heuristic only for callers that bypass the live pipeline entirely (no
+  stub at all — direct/test calls). See
+  [Subject-line ticket threading & dedup](#subject-line-ticket-threading--dedup).
 - `app/classify`, `app/pii`, `app/priority`, `app/dedup` — classification,
   PII scrubbing, priority scoring, and cross-channel dedup; each is also
   exposed as a standalone internal HTTP endpoint for direct testing, and
@@ -277,16 +282,48 @@ cd services/db-writer  && mvn quarkus:dev
   links).
 - `src/app/login/page.tsx` — agent login.
 - `src/app/dashboard/page.tsx` — role-gated agent dashboard (Analytics /
-  Ticket Queue / Administration). Analytics is still a placeholder (no charts
-  wired yet); Ticket Queue rows link to the detail page below.
-- `src/app/dashboard/tickets/[id]/page.tsx` — ticket detail: full
-  conversation timeline (inbound citizen messages + outbound replies),
-  internal notes, a status-transition control (enforces the mandatory-note
-  rule), an "add note" form, and a "send update" form. Sending an update on
-  an email-origin ticket calls `POST /api/v1/tickets/{id}/reply`, which
-  records the outbound message and actually emails the citizen via
-  `EmailAdapter.sendReply` (WhatsApp-origin tickets record the message but
-  have no outbound send wired yet — Phase 2).
+  Ticket Queue / Administration). Ticket Queue rows link to the detail page
+  below; nav tabs and status/priority badges use a shared colour palette
+  (`src/lib/badges.ts`).
+- `src/components/analytics/AnalyticsPanel.tsx` — real charts (via
+  `recharts`): ticket volume (stacked bar by day/channel), SLA performance
+  (donut), priority distribution (horizontal bar), and agent performance
+  (bar, lead/admin only). Filter bar: time frame, agent (lead/admin can pick
+  any agent; a plain agent is locked to their own), customer (typeahead
+  search), priority, category — backed by `GET /api/v1/analytics/*`
+  (`AnalyticsResource.java`, api-gateway) proxying db-writer's extended
+  `AnalyticsResource.java`, which now accepts `agentId`/`identityId`/
+  `category`/`priorityLabel` filters on top of the existing tenant + rolling
+  `period` window, and excludes archived tickets.
+- `src/components/admin/TeamPanel.tsx` — Administration → Team sub-tab:
+  lists every agent/lead/admin in the tenant (`GET /api/v1/agents`) with
+  role/active-status badges; "Add new" reveals the create form (refreshes
+  the list on success); "Edit" opens a panel to change name/role/active and
+  optionally reset a password directly (no reset-link email flow) — email
+  is shown read-only and rejected server-side if sent in a PATCH
+  (`EMAIL_IMMUTABLE`, `AgentAdminResource.java`). Field-level validation
+  (name required, email format, 8+ char passwords, role enum, duplicate-email
+  check) runs both client-side and in `AgentAdminResource`/`AgentService`.
+- `src/app/dashboard/tickets/[id]/page.tsx` — ticket detail, reflowed into a
+  2-column layout: the left (main) column has citizen details
+  (Name/Email/Phone/Service-Customer-ID — read-only, sourced from the
+  ticket's identity + a `tickets.service_id` column), the status-transition
+  control, **Internal Notes**, and **Write an update**, in that order; the
+  right column is the conversation timeline in its own
+  `max-h-[80vh] overflow-y-auto` scroll region — so the tools an agent acts
+  on are visible without scrolling past the full message history first.
+  Service/Customer ID is populated by ai-core going forward
+  (`create_ticket_from_complaint`); tickets from before that column existed
+  fall back to a regex parse of the first message's text
+  (`TicketsResource.detail()`). Sending an update on an email-origin ticket
+  calls `POST /api/v1/tickets/{id}/reply`, which records the outbound
+  message and actually emails the citizen via `EmailAdapter.sendReply`
+  (WhatsApp-origin tickets record the message but have no outbound send
+  wired yet — Phase 2). "Assigned to" is an editable select (lead/admin
+  only, `PATCH /api/v1/tickets/{id}/assign`) resolved to the agent's name
+  via `TicketsResource.agentDirectory()`; agents see the name read-only.
+  The Ticket Queue table shows the same resolved name in its own
+  "Assigned to" column.
 - `src/app/status/[ref]/page.tsx` — public, unauthenticated, server-rendered
   citizen status lookup by `ANON-XXXX` ref or email; calls api-gateway's
   `GET /api/v1/public/status/{ref}` server-side.
@@ -338,7 +375,7 @@ See [05_TICKET_SCHEMA](docs/05_TICKET_SCHEMA.md) for full DDL.
 | `tenants` | `id`, `name`, `slug` (unique), `deployment_mode`, `llm_provider`, `config_json` |
 | `agents` | `id`, `tenant_id`, `name`, `email` (unique/tenant), `password_hash`, `role` (admin\|lead\|agent), `is_active` |
 | `identity_profiles` | `id`, `tenant_id`, `master_id` (unique), `name`/`email`/`phone`, `channel_ids_json`, `is_anonymous`, `anon_ref_id` (e.g. `ANON-7X3K`), `merged_into` |
-| `tickets` | `id`, `tenant_id`, `ticket_number` (e.g. `TKT-00142`), `identity_id`, `identity_status` (pending\|anonymous\|confirmed), `assigned_to`, `status` (open\|assigned\|in_progress\|resolved\|closed\|reopened), `category`/`subcategory`, `priority_score` (0–10), `priority_label`, `sentiment_score`, `channel_origin`, `thread_id`, `archived_at`, `is_duplicate`, `parent_ticket_id`, `sla_due_at` |
+| `tickets` | `id`, `tenant_id`, `ticket_number` (e.g. `TKT-00142`), `identity_id`, `identity_status` (pending\|anonymous\|confirmed), `assigned_to`, `status` (open\|assigned\|in_progress\|resolved\|closed\|reopened), `category`/`subcategory`, `priority_score` (0–10), `priority_label`, `sentiment_score`, `channel_origin`, `thread_id`, `archived_at`, `is_duplicate`, `parent_ticket_id`, `service_id`, `sla_due_at` |
 | `ticket_messages` | `channel`, `direction`, `author_type` (ai\|agent\|user\|system), `content`, `media_urls_json`, `is_ai_generated` |
 | `ticket_notes` | `content`, `is_mandatory`, `transition_from`/`transition_to` |
 | `ticket_events` | `event_type`, `actor_type`, `actor_id`, `meta_json` (full audit trail) |
@@ -449,7 +486,43 @@ All three require an email address on file (either the ticket's
 `channel_origin=email` with a resolved `identity_id`, or — for the
 identity-request message — the raw address the citizen wrote in from) and
 silently no-op otherwise (e.g. a WhatsApp-origin ticket, or a ticket that
-never got far enough to have an identity record at all).
+never got far enough to have an identity record at all). Every subject
+that carries a ticket number also gets `[Ticket TKT-XXXXX]` appended, and
+the body a "please don't remove the ticket number from the subject" note
+(`DO_NOT_REMOVE_NOTE`, `app/notifications/sender.py`) — see below for why
+that matters.
+
+## Subject-line ticket threading & dedup
+
+**The bug:** a citizen who emailed in a genuinely new, unrelated complaint
+could see it silently appended as a note onto an old *different* open
+ticket, just because it classified into the same category as that other
+ticket. The previous dedup (`app/dedup/service.py`'s `check_duplicate`)
+matched on identity + category + open-status alone — too coarse a signal
+once a citizen has more than one thing going on with the same category.
+
+**The fix:** every outbound email's subject now carries the ticket number
+(`[Ticket TKT-00042]`), and an inbound email's subject is checked for that
+same reference before anything else (`extract_ticket_number`,
+`app/tickets/intake.py`) — a citizen's reply always preserves the subject
+line (as "Re: ..."), so this is a precise, citizen-visible signal rather
+than an inferred one. `ensure_ticket_stub` resolves in this order:
+
+1. Subject references a real ticket number → that exact ticket, regardless of thread/category.
+2. Otherwise, the existing thread (`threadId`, via In-Reply-To/References headers).
+3. Otherwise, a brand-new stub ticket — this is what a genuinely new complaint gets.
+
+Because of this, `create_ticket_from_complaint` (`app/tickets/service.py`)
+no longer runs the identity+category dedup for any message that already
+has a stub (steps 1–2 above found something, or created a new one) — it
+only decides "continuation vs. this ticket's first message" from the
+ticket's *own* state (does it already have a category set?), never by
+comparing against *other* tickets. The old category-based heuristic
+remains only as a fallback for callers that bypass the live pipeline
+entirely (no stub at all — direct/test calls), where there's no
+thread/subject signal available. `EmailAdapter.parseMessage` (api-gateway)
+and the `ChannelMessageReceived` event both carry this subject line
+end-to-end (`subject` field, nullable — WhatsApp has none).
 
 ---
 
@@ -466,8 +539,23 @@ never got far enough to have an identity record at all).
 - `GET /api/v1/auth/_dev/expired-token` — dev helper, mints an expired token
 
 **Agent & tenant admin** (admin-only)
-- `POST|GET /api/v1/agents`, `PATCH|DELETE /api/v1/agents/{id}`
+- `POST|GET /api/v1/agents`, `PATCH|DELETE /api/v1/agents/{id}` — email is
+  immutable (`PATCH` rejects it with `EMAIL_IMMUTABLE`); `PATCH` otherwise
+  whitelists `name`/`role`/`isActive`
+- `PATCH /api/v1/agents/{id}/password` — admin sets a new password directly
+  (8+ chars, bcrypt-hashed; no reset-link email flow)
 - `GET|PUT /api/v1/tenant/config`
+
+**Analytics** (any role may view; `agentId`/customer filters beyond one's
+own tickets and `/agents` performance are lead/admin only via
+`analytics.view.all`)
+- `GET /api/v1/analytics/volume|sla|priority|agents` — `?period=` (e.g.
+  `30d`, default 30), `?agentId=`, `?identityId=`, `?category=`,
+  `?priorityLabel=`
+- `GET /api/v1/analytics/agents-directory` — lead/admin only; `{id, name}`
+  list for the "by agent" filter dropdown
+- `GET /api/v1/analytics/customers?q=` — typeahead search (name/email/phone)
+  for the "by customer" filter
 
 **Tickets** (RBAC-scoped: agents see their own, lead/admin see all)
 - `GET /api/v1/tickets` (`?identityStatus=confirmed` for the main queue,
@@ -477,6 +565,9 @@ never got far enough to have an identity record at all).
 - `POST /api/v1/tickets/{id}/transition` — on transition to `resolved` or
   `closed`, also sends the citizen a structured status-update email (see
   [Citizen-facing notifications](#citizen-facing-notifications))
+- `PATCH /api/v1/tickets/{id}/assign` — lead/admin only
+  (`ticket.assignee.edit`); body `{assignedTo}` (agent id, or
+  null/omitted to unassign)
 - `GET/POST /api/v1/tickets/{id}/notes` — internal, agent-facing annotations
 - `POST /api/v1/tickets/{id}/reply` — send an update to the citizen; records
   an outbound message and, for email-origin tickets, actually sends it
@@ -504,9 +595,16 @@ never got far enough to have an identity record at all).
 **Health / schema / backup**
 - `GET /api/v1/health`, `GET /api/v1/internal/schema/version`, `GET /api/v1/internal/schema/tables`, `GET /api/v1/internal/backup/status`
 
+**Analytics**
+- `GET /api/v1/db/analytics/volume|sla|priority|agents` — tenant + rolling
+  `period` window, plus optional `agentId`/`identityId`/`category`/
+  `priorityLabel` filters; excludes archived tickets. `/agents` is the
+  resolved-count + avg-resolution-hours-per-agent query.
+
 **Tickets**
 - `POST /api/v1/db/tickets`, `GET /api/v1/db/tickets` (filterable/paginated
-  — `identityStatus`, `threadId`, `includeArchived`, etc.), `GET/PATCH /api/v1/db/tickets/{id}`
+  — `identityStatus`, `threadId`, `ticketNumber`, `includeArchived`, etc.),
+  `GET/PATCH /api/v1/db/tickets/{id}`
 - `POST /api/v1/db/tickets/{id}/transition`
 - `POST/GET /api/v1/db/tickets/{id}/notes`, `GET/POST /api/v1/db/tickets/{id}/messages`, `GET /api/v1/db/tickets/{id}/events`
 - `POST /api/v1/db/tickets/{id}/generate-resolution-summary` — 503 in Phase 1 (no AI wired here yet)
@@ -518,7 +616,9 @@ never got far enough to have an identity record at all).
   the caller can notify each citizen
 
 **Identities**
-- `POST /api/v1/db/identities`, `GET /api/v1/db/identities` (by email/phone)
+- `POST /api/v1/db/identities`, `GET /api/v1/db/identities` (by
+  email/phone, or `?q=` for a partial name/email/phone match — the
+  analytics "by customer" typeahead)
 - `GET /api/v1/db/identities/{id}` — looks up by primary key first, falling
   back to `masterId` (see the identity-id caveat below)
 - `PATCH /api/v1/db/identities/{id}/merge`
@@ -528,9 +628,6 @@ never got far enough to have an identity record at all).
 **Agents / tenants**
 - `POST|GET /api/v1/db/agents`, `GET|PATCH /api/v1/db/agents/{id}`
 - `GET /api/v1/db/tenants/{id}`, `PUT /api/v1/db/tenants/{id}/config`
-
-**Analytics**
-- `GET /api/v1/db/analytics/volume`, `.../sla`, `.../priority`
 
 ### ai-core — `http://localhost:8001`
 
@@ -545,11 +642,17 @@ never got far enough to have an identity record at all).
 
 ### dashboard (BFF route handlers) — `http://localhost:3000`
 
+Every route below is a thin proxy to the matching api-gateway endpoint via
+`gatewayFetch` (`src/lib/gateway.ts`), forwarding the `access_token` cookie.
+
 - `GET /api/health`
 - `POST /api/auth/login`
-- `GET /api/agents`
+- `GET/POST /api/agents`, `PATCH /api/agents/[id]`, `PATCH /api/agents/[id]/password`
 - `GET /api/tickets`, `GET /api/tickets/[id]`
-- `POST /api/tickets/[id]/transition`, `POST /api/tickets/[id]/generate-resolution-summary`
+- `POST /api/tickets/[id]/transition`, `PATCH /api/tickets/[id]/assign`,
+  `GET/POST /api/tickets/[id]/notes`, `POST /api/tickets/[id]/reply`,
+  `POST /api/tickets/[id]/generate-resolution-summary`
+- `GET /api/analytics/volume|sla|priority|agents|agents-directory|customers`
 
 ---
 
@@ -737,6 +840,13 @@ readability).
 - JWT (HS256), 15-min access / 7-day rotating refresh tokens
   ([11_MULTI_TENANCY](docs/11_MULTI_TENANCY.md)).
 - Three roles: `admin`, `lead`, `agent` — RBAC enforced in api-gateway.
+  **Gotcha**: `AuthFilter.isProtected(path)` hardcodes the path prefixes it
+  populates `CurrentUser` for (`/api/v1/agents`, `/api/v1/tenant`,
+  `/api/v1/tickets`, `/api/v1/analytics`) — a new RBAC-protected resource
+  under a path not in that list silently gets an unpopulated `CurrentUser`
+  (NPEs on `tenantId()`, and every `RbacPolicy.can(...)` check fails closed
+  as if unauthenticated). Add the new prefix to `isProtected()` when adding
+  a resource — this bit us once already when `/api/v1/analytics` was added.
 - Pod-to-pod auth between api-gateway/ai-core → db-writer via a shared
   `X-Internal-Key` (`DB_WRITER_INTERNAL_API_KEY`), a no-op when unset (local
   dev default; Docker mode currently leaves it unset too — not yet enforced

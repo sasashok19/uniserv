@@ -31,7 +31,26 @@ public record ChannelMessageReceived(
         String sentAt,
         String receivedAt,
 
-        String traceId
+        String traceId,
+
+        // Email subject line (Feature 09/15) — carries a ticket number
+        // (e.g. "Re: ... [Ticket TKT-00042]") when the citizen replied to a
+        // prior thread, letting the dedup pipeline match it precisely
+        // instead of guessing by identity+category. Null for channels
+        // without a subject concept (WhatsApp) or older callers.
+        String subject
 ) {
     public static final String TYPE = "channel.message.received";
+
+    /** Compatibility constructor for callers that predate the {@code subject} field. */
+    public ChannelMessageReceived(
+            String id, String tenantId, String type, String timestamp,
+            String channel, ChannelIdentity channelIdentity,
+            String rawText, List<String> rawMediaUrls, String languageHint,
+            String threadId, String inReplyTo,
+            String sentAt, String receivedAt,
+            String traceId) {
+        this(id, tenantId, type, timestamp, channel, channelIdentity, rawText, rawMediaUrls,
+                languageHint, threadId, inReplyTo, sentAt, receivedAt, traceId, null);
+    }
 }

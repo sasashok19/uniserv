@@ -11,12 +11,18 @@ import jakarta.ws.rs.ext.Provider;
 import java.util.Map;
 
 /**
- * JWT authentication for the RBAC-protected api-gateway endpoints (Feature 11):
- * {@code /api/v1/agents}, {@code /api/v1/tenant}, {@code /api/v1/tickets}.
+ * JWT authentication for the RBAC-protected api-gateway endpoints (Feature 11/15):
+ * {@code /api/v1/agents}, {@code /api/v1/tenant}, {@code /api/v1/tickets},
+ * {@code /api/v1/analytics}.
  *
  * <p>Verifies the {@code Authorization: Bearer} token and populates
  * {@link CurrentUser}. Other paths (health, webhooks, adapter internals) are left
  * open — they are handled by their own Phase-1 rules.
+ *
+ * <p><b>Adding a new RBAC-protected resource?</b> Its path prefix must be added
+ * to {@link #isProtected(String)} below, or {@link CurrentUser} is silently left
+ * unpopulated and every {@code user.tenantId()}/{@code user.role()} call on that
+ * resource NPEs or falls through RBAC checks as if unauthenticated.
  */
 @Provider
 public class AuthFilter implements ContainerRequestFilter {
@@ -63,7 +69,8 @@ public class AuthFilter implements ContainerRequestFilter {
     private boolean isProtected(String path) {
         return path.contains("api/v1/agents")
                 || path.contains("api/v1/tenant")
-                || path.contains("api/v1/tickets");
+                || path.contains("api/v1/tickets")
+                || path.contains("api/v1/analytics");
     }
 
     private String claim(DecodedJWT jwt, String name) {

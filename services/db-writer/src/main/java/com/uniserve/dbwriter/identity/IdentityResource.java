@@ -48,7 +48,8 @@ public class IdentityResource {
     public Map<String, Object> find(@QueryParam("tenantId") String tenantId,
                                     @QueryParam("email") String email,
                                     @QueryParam("phone") String phone,
-                                    @QueryParam("anonRefId") String anonRefId) {
+                                    @QueryParam("anonRefId") String anonRefId,
+                                    @QueryParam("q") String q) {
         // anon refs are globally unique — no tenant required.
         if (anonRefId != null && !anonRefId.isBlank()) {
             return Map.of("data", identities.findByAnonRef(anonRefId).map(List::of).orElseGet(List::of));
@@ -61,6 +62,8 @@ public class IdentityResource {
             match = identities.findByEmail(tenantId, email);
         } else if (phone != null && !phone.isBlank()) {
             match = identities.findByPhone(tenantId, phone);
+        } else if (q != null && !q.isBlank()) {
+            return Map.of("data", identities.search(tenantId, q));
         } else {
             return Map.of("data", identities.all(tenantId));
         }

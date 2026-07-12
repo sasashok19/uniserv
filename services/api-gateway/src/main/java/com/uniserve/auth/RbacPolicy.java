@@ -25,6 +25,8 @@ public final class RbacPolicy {
             case "ticket.export" -> adminOrLead;
             case "admin.view", "admin.agents.manage", "admin.tenant.config", "admin.tickets.archive-stale" ->
                     "admin".equals(role);
+            case "analytics.view" -> true;
+            case "analytics.view.all" -> adminOrLead;
             default -> false;
         };
     }

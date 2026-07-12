@@ -22,6 +22,21 @@ IDENTITY_REQUEST_SUBJECT = "We need a bit more information about your complaint"
 DEFAULT_SUBJECT = "Update on your message to UniServe"
 TICKET_ACK_SUBJECT_TEMPLATE = "Your complaint has been registered — Ticket {ticket_number}"
 
+# Feature 15: every reply that carries a ticket number must keep it in the
+# subject — a citizen's reply preserves the subject line (as "Re: ..."),
+# and that's what lets a follow-up email be matched back to THIS exact
+# ticket instead of guessing by category (see app/tickets/intake.py).
+DO_NOT_REMOVE_NOTE = (
+    "\n\n---\nPlease do not remove or edit the ticket number in the subject "
+    "line when replying — it's how we match your reply to this complaint."
+)
+
+
+def _subject_with_ticket(base_subject: str, ticket_number: Optional[str]) -> str:
+    if not ticket_number:
+        return base_subject
+    return f"{base_subject} [Ticket {ticket_number}]"
+
 
 async def send_email(to_address: str, subject: str, body: str, trace_id: Optional[str] = None) -> dict:
     """Deliver an email via api-gateway's `EmailAdapter.sendReply` (reused
@@ -54,6 +69,7 @@ async def deliver_reply(payload: dict, trace_id: Optional[str] = None) -> dict:
     to_address = payload.get("channelIdentityValue")
     message_text = payload.get("messageText") or ""
     is_identity_request = bool(payload.get("isIdentityRequest"))
+    ticket_number = payload.get("ticketNumber")
 
     if channel != "email":
         logger.info(
@@ -67,8 +83,10 @@ async def deliver_reply(payload: dict, trace_id: Optional[str] = None) -> dict:
         logger.warning("ai.reply.send has no channelIdentityValue to reply to: traceId=%s", trace_id)
         return {"delivered": False, "reason": "no destination address"}
 
-    subject = IDENTITY_REQUEST_SUBJECT if is_identity_request else DEFAULT_SUBJECT
-    return await send_email(to_address, subject, message_text, trace_id)
+    base_subject = IDENTITY_REQUEST_SUBJECT if is_identity_request else DEFAULT_SUBJECT
+    subject = _subject_with_ticket(base_subject, ticket_number)
+    body = message_text + (DO_NOT_REMOVE_NOTE if ticket_number else "")
+    return await send_email(to_address, subject, body, trace_id)
 
 
 def _format_ticket_ack_body(ticket_number: str, category: Optional[str], status: str, is_duplicate: bool) -> str:
@@ -83,7 +101,7 @@ def _format_ticket_ack_body(ticket_number: str, category: Optional[str], status:
         "We'll email you again whenever there's an update, and once this ticket "
         "is resolved or closed.",
     ]
-    return "\n".join(lines)
+    return "\n".join(lines) + DO_NOT_REMOVE_NOTE
 
 
 async def send_ticket_ack_email(

@@ -76,6 +76,11 @@ public class Ticket extends PanacheEntityBase {
     @Column(name = "parent_ticket_id")
     public String parentTicketId;
 
+    /** Service/Customer ID (Feature 12/15) — captured from the citizen's
+     * intake reply; previously only ever embedded as text in the first message. */
+    @Column(name = "service_id")
+    public String serviceId;
+
     @Column(name = "resolution")
     public String resolution;
 
@@ -146,6 +151,7 @@ public class Ticket extends PanacheEntityBase {
         m.put("archived_at", archivedAt);
         m.put("is_duplicate", isDuplicate);
         m.put("parent_ticket_id", parentTicketId);
+        m.put("service_id", serviceId);
         m.put("resolution", resolution);
         m.put("sla_due_at", slaDueAt);
         m.put("resolved_at", resolvedAt);
