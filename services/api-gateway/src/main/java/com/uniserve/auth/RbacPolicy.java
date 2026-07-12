@@ -23,7 +23,8 @@ public final class RbacPolicy {
             case "ticket.status.closed_to_reopened" -> adminOrLead;
             case "ticket.resolution.generate" -> true;
             case "ticket.export" -> adminOrLead;
-            case "admin.view", "admin.agents.manage", "admin.tenant.config" -> "admin".equals(role);
+            case "admin.view", "admin.agents.manage", "admin.tenant.config", "admin.tickets.archive-stale" ->
+                    "admin".equals(role);
             default -> false;
         };
     }

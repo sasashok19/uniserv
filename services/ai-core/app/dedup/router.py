@@ -11,13 +11,12 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from app.dedup.service import check_duplicate
 from app.identity.db_client import DbWriterClient
 
 logger = logging.getLogger("ai-core")
 
 router = APIRouter()
-
-OPEN_STATUSES = "open,assigned,in_progress"
 
 
 class DeduplicateRequest(BaseModel):
@@ -32,18 +31,14 @@ class DeduplicateRequest(BaseModel):
 async def deduplicate(req: DeduplicateRequest) -> dict:
     db = DbWriterClient()
     try:
-        existing = await db.list_tickets(
-            req.tenantId, identityId=req.masterId, category=req.category, status=OPEN_STATUSES)
+        result = await check_duplicate(db, req.tenantId, req.masterId, req.category, trace_id=req.traceId)
     except httpx.HTTPError as exc:
-        logger.error("dedup db-writer call failed: %s", exc)
+        logger.error("dedup db-writer call failed traceId=%s: %s", req.traceId, exc)
         raise HTTPException(status_code=502, detail="db-writer unavailable") from exc
 
-    if existing:
-        ticket = existing[0]
-        return {
-            "action": "append_to_existing",
-            "existingTicketId": ticket.get("id"),
-            "confidence": "high",
-            "reason": "Same identity, same category, open ticket exists",
-        }
-    return {"action": "new_ticket", "confidence": "high"}
+    if result["action"] == "append_to_existing":
+        logger.info("dedup: appending to existing ticket traceId=%s existingTicketId=%s",
+                    req.traceId, result["existingTicketId"])
+    else:
+        logger.info("dedup: no existing open ticket, new ticket traceId=%s", req.traceId)
+    return result

@@ -7,6 +7,7 @@ import com.uniserve.events.EventBusPublisher;
 import com.uniserve.events.EventStreams;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.util.Map;
 
@@ -17,6 +18,8 @@ import java.util.Map;
  */
 @ApplicationScoped
 public class ChannelMessagePublisher {
+
+    private static final Logger LOG = Logger.getLogger(ChannelMessagePublisher.class);
 
     private final EventBusPublisher bus;
     private final ObjectMapper mapper;
@@ -38,6 +41,8 @@ public class ChannelMessagePublisher {
                 message.timestamp(),
                 message.traceId(),
                 payload);
+        LOG.infof("Publishing channel message: traceId=%s tenantId=%s channel=%s",
+                message.traceId(), message.tenantId(), message.channel());
         return bus.publish(EventStreams.CHANNEL_MESSAGE_RECEIVED, event);
     }
 }

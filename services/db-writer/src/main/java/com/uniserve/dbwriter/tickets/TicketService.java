@@ -65,6 +65,7 @@ public class TicketService {
         t.priorityLabel = str(body, "priorityLabel");
         t.sentimentScore = num(body, "sentimentScore");
         t.channelOrigin = channelOrigin;
+        t.threadId = str(body, "threadId");
         t.isDuplicate = intOr(body, "isDuplicate", 0);
         t.parentTicketId = str(body, "parentTicketId");
         t.slaDueAt = str(body, "slaDueAt");
@@ -97,6 +98,7 @@ public class TicketService {
 
     public List<Map<String, Object>> list(String tenantId, String status, String assignedTo,
                                           String channel, String category, String identityId,
+                                          String identityStatus, String threadId, boolean includeArchived,
                                           int page, int pageSize) {
         StringBuilder query = new StringBuilder("tenantId = :tenantId");
         Map<String, Object> params = new HashMap<>();
@@ -113,6 +115,14 @@ public class TicketService {
             query.append(" and identityId = :identityId");
             params.put("identityId", identityId);
         }
+        if (identityStatus != null && !identityStatus.isBlank()) {
+            query.append(" and identityStatus in :identityStatuses");
+            params.put("identityStatuses", List.of(identityStatus.split(",")));
+        }
+        if (threadId != null && !threadId.isBlank()) {
+            query.append(" and threadId = :threadId");
+            params.put("threadId", threadId);
+        }
         if (channel != null && !channel.isBlank()) {
             query.append(" and channelOrigin = :channel");
             params.put("channel", channel);
@@ -121,11 +131,20 @@ public class TicketService {
             query.append(" and category = :category");
             params.put("category", category);
         }
+        if (!includeArchived) {
+            query.append(" and archivedAt is null");
+        }
 
         List<Ticket> rows = Ticket.find(query.toString(), Sort.by("priorityScore", Sort.Direction.Descending), params)
                 .page(Page.of(Math.max(page - 1, 0), pageSize))
                 .list();
         return rows.stream().map(Ticket::toMap).toList();
+    }
+
+    /** Find the ticket already tracking this conversation thread, if any (Feature 06). */
+    public Optional<Map<String, Object>> findByThreadId(String tenantId, String threadId) {
+        return Ticket.<Ticket>find("tenantId = ?1 and threadId = ?2", tenantId, threadId)
+                .firstResultOptional().map(Ticket::toMap);
     }
 
     @Transactional
@@ -157,6 +176,21 @@ public class TicketService {
         }
         if (body.containsKey("slaDueAt")) {
             t.slaDueAt = str(body, "slaDueAt");
+        }
+        if (body.containsKey("identityId")) {
+            t.identityId = str(body, "identityId");
+        }
+        if (body.containsKey("identityStatus")) {
+            t.identityStatus = str(body, "identityStatus");
+        }
+        if (body.containsKey("isDuplicate")) {
+            t.isDuplicate = intOr(body, "isDuplicate", 0);
+        }
+        if (body.containsKey("parentTicketId")) {
+            t.parentTicketId = str(body, "parentTicketId");
+        }
+        if (body.containsKey("archivedAt")) {
+            t.archivedAt = str(body, "archivedAt");
         }
         cache.invalidate(id);
         // Force the flush (and the @PreUpdate updated_at refresh) before we read
@@ -255,6 +289,32 @@ public class TicketService {
                 .list().stream().map(TicketMessage::toMap).toList();
     }
 
+    /** Append a message (inbound citizen text or outbound AI/agent reply) to a ticket's timeline. */
+    @Transactional
+    public Map<String, Object> addMessage(String id, Map<String, Object> body) {
+        Ticket t = Ticket.findById(id);
+        if (t == null) {
+            throw new ApiException(404, "NOT_FOUND", "ticket not found: " + id);
+        }
+        String content = str(body, "content");
+        if (content == null || content.isBlank()) {
+            throw new ApiException(422, "CONTENT_EMPTY", "Message content is required");
+        }
+        TicketMessage msg = new TicketMessage();
+        msg.id = UUID.randomUUID().toString();
+        msg.tenantId = t.tenantId;
+        msg.ticketId = id;
+        msg.channel = strOr(body, "channel", t.channelOrigin);
+        msg.direction = strOr(body, "direction", "inbound");
+        msg.authorType = strOr(body, "authorType", "user");
+        msg.authorId = str(body, "authorId");
+        msg.authorLabel = str(body, "authorLabel");
+        msg.content = content;
+        msg.isAiGenerated = intOr(body, "isAiGenerated", 0);
+        msg.persistAndFlush();
+        return msg.toMap();
+    }
+
     public List<Map<String, Object>> notes(String id) {
         return TicketNote.<TicketNote>find("ticketId", Sort.by("createdAt"), id)
                 .list().stream().map(TicketNote::toMap).toList();
@@ -263,6 +323,72 @@ public class TicketService {
     public List<Map<String, Object>> events(String id) {
         return TicketEvent.<TicketEvent>find("ticketId", Sort.by("createdAt"), id)
                 .list().stream().map(TicketEvent::toMap).toList();
+    }
+
+    /**
+     * Archive (soft-delete) unconfirmed tickets older than {@code olderThanDays}
+     * (Feature 12 admin cleanup): pending or anonymous identity status, not
+     * already archived. Never physically deletes rows.
+     */
+    @Transactional
+    public int archiveStale(String tenantId, int olderThanDays) {
+        String cutoff = SqliteTime.minusDays(olderThanDays);
+        List<Ticket> stale = Ticket.<Ticket>find(
+                "tenantId = ?1 and identityStatus in ('pending','anonymous') and archivedAt is null "
+                        + "and createdAt < ?2",
+                tenantId, cutoff)
+                .list();
+        String now = SqliteTime.now();
+        for (Ticket t : stale) {
+            t.archivedAt = now;
+            recordEvent(t.tenantId, t.id, "ticket.archived", "system", null);
+            cache.invalidate(t.id);
+        }
+        Panache.getEntityManager().flush();
+        return stale.size();
+    }
+
+    /**
+     * Auto-close tickets still awaiting identity confirmation after
+     * {@code olderThanDays} with no response (Feature 06 x 14) — distinct
+     * from {@link #archiveStale}: this transitions {@code status} to
+     * {@code closed} (with a system note) rather than soft-deleting, and
+     * runs across every tenant since it's driven by a background schedule,
+     * not an admin action. Returns the closed tickets so the caller (a
+     * scheduled job in api-gateway) can notify each citizen.
+     */
+    @Transactional
+    public List<Map<String, Object>> autoCloseUnconfirmed(int olderThanDays) {
+        String cutoff = SqliteTime.minusDays(olderThanDays);
+        List<Ticket> stale = Ticket.<Ticket>find(
+                "identityStatus = 'pending' and archivedAt is null "
+                        + "and status not in ('closed','resolved') and createdAt < ?1",
+                cutoff)
+                .list();
+        String now = SqliteTime.now();
+        List<Map<String, Object>> closed = new java.util.ArrayList<>();
+        for (Ticket t : stale) {
+            t.status = "closed";
+            t.closedAt = now;
+            recordEvent(t.tenantId, t.id, "ticket.auto_closed", "system", null);
+
+            TicketNote note = new TicketNote();
+            note.id = UUID.randomUUID().toString();
+            note.tenantId = t.tenantId;
+            note.ticketId = t.id;
+            note.agentId = null;
+            note.content = "Automatically closed after " + olderThanDays
+                    + " days with no response to our identity verification request.";
+            note.isMandatory = 1;
+            note.transitionFrom = "pending";
+            note.transitionTo = "closed";
+            note.persist();
+
+            cache.invalidate(t.id);
+            closed.add(t.toMap());
+        }
+        Panache.getEntityManager().flush();
+        return closed;
     }
 
     /**

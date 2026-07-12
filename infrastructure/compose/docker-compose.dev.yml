@@ -29,7 +29,8 @@ services:
     container_name: uniserve-db-writer
     environment:
       APP_ENV: development
-      TENANT_ID: default
+      TENANT_ID: t1
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DB_WRITER_DB_PATH: /data/uniserve.db
     ports:
       - "8090:8090"
@@ -49,12 +50,14 @@ services:
     container_name: uniserve-ai-core
     environment:
       APP_ENV: development
-      TENANT_ID: default
+      TENANT_ID: t1
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       VALKEY_URL: redis://valkey:6379
       EVENT_BUS_MAX_RETRIES: "3"
       EVENT_BUS_RETRY_DELAY_MS: "1000"
       EVENT_BUS_CONSUMER_GROUP: uniserve
       DB_WRITER_URL: http://db-writer:8090
+      API_GATEWAY_URL: http://api-gateway:8080
       DEFAULT_LLM_PROVIDER: anthropic
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_ASSISTANT_ID: ${OPENAI_ASSISTANT_ID:-}
@@ -78,14 +81,30 @@ services:
     container_name: uniserve-api-gateway
     environment:
       APP_ENV: development
-      TENANT_ID: default
+      TENANT_ID: t1
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       GATEWAY_VALKEY_URL: redis://valkey:6379
       AI_CORE_URL: http://ai-core:8001
       DB_WRITER_URL: http://db-writer:8090
       # WhatsApp adapter (Feature 02b) — dev handshake/HMAC bypass token
       WHATSAPP_VERIFY_TOKEN: dev-verify-token
-      # Email adapter (Feature 02a): webhook-only ingestion (EMAIL_WEBHOOK_SECRET
-      # defaults to "dev-webhook-secret" — see EmailWebhookResource)
+      # Email adapter (Feature 02a) — same Gmail App Password covers both
+      # directions; pulled from the shell/root .env, never hardcoded here.
+      # Outbound SMTP — real send by default (quarkus.mailer.mock defaults to false).
+      EMAIL_SMTP_MOCK: ${EMAIL_SMTP_MOCK:-false}
+      EMAIL_SMTP_HOST: ${EMAIL_SMTP_HOST:-smtp.gmail.com}
+      EMAIL_SMTP_PORT: ${EMAIL_SMTP_PORT:-587}
+      EMAIL_SMTP_USER: ${EMAIL_SMTP_USER:-}
+      EMAIL_SMTP_PASSWORD: ${EMAIL_SMTP_PASSWORD:-}
+      EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-}
+      # Inbound IMAP polling — EMAIL_IMAP_USER/PASSWORD default to the SMTP
+      # ones above (application.properties nested-default) if left unset.
+      EMAIL_IMAP_HOST: ${EMAIL_IMAP_HOST:-imap.gmail.com}
+      EMAIL_IMAP_PORT: ${EMAIL_IMAP_PORT:-993}
+      EMAIL_IMAP_MAILBOX: ${EMAIL_IMAP_MAILBOX:-INBOX}
+      EMAIL_IMAP_POLL_INTERVAL: ${EMAIL_IMAP_POLL_INTERVAL:-60s}
+      EMAIL_IMAP_USER: ${EMAIL_IMAP_USER:-}
+      EMAIL_IMAP_PASSWORD: ${EMAIL_IMAP_PASSWORD:-}
     ports:
       - "8080:8080"
     depends_on:
@@ -110,7 +129,7 @@ services:
       NEXT_PUBLIC_API_GATEWAY_URL: http://localhost:8080
       # Server-side (SSR / route handlers) reach the gateway by service name.
       API_GATEWAY_INTERNAL_URL: http://api-gateway:8080
-      NEXT_PUBLIC_TENANT_ID: default
+      NEXT_PUBLIC_TENANT_ID: t1
     ports:
       - "3000:3000"
     depends_on:

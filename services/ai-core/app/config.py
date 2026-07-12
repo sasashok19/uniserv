@@ -9,11 +9,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # Local dev (scripts/dev-local.sh, RUN_MODE=local): ".env.local" is loaded
+    # after ".env" and only needs to contain the keys that differ, since
+    # pydantic-settings applies later files as an overlay (later wins per key).
+    model_config = SettingsConfigDict(env_file=(".env", ".env.local"), extra="ignore")
 
     # App
     app_env: str = "development"  # development | production
-    tenant_id: str = "default"
+    # t1 ("TNEB Demo") is the Flyway-seeded demo tenant the dev agents belong
+    # to (admin/lead/agent@tneb.demo) — must match api-gateway/db-writer.
+    tenant_id: str = "t1"
+    # DEBUG | INFO | WARNING | ERROR | CRITICAL. INFO (default) logs everything
+    # at INFO and above; set ERROR in production to silence routine traffic.
+    log_level: str = "INFO"
 
     # HTTP
     ai_core_port: int = 8001
@@ -27,6 +35,9 @@ class Settings(BaseSettings):
     # Downstream
     db_writer_url: str = "http://localhost:8090"
     db_writer_internal_api_key: str = ""
+    # Used to actually deliver ai.reply.send events (identity requests,
+    # follow-up questions) — see app/notifications/sender.py.
+    api_gateway_url: str = "http://localhost:8080"
 
     # Identity resolver (Feature 03)
     identity_merge_confidence_threshold: float = 0.85

@@ -27,4 +27,8 @@ public final class SqliteTime {
     public static String plusHours(int hours) {
         return FORMAT.format(Instant.now().plus(hours, ChronoUnit.HOURS));
     }
+
+    public static String minusDays(int days) {
+        return FORMAT.format(Instant.now().minus(days, ChronoUnit.DAYS));
+    }
 }

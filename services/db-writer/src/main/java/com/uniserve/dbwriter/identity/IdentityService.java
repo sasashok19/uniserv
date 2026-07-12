@@ -42,9 +42,23 @@ public class IdentityService {
         return p.toMap();
     }
 
+    /**
+     * Look up by primary key first, falling back to {@code masterId}.
+     *
+     * <p>{@code ticket.identity_id} is populated inconsistently across this
+     * codebase: {@code IdentityService.merge()} treats it as the profile's
+     * primary key, while ai-core's identity resolver (Feature 03) always
+     * writes its own generated {@code masterId} there instead. Accepting
+     * either here means callers resolving a ticket's identity don't need to
+     * know which convention produced that particular row.
+     */
     public Optional<Map<String, Object>> getById(String id) {
         IdentityProfile p = IdentityProfile.findById(id);
-        return Optional.ofNullable(p).map(IdentityProfile::toMap);
+        if (p != null) {
+            return Optional.of(p.toMap());
+        }
+        return IdentityProfile.<IdentityProfile>find("masterId", id)
+                .firstResultOptional().map(IdentityProfile::toMap);
     }
 
     public Optional<Map<String, Object>> findByEmail(String tenantId, String email) {
@@ -94,6 +108,36 @@ public class IdentityService {
         Panache.getEntityManager().flush();
 
         return Map.of("keptMasterId", keep.masterId, "mergedMasterId", mergeMasterId);
+    }
+
+    /**
+     * Enrich an existing profile with a newly-learned field (Feature 03/06):
+     * e.g. a citizen who first emailed in later provides a mobile number, or
+     * vice versa — same person, same record, just more known about them now.
+     * Accepts {@code name}/{@code email}/{@code phone}; only overwrites a
+     * field when it's currently blank, so a later channel never clobbers an
+     * already-confirmed value.
+     */
+    @Transactional
+    public Map<String, Object> update(String id, Map<String, Object> body) {
+        IdentityProfile p = IdentityProfile.findById(id);
+        if (p == null) {
+            throw new ApiException(404, "NOT_FOUND", "identity not found: " + id);
+        }
+        String name = str(body, "name");
+        String email = str(body, "email");
+        String phone = str(body, "phone");
+        if (name != null && (p.name == null || p.name.isBlank())) {
+            p.name = name;
+        }
+        if (email != null && (p.email == null || p.email.isBlank())) {
+            p.email = email;
+        }
+        if (phone != null && (p.phone == null || p.phone.isBlank())) {
+            p.phone = phone;
+        }
+        Panache.getEntityManager().flush();
+        return p.toMap();
     }
 
     public List<Map<String, Object>> all(String tenantId) {

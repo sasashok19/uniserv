@@ -2,10 +2,15 @@
 .env
 **/.env
 !**/.env.example
+.env.local
+**/.env.local
+!**/.env.local.example
 
 # Java / Quarkus
 target/
 *.class
+hs_err_pid*.log
+replay_pid*.log
 
 # Python
 __pycache__/
@@ -23,6 +28,12 @@ out/
 *.db
 *.db-shm
 *.db-wal
+
+# Local dev (scripts/dev-local.sh) — SQLite data dir + process log/pid files
+services/db-writer/data/*
+!services/db-writer/data/.gitkeep
+scripts/*.log
+scripts/.dev-local.pids
 
 # IDE / OS
 .idea/

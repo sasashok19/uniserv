@@ -1,5 +1,6 @@
 package com.uniserve.auth;
 
+import com.uniserve.adapters.email.EmailAdapter;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
@@ -10,6 +11,7 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -26,17 +28,26 @@ import java.util.Map;
 @Produces(MediaType.APPLICATION_JSON)
 public class TicketsResource {
 
+    private static final Logger LOG = Logger.getLogger(TicketsResource.class);
+
     @Inject
     CurrentUser user;
 
     @Inject
     DbWriterClient db;
 
+    @Inject
+    EmailAdapter emailAdapter;
+
+    @Inject
+    TicketNotifier notifier;
+
     @GET
     public Response list(@QueryParam("assignedTo") String assignedTo,
                          @QueryParam("status") String status,
                          @QueryParam("channel") String channel,
                          @QueryParam("category") String category,
+                         @QueryParam("identityStatus") String identityStatus,
                          @QueryParam("page") String page,
                          @QueryParam("pageSize") String pageSize) {
         String role = user.role();
@@ -58,11 +69,29 @@ public class TicketsResource {
         append(q, "status", status);
         append(q, "channel", channel);
         append(q, "category", category);
+        // Unconfirmed queue (Feature 12): ?identityStatus=pending,anonymous. Main
+        // Ticket Queue passes identityStatus=confirmed so the two never overlap.
+        append(q, "identityStatus", identityStatus);
         append(q, "page", page);
         append(q, "pageSize", pageSize);
 
         List<Map<String, Object>> tickets = db.listTickets(q.toString());
         return Response.ok(Map.of("tickets", tickets, "total", tickets.size(), "page", 1)).build();
+    }
+
+    /** Admin-only: archive (soft-delete) unconfirmed tickets older than N days (default 60). */
+    @POST
+    @Path("/archive-stale")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response archiveStale(Map<String, Object> input) {
+        if (!user.can("admin.tickets.archive-stale")) {
+            return forbidden("INSUFFICIENT_ROLE", "Only admins can archive stale unconfirmed tickets");
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("tenantId", user.tenantId());
+        body.put("olderThanDays", input == null ? 60 : input.getOrDefault("olderThanDays", 60));
+        DbWriterClient.ApiResult result = db.call("POST", "/api/v1/db/tickets/archive-stale", body);
+        return Response.status(result.status()).entity(result.body()).build();
     }
 
     @GET
@@ -82,15 +111,125 @@ public class TicketsResource {
             note.put("createdAt", n.get("created_at"));
             notes.add(note);
         }
+        List<Map<String, Object>> messages = new ArrayList<>();
+        DbWriterClient.ApiResult msgResult = db.call("GET", "/api/v1/db/tickets/" + id + "/messages", null);
+        if (msgResult.status() < 400) {
+            Object rawMessages = msgResult.body().get("data");
+            if (rawMessages instanceof List<?> list) {
+                for (Object m : list) {
+                    if (m instanceof Map<?, ?> mm) {
+                        Map<String, Object> msg = new LinkedHashMap<>();
+                        msg.put("direction", mm.get("direction"));
+                        msg.put("authorType", mm.get("author_type"));
+                        msg.put("content", mm.get("content"));
+                        msg.put("createdAt", mm.get("created_at"));
+                        messages.add(msg);
+                    }
+                }
+            }
+        }
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("id", t.get("id"));
         body.put("ticketNumber", t.get("ticket_number"));
         body.put("status", t.get("status"));
         body.put("resolution", t.get("resolution"));
         body.put("category", t.get("category"));
+        body.put("channelOrigin", t.get("channel_origin"));
+        body.put("identityId", t.get("identity_id"));
+        body.put("priorityLabel", t.get("priority_label"));
         body.put("assignedTo", t.get("assigned_to"));
         body.put("notes", notes);
+        body.put("messages", messages);
         return Response.ok(body).build();
+    }
+
+    @GET
+    @Path("/{id}/notes")
+    public Response listNotes(@PathParam("id") String id) {
+        DbWriterClient.ApiResult result = db.call("GET", "/api/v1/db/tickets/" + id + "/notes", null);
+        return Response.status(result.status()).entity(result.body()).build();
+    }
+
+    @POST
+    @Path("/{id}/notes")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response addNote(@PathParam("id") String id, Map<String, Object> input) {
+        String content = str(input, "content");
+        if (content == null || content.isBlank()) {
+            return Response.status(422).entity(Map.of("error", Map.of(
+                    "code", "NOTE_EMPTY", "message", "Note content is required"))).build();
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("content", content);
+        body.put("agentId", user.agentId());
+        DbWriterClient.ApiResult result = db.call("POST", "/api/v1/db/tickets/" + id + "/notes", body);
+        return Response.status(result.status()).entity(result.body()).build();
+    }
+
+    /**
+     * Send an update to the citizen (Feature 12/14): records an outbound
+     * {@code ticket_messages} entry, and — for email-origin tickets — actually
+     * sends it via {@link EmailAdapter#sendReply}. Other channels record the
+     * message but have no outbound send wired yet (WhatsApp Business outbound
+     * send is Phase 2).
+     */
+    @POST
+    @Path("/{id}/reply")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response reply(@PathParam("id") String id, Map<String, Object> input) {
+        String content = str(input, "content");
+        if (content == null || content.isBlank()) {
+            return Response.status(422).entity(Map.of("error", Map.of(
+                    "code", "REPLY_EMPTY", "message", "Reply content is required"))).build();
+        }
+
+        DbWriterClient.ApiResult ticket = db.call("GET", "/api/v1/db/tickets/" + id, null);
+        if (ticket.status() >= 400) {
+            return Response.status(ticket.status()).entity(ticket.body()).build();
+        }
+        Map<String, Object> t = ticket.body();
+        String channel = str(t, "channel_origin");
+        String identityId = str(t, "identity_id");
+        String ticketNumber = str(t, "ticket_number");
+
+        Map<String, Object> messageBody = new LinkedHashMap<>();
+        messageBody.put("channel", channel);
+        messageBody.put("direction", "outbound");
+        messageBody.put("authorType", "agent");
+        messageBody.put("authorId", user.agentId());
+        messageBody.put("content", content);
+        DbWriterClient.ApiResult recorded = db.call(
+                "POST", "/api/v1/db/tickets/" + id + "/messages", messageBody);
+        if (recorded.status() >= 400) {
+            return Response.status(recorded.status()).entity(recorded.body()).build();
+        }
+
+        boolean emailSent = false;
+        String emailError = null;
+        if ("email".equals(channel) && identityId != null) {
+            DbWriterClient.ApiResult identity = db.call("GET", "/api/v1/db/identities/" + identityId, null);
+            String toAddress = identity.status() < 400 ? str(identity.body(), "email") : null;
+            if (toAddress != null && !toAddress.isBlank()) {
+                try {
+                    emailSent = emailAdapter.sendReply(
+                            toAddress, "Update on your complaint " + ticketNumber, content, null);
+                } catch (Exception e) {
+                    emailError = e.getMessage();
+                    LOG.errorf(e, "Failed to send reply email for ticket %s", id);
+                }
+            } else {
+                emailError = "No email address on file for this ticket's identity";
+            }
+        }
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("recorded", true);
+        response.put("channel", channel);
+        response.put("emailSent", emailSent);
+        if (emailError != null) {
+            response.put("emailError", emailError);
+        }
+        return Response.ok(response).build();
     }
 
     @POST
@@ -101,18 +240,29 @@ public class TicketsResource {
         if (current.status() >= 400) {
             return Response.status(current.status()).entity(current.body()).build();
         }
-        String fromStatus = String.valueOf(current.body().get("status"));
+        Map<String, Object> ticket = current.body();
+        String fromStatus = String.valueOf(ticket.get("status"));
         String toStatus = str(input, "toStatus");
         if (!user.can(transitionAction(toStatus))) {
             return forbidden("INSUFFICIENT_ROLE", "Your role cannot perform this transition");
         }
+        String noteContent = str(input, "note");
+        if (noteContent == null) {
+            noteContent = str(input, "noteContent");
+        }
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("fromStatus", fromStatus);
         body.put("toStatus", toStatus);
-        body.put("noteContent", input.getOrDefault("note", input.get("noteContent")));
+        body.put("noteContent", noteContent);
         body.put("agentId", user.agentId());
 
         DbWriterClient.ApiResult result = db.call("POST", "/api/v1/db/tickets/" + id + "/transition", body);
+        // Structured citizen-facing email (Feature 06 x 14): only on the
+        // transitions the citizen actually cares about — resolved/closed —
+        // not on every intermediate status change or standalone note.
+        if (result.status() < 400 && ("resolved".equals(toStatus) || "closed".equals(toStatus))) {
+            notifier.sendStatusUpdateEmail(ticket, toStatus, noteContent);
+        }
         return Response.status(result.status()).entity(result.body()).build();
     }
 

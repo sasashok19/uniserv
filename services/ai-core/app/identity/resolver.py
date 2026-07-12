@@ -31,7 +31,18 @@ class ResolveRequest(BaseModel):
     threadId: Optional[str] = None
     declaredAnonymous: bool = False
     confirmedEmail: Optional[str] = None
+    # A citizen-provided mobile number (e.g. from the email intake form) —
+    # takes priority over confirmedEmail so the same person is recognised by
+    # phone across channels, matching how a verified WhatsApp number already
+    # resolves. confirmedName is stored alongside it when creating a new
+    # profile (not currently updated on an existing match).
+    confirmedPhone: Optional[str] = None
+    confirmedName: Optional[str] = None
     rawText: Optional[str] = None
+    # Correlation id for the whole transaction (set by the adapter that first
+    # received the message); threaded through db-writer calls and every event
+    # emitted here so the resolution outcome can be traced back to its origin.
+    traceId: Optional[str] = None
 
 
 class IdentityResolver:
@@ -40,23 +51,30 @@ class IdentityResolver:
         self._publisher = publisher
 
     async def resolve(self, req: ResolveRequest) -> dict:
+        logger.info("identity resolve start traceId=%s tenantId=%s channel=%s declaredAnonymous=%s",
+                    req.traceId, req.tenantId, req.channel, req.declaredAnonymous)
         # 1. Anonymous declared → mint a unique ANON ref and a fresh profile.
         if req.declaredAnonymous:
             return await self._resolve_anonymous(req)
 
-        # 2. WhatsApp (verified phone) → auto-confirmed match/create by phone.
-        if req.channel == "whatsapp" and req.channelIdentity.verified and req.channelIdentity.value:
-            return await self._resolve_phone(req)
+        # 2. A citizen-provided mobile (e.g. email intake form) → match/create
+        #    by phone, same as WhatsApp — phone is the cross-channel key.
+        if req.confirmedPhone:
+            return await self._resolve_phone(req, req.confirmedPhone)
 
-        # 3. Email with a user-confirmed address → match/create by email.
+        # 3. WhatsApp (verified phone) → auto-confirmed match/create by phone.
+        if req.channel == "whatsapp" and req.channelIdentity.verified and req.channelIdentity.value:
+            return await self._resolve_phone(req, req.channelIdentity.value)
+
+        # 4. Email with a user-confirmed address → match/create by email.
         if req.confirmedEmail:
             return await self._resolve_confirmed_email(req)
 
-        # 4. Otherwise (e.g. unverified email) → identity gate: pending.
+        # 5. Otherwise (e.g. unverified email) → identity gate: pending.
         return await self._resolve_pending(req)
 
     async def _resolve_anonymous(self, req: ResolveRequest) -> dict:
-        anon_ref = await self._unique_anon_ref(req.tenantId)
+        anon_ref = await self._unique_anon_ref(req.tenantId, req.traceId)
         master_id = str(uuid.uuid4())
         await self._db.create_identity({
             "tenantId": req.tenantId,
@@ -64,8 +82,11 @@ class IdentityResolver:
             "isAnonymous": True,
             "anonRefId": anon_ref,
             "channelIdsJson": self._channel_ids(req, None),
-        })
-        await self._emit_resolved(req.tenantId, master_id, "anonymous", is_anonymous=True, anon_ref_id=anon_ref)
+        }, trace_id=req.traceId)
+        await self._emit_resolved(req.tenantId, master_id, "anonymous",
+                                  trace_id=req.traceId, is_anonymous=True, anon_ref_id=anon_ref)
+        logger.info("identity resolved traceId=%s tenantId=%s masterId=%s status=anonymous anonRefId=%s isNew=True",
+                    req.traceId, req.tenantId, master_id, anon_ref)
         return {
             "masterId": master_id,
             "identityStatus": "anonymous",
@@ -73,40 +94,94 @@ class IdentityResolver:
             "isNew": True,
         }
 
-    async def _resolve_phone(self, req: ResolveRequest) -> dict:
-        phone = normalise_phone(req.channelIdentity.value)
-        existing = await self._db.find_by_phone(req.tenantId, phone)
-        if existing:
-            master_id = existing["master_id"]
-            await self._emit_resolved(req.tenantId, master_id, "confirmed")
+    async def _resolve_phone(self, req: ResolveRequest, phone_value: str) -> dict:
+        phone = normalise_phone(phone_value)
+        native_email = (
+            normalise_email(req.channelIdentity.value)
+            if req.channel == "email" and req.channelIdentity.value else None
+        )
+        existing_by_phone = await self._db.find_by_phone(req.tenantId, phone, trace_id=req.traceId)
+
+        if existing_by_phone:
+            master_id = existing_by_phone["master_id"]
+            # Cross-channel merge: this request also carries a native email
+            # that already belongs to a SEPARATE, independently-created
+            # identity (e.g. emailed in once before ever giving a phone, and
+            # separately WhatsApp'd in) — same person, two records so far;
+            # combine them (moves the older one's tickets onto this one).
+            if native_email:
+                other = await self._db.find_by_email(req.tenantId, native_email, trace_id=req.traceId)
+                if other and other["master_id"] != master_id:
+                    await self._db.merge_identity(existing_by_phone["id"], other["master_id"], trace_id=req.traceId)
+                    logger.info(
+                        "identities merged traceId=%s tenantId=%s keptMasterId=%s mergedMasterId=%s",
+                        req.traceId, req.tenantId, master_id, other["master_id"])
+            await self._emit_resolved(req.tenantId, master_id, "confirmed", trace_id=req.traceId)
+            logger.info("identity resolved traceId=%s tenantId=%s masterId=%s status=confirmed isNew=False",
+                        req.traceId, req.tenantId, master_id)
+            return {"masterId": master_id, "identityStatus": "confirmed", "isNew": False}
+
+        # Not found by phone — before creating fresh, check whether the
+        # native email (for email channel) already has a record from an
+        # earlier interaction; enrich it with the phone instead of creating
+        # a duplicate for the same person.
+        existing_by_email = (
+            await self._db.find_by_email(req.tenantId, native_email, trace_id=req.traceId)
+            if native_email else None
+        )
+        if existing_by_email:
+            master_id = existing_by_email["master_id"]
+            enrichment = {"phone": phone}
+            if req.confirmedName:
+                enrichment["name"] = req.confirmedName
+            await self._db.update_identity(existing_by_email["id"], enrichment, trace_id=req.traceId)
+            await self._emit_resolved(req.tenantId, master_id, "confirmed", trace_id=req.traceId)
+            logger.info("identity enriched with phone traceId=%s tenantId=%s masterId=%s",
+                        req.traceId, req.tenantId, master_id)
             return {"masterId": master_id, "identityStatus": "confirmed", "isNew": False}
 
         master_id = str(uuid.uuid4())
-        await self._db.create_identity({
+        payload = {
             "tenantId": req.tenantId,
             "masterId": master_id,
             "phone": phone,
             "channelIdsJson": self._channel_ids(req, phone),
-        })
-        await self._emit_resolved(req.tenantId, master_id, "confirmed")
+        }
+        if req.confirmedName:
+            payload["name"] = req.confirmedName
+        if native_email:
+            payload["email"] = native_email
+        await self._db.create_identity(payload, trace_id=req.traceId)
+        await self._emit_resolved(req.tenantId, master_id, "confirmed", trace_id=req.traceId)
+        logger.info("identity resolved traceId=%s tenantId=%s masterId=%s status=confirmed isNew=True",
+                    req.traceId, req.tenantId, master_id)
         return {"masterId": master_id, "identityStatus": "confirmed", "isNew": True}
 
     async def _resolve_confirmed_email(self, req: ResolveRequest) -> dict:
         email = normalise_email(req.confirmedEmail)
-        existing = await self._db.find_by_email(req.tenantId, email)
+        existing = await self._db.find_by_email(req.tenantId, email, trace_id=req.traceId)
         if existing:
             master_id = existing["master_id"]
-            await self._emit_resolved(req.tenantId, master_id, "confirmed")
+            await self._emit_resolved(req.tenantId, master_id, "confirmed", trace_id=req.traceId)
+            logger.info(
+                "identity resolved traceId=%s tenantId=%s masterId=%s status=confirmed merged=False isNew=False",
+                req.traceId, req.tenantId, master_id)
             return {"masterId": master_id, "identityStatus": "confirmed", "merged": False, "isNew": False}
 
         master_id = str(uuid.uuid4())
-        await self._db.create_identity({
+        payload = {
             "tenantId": req.tenantId,
             "masterId": master_id,
             "email": email,
             "channelIdsJson": self._channel_ids(req, email),
-        })
-        await self._emit_resolved(req.tenantId, master_id, "confirmed")
+        }
+        if req.confirmedName:
+            payload["name"] = req.confirmedName
+        await self._db.create_identity(payload, trace_id=req.traceId)
+        await self._emit_resolved(req.tenantId, master_id, "confirmed", trace_id=req.traceId)
+        logger.info(
+            "identity resolved traceId=%s tenantId=%s masterId=%s status=confirmed merged=False isNew=True",
+            req.traceId, req.tenantId, master_id)
         return {"masterId": master_id, "identityStatus": "confirmed", "merged": False, "isNew": True}
 
     async def _resolve_pending(self, req: ResolveRequest) -> dict:
@@ -117,32 +192,35 @@ class IdentityResolver:
             "channelIdentityValue": req.channelIdentity.value,
             "rawMessage": req.rawText,
             "timeoutHours": settings.identity_pending_timeout_hours,
-        })
+        }, trace_id=req.traceId)
         # Signal the AI pipeline that an identity confirmation is needed.
         event = build_event(req.tenantId, "identity.pending", {
             "threadId": req.threadId,
             "channel": req.channel,
-        })
+        }, trace_id=req.traceId)
         await self._publisher.publish(streams.IDENTITY_PENDING, event)
+        logger.info("identity pending traceId=%s tenantId=%s threadId=%s channel=%s",
+                    req.traceId, req.tenantId, req.threadId, req.channel)
         return {"identityStatus": "pending", "threadId": req.threadId}
 
-    async def _unique_anon_ref(self, tenant_id: str) -> str:
+    async def _unique_anon_ref(self, tenant_id: str, trace_id: Optional[str] = None) -> str:
         prefix = settings.identity_anon_ref_prefix
         for _ in range(20):
             ref = generate_anon_ref(prefix)
-            if not await self._db.anon_ref_exists(tenant_id, ref):
+            if not await self._db.anon_ref_exists(tenant_id, ref, trace_id=trace_id):
                 return ref
         # Extremely unlikely; fall back to a longer suffix via uuid.
         return f"{prefix}-{uuid.uuid4().hex[:6].upper()}"
 
     async def _emit_resolved(self, tenant_id: str, master_id: str, identity_status: str,
+                             trace_id: Optional[str] = None,
                              is_anonymous: bool = False, anon_ref_id: Optional[str] = None) -> None:
         event = build_event(tenant_id, "identity.resolved", {
             "masterId": master_id,
             "identityStatus": identity_status,
             "isAnonymous": is_anonymous,
             "anonRefId": anon_ref_id,
-        })
+        }, trace_id=trace_id)
         await self._publisher.publish(streams.IDENTITY_RESOLVED, event)
 
     @staticmethod

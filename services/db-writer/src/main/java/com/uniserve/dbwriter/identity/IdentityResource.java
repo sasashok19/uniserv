@@ -35,6 +35,16 @@ public class IdentityResource {
     }
 
     @GET
+    @Path("/{id}")
+    public Response getById(@PathParam("id") String id) {
+        return identities.getById(id)
+                .<Response>map(p -> Response.ok(p).build())
+                .orElseGet(() -> Response.status(404)
+                        .entity(Map.of("error", Map.of("code", "NOT_FOUND", "message", "identity not found: " + id)))
+                        .build());
+    }
+
+    @GET
     public Map<String, Object> find(@QueryParam("tenantId") String tenantId,
                                     @QueryParam("email") String email,
                                     @QueryParam("phone") String phone,
@@ -62,6 +72,14 @@ public class IdentityResource {
     @Consumes(MediaType.APPLICATION_JSON)
     public Map<String, Object> merge(@PathParam("id") String id, Map<String, Object> body) {
         return identities.merge(id, body);
+    }
+
+    /** Enrich with a newly-learned name/email/phone (Feature 03/06) — never overwrites a set field. */
+    @PATCH
+    @Path("/{id}")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Map<String, Object> update(@PathParam("id") String id, Map<String, Object> body) {
+        return identities.update(id, body);
     }
 
     @GET

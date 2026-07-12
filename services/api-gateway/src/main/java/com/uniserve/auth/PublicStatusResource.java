@@ -46,7 +46,9 @@ public class PublicStatusResource {
 
         Map<String, Object> p = profile.get();
         String tenantId = String.valueOf(p.get("tenant_id"));
-        String identityId = String.valueOf(p.get("id"));
+        // tickets.identity_id is populated with the profile's masterId (see
+        // ai-core's identity resolver, Feature 03), not its primary key.
+        String identityId = String.valueOf(p.get("master_id"));
 
         List<Map<String, Object>> tickets = db.listTickets(
                 "tenantId=" + enc(tenantId) + "&identityId=" + enc(identityId));

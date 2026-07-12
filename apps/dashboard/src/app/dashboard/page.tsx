@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 
 type Ticket = {
@@ -87,8 +88,12 @@ function TicketQueue({ role }: { role: string }) {
       </thead>
       <tbody>
         {tickets.map((t) => (
-          <tr key={t.id} className="border-t">
-            <td className="p-2 font-medium">{t.ticket_number}</td>
+          <tr key={t.id} className="border-t hover:bg-muted/30">
+            <td className="p-2 font-medium">
+              <Link href={`/dashboard/tickets/${t.id}`} className="hover:underline">
+                {t.ticket_number}
+              </Link>
+            </td>
             <td className="p-2">{t.status}</td>
             <td className="p-2">{t.priority_label ?? "—"}</td>
             <td className="p-2">{t.category ?? "—"}</td>

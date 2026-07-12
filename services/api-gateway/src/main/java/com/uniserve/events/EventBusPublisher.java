@@ -6,6 +6,7 @@ import io.quarkus.redis.datasource.RedisDataSource;
 import io.quarkus.redis.datasource.stream.StreamCommands;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -21,6 +22,8 @@ import java.util.Map;
  */
 @ApplicationScoped
 public class EventBusPublisher {
+
+    private static final Logger LOG = Logger.getLogger(EventBusPublisher.class);
 
     private final StreamCommands<String, String, String> streams;
     private final ObjectMapper mapper;
@@ -40,7 +43,16 @@ public class EventBusPublisher {
      */
     public String publish(String stream, BaseEvent event) {
         String key = EventStreams.key(event.tenantId(), stream);
-        return streams.xadd(key, toFields(event));
+        try {
+            String streamMsgId = streams.xadd(key, toFields(event));
+            LOG.infof("Event published: traceId=%s stream=%s eventId=%s streamMsgId=%s",
+                    event.traceId(), key, event.id(), streamMsgId);
+            return streamMsgId;
+        } catch (RuntimeException e) {
+            LOG.errorf(e, "Failed to publish event: traceId=%s stream=%s eventId=%s",
+                    event.traceId(), key, event.id());
+            throw e;
+        }
     }
 
     /**
@@ -55,6 +67,8 @@ public class EventBusPublisher {
         fields.put("originalStream", originalStream);
         fields.put("error", error == null ? "" : error);
         fields.put("failedAt", Instant.now().toString());
+        LOG.warnf("Routing event to DLQ: traceId=%s originalStream=%s eventId=%s error=%s",
+                event.traceId(), originalStream, event.id(), error);
         return streams.xadd(key, fields);
     }
 

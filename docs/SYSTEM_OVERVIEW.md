@@ -101,5 +101,5 @@ DB_WRITER_URL=http://db-writer:8080
 
 # App
 APP_ENV=development   # development | production
-TENANT_ID=default     # overridden per tenant in multi-tenant setup
+TENANT_ID=t1          # the seeded "TNEB Demo" tenant in dev; overridden per tenant in multi-tenant setup
 ```

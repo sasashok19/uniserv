@@ -78,6 +78,8 @@ public class WhatsAppWebhookResource {
         try {
             JsonNode root = mapper.readTree(body);
             for (ChannelMessageReceived message : WhatsAppParser.parse(root, tenantId)) {
+                LOG.infof("WhatsApp message received: traceId=%s from=%s threadId=%s",
+                        message.traceId(), message.channelIdentity().value(), message.threadId());
                 publisher.publish(message);
                 published++;
             }
@@ -85,7 +87,7 @@ public class WhatsAppWebhookResource {
             // Meta requires a prompt 200 to avoid retries storms; log and swallow parse errors.
             LOG.errorf(e, "Failed to process WhatsApp webhook payload");
         }
-        LOG.debugf("WhatsApp webhook processed, published=%d", published);
+        LOG.infof("WhatsApp webhook processed, published=%d", published);
         return Response.ok().build();
     }
 }

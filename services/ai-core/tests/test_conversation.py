@@ -10,7 +10,12 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from app.conversation.agent import ChannelIdentityIn, ConversationAgent, TestEventRequest
+from app.conversation.agent import (
+    IDENTITY_REQUEST_MESSAGE,
+    ChannelIdentityIn,
+    ConversationAgent,
+    TestEventRequest,
+)
 from app.conversation.openai_gateway import OpenAIAssistantGateway
 
 
@@ -34,16 +39,164 @@ def _req(**overrides) -> TestEventRequest:
 # Rule-based fallback (no OPENAI_ASSISTANT_ID configured)
 # ---------------------------------------------------------------------------
 
+def test_identity_request_message_does_not_promote_anonymous():
+    assert "anonymous" not in IDENTITY_REQUEST_MESSAGE.lower()
+
+
 def test_rule_based_identity_gate_triggers_for_unverified_email():
     agent = ConversationAgent("t1")
     with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
          patch.object(agent, "_save_state", new=AsyncMock()) as save_state:
         publisher.publish = AsyncMock(return_value="1-0")
         result = _run(agent.process(_req()))
 
     assert result == {"identityStatus": "pending", "identityRequestSent": True, "complaintReady": False}
     save_state.assert_awaited_once()
+    # First time asking: the full template, not a "still need" list.
+    event_arg = publisher.publish.await_args.args[1]
+    assert "Name" in event_arg["payload"]["messageText"]
+
+
+def test_rule_based_name_alone_is_sufficient_no_mobile_needed():
+    """Email channel already has the native from-address as a contact
+    method, so Name is the only field that actually blocks the gate."""
+    agent = ConversationAgent("t1")
+    req = _req(rawText="Name: Jane Doe")
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+         patch.object(agent, "_publisher") as publisher, \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_save_state", new=AsyncMock()), \
+         patch("app.conversation.agent.IdentityResolver") as resolver_cls:
+        publisher.publish = AsyncMock(return_value="1-0")
+        resolver_cls.return_value.resolve = AsyncMock(return_value={"masterId": "m-4", "identityStatus": "confirmed"})
+        result = _run(agent.process(req))
+
+    assert result["identityStatus"] == "confirmed"
+    resolve_req = resolver_cls.return_value.resolve.await_args.args[0]
+    assert resolve_req.confirmedName == "Jane Doe"
+    assert resolve_req.confirmedPhone is None
+    assert resolve_req.confirmedEmail == "unknown@test.com"
+
+
+def test_rule_based_known_identity_skips_intake_entirely():
+    """A returning citizen (same email, name+phone already on file) isn't
+    asked for identity details again."""
+    agent = ConversationAgent("t1")
+    req = _req(rawText="My meter is faulty again this week")
+    known = {"master_id": "m-7", "name": "Jane Doe", "phone": "9876543210"}
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+         patch.object(agent, "_publisher") as publisher, \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_save_state", new=AsyncMock()), \
+         patch.object(agent._db, "find_by_email", new=AsyncMock(return_value=known)):
+        publisher.publish = AsyncMock(return_value="1-0")
+        result = _run(agent.process(req))
+
+    assert result["identityStatus"] == "confirmed"
+    assert result["complaintReady"] is True
+    stream_arg, event_arg = publisher.publish.await_args.args
+    assert stream_arg == "complaint.ready"
+    assert event_arg["payload"]["masterId"] == "m-7"
+
+
+def test_rule_based_invalid_mobile_and_pincode_are_flagged_but_name_present_is_not():
+    agent = ConversationAgent("t1")
+    prior_state = {"identity_status": "pending", "questions_asked": 0, "original_raw_text": "My meter is faulty"}
+    req = _req(rawText="Service ID: SC123, Mobile: 98765, Name: Jane, Pin code: 6002")
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+         patch.object(agent, "_publisher") as publisher, \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=prior_state)), \
+         patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_save_state", new=AsyncMock()):
+        publisher.publish = AsyncMock(return_value="1-0")
+        result = _run(agent.process(req))
+
+    assert result["complaintReady"] is False
+    message = publisher.publish.await_args.args[1]["payload"]["messageText"]
+    assert "10-digit Mobile" in message
+    assert "6-digit Area Pin Code" in message
+    assert "still need" in message
+    assert "- Name" not in message  # name was supplied — not re-asked
+
+
+def test_rule_based_second_ask_lists_only_what_is_still_missing():
+    agent = ConversationAgent("t1")
+    prior_state = {"identity_status": "pending", "questions_asked": 0, "original_raw_text": "My meter is faulty"}
+    req = _req(rawText="My mobile is 9876543210 and pin code is 600028")  # no name yet
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+         patch.object(agent, "_publisher") as publisher, \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=prior_state)), \
+         patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_save_state", new=AsyncMock()):
+        publisher.publish = AsyncMock(return_value="1-0")
+        result = _run(agent.process(req))
+
+    assert result["complaintReady"] is False
+    message = publisher.publish.await_args.args[1]["payload"]["messageText"]
+    assert "still need" in message
+    assert "Name" in message
+    assert "Mobile" not in message  # already supplied and valid
+
+
+def test_rule_based_full_intake_reply_unblocks_gate_and_recalls_original_complaint():
+    agent = ConversationAgent("t1")
+    # Turn 1: original complaint, unverified email -> pending, original text saved.
+    req1 = _req(rawText="My meter is faulty and showing wrong readings for the past week")
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+         patch.object(agent, "_publisher") as publisher, \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_save_state", new=AsyncMock()) as save_state:
+        publisher.publish = AsyncMock(return_value="1-0")
+        _run(agent.process(req1))
+    saved_state = save_state.await_args.args[1]
+    assert saved_state["original_raw_text"] == req1.rawText
+
+    # Turn 2: the intake form reply, no mention of the original complaint.
+    req2 = _req(rawText="Service/Customer ID: SC98765\nMobile Number: 9876543210\nName: Jane Doe\nArea Pin Code: 600028")
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+         patch.object(agent, "_publisher") as publisher, \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=saved_state)), \
+         patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_save_state", new=AsyncMock()), \
+         patch("app.conversation.agent.IdentityResolver") as resolver_cls:
+        publisher.publish = AsyncMock(return_value="2-0")
+        resolver_cls.return_value.resolve = AsyncMock(return_value={"masterId": "m-9", "identityStatus": "confirmed"})
+        result = _run(agent.process(req2))
+
+    assert result["identityStatus"] == "confirmed"
+    assert result["complaintReady"] is True
+    # The complaint text is the ORIGINAL message, not the intake reply.
+    assert result["extractedFields"]["complaint_summary"] == req1.rawText
+    assert result["extractedFields"]["intake"]["serviceId"] == "SC98765"
+    assert result["extractedFields"]["intake"]["mobile"] == "9876543210"
+    assert result["extractedFields"]["intake"]["name"] == "Jane Doe"
+    assert result["extractedFields"]["intake"]["pinCode"] == "600028"
+    event_arg = publisher.publish.await_args.args[1]
+    assert event_arg["payload"]["masterId"] == "m-9"
+    resolve_req = resolver_cls.return_value.resolve.await_args.args[0]
+    assert resolve_req.confirmedPhone == "9876543210"
+    assert resolve_req.confirmedName == "Jane Doe"
+
+
+def test_rule_based_email_reply_anonymous_unblocks_identity_gate():
+    agent = ConversationAgent("t1")
+    req = _req(rawText="anonymous - I don't want to share details, my meter is faulty")
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+         patch.object(agent, "_publisher") as publisher, \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_save_state", new=AsyncMock()), \
+         patch("app.conversation.agent.IdentityResolver") as resolver_cls:
+        publisher.publish = AsyncMock(return_value="1-0")
+        resolver_cls.return_value.resolve = AsyncMock(return_value={"masterId": "anon-1", "identityStatus": "anonymous"})
+        result = _run(agent.process(req))
+
+    assert result["identityStatus"] == "anonymous"
+    assert result["complaintReady"] is True
 
 
 def test_rule_based_whatsapp_verified_clear_complaint_is_ready():
@@ -55,16 +208,20 @@ def test_rule_based_whatsapp_verified_clear_complaint_is_ready():
     )
     with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
-         patch.object(agent, "_save_state", new=AsyncMock()):
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_save_state", new=AsyncMock()), \
+         patch("app.conversation.agent.IdentityResolver") as resolver_cls:
         publisher.publish = AsyncMock(return_value="1-0")
+        resolver_cls.return_value.resolve = AsyncMock(return_value={"masterId": "m-1", "identityStatus": "confirmed"})
         result = _run(agent.process(req))
 
     assert result["identityStatus"] == "confirmed"
     assert result["complaintReady"] is True
     assert result["extractedFields"]["category_hint"] == "billing"
     publisher.publish.assert_awaited_once()
-    stream_arg = publisher.publish.await_args.args[0]
+    stream_arg, event_arg = publisher.publish.await_args.args
     assert stream_arg == "complaint.ready"
+    assert event_arg["payload"]["masterId"] == "m-1"
 
 
 def test_rule_based_vague_complaint_asks_one_followup():
@@ -76,8 +233,11 @@ def test_rule_based_vague_complaint_asks_one_followup():
     )
     with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
-         patch.object(agent, "_save_state", new=AsyncMock()):
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_save_state", new=AsyncMock()), \
+         patch("app.conversation.agent.IdentityResolver") as resolver_cls:
         publisher.publish = AsyncMock(return_value="1-0")
+        resolver_cls.return_value.resolve = AsyncMock(return_value={"masterId": "m-5", "identityStatus": "confirmed"})
         result = _run(agent.process(req))
 
     assert result["complaintReady"] is False
@@ -170,11 +330,12 @@ def test_tool_confirm_identity_calls_resolver_and_updates_state():
 
 def test_tool_submit_complaint_publishes_complaint_ready():
     agent = ConversationAgent("t1")
+    req = _req()
     state = {"identity_status": "confirmed", "master_id": "m-1"}
     with patch.object(agent, "_publisher") as publisher:
         publisher.publish = AsyncMock(return_value="9-0")
         result = _run(agent._tool_submit_complaint(
-            "thread-key", state, {"complaint_summary": "bill is wrong", "category_hint": "billing"}))
+            req, "thread-key", state, {"complaint_summary": "bill is wrong", "category_hint": "billing"}))
 
     assert result == {"complaintReady": True, "messageId": "9-0"}
     assert state["complaint_ready"] is True

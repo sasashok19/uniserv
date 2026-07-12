@@ -60,6 +60,16 @@ public class Ticket extends PanacheEntityBase {
     @Column(name = "channel_origin", nullable = false)
     public String channelOrigin;
 
+    /** Conversation thread key (Feature 06) — lets ai-core find the same
+     * ticket across turns without relying on short-lived Valkey state. */
+    @Column(name = "thread_id")
+    public String threadId;
+
+    /** Soft-delete (Feature 12): non-null hides the ticket from every queue.
+     * Never physically removed. */
+    @Column(name = "archived_at")
+    public String archivedAt;
+
     @Column(name = "is_duplicate")
     public Integer isDuplicate;
 
@@ -132,6 +142,8 @@ public class Ticket extends PanacheEntityBase {
         m.put("priority_label", priorityLabel);
         m.put("sentiment_score", sentimentScore);
         m.put("channel_origin", channelOrigin);
+        m.put("thread_id", threadId);
+        m.put("archived_at", archivedAt);
         m.put("is_duplicate", isDuplicate);
         m.put("parent_ticket_id", parentTicketId);
         m.put("resolution", resolution);

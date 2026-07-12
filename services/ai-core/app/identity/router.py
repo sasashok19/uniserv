@@ -24,5 +24,5 @@ async def resolve_identity(req: ResolveRequest) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except httpx.HTTPError as exc:
-        logger.error("db-writer call failed during identity resolve: %s", exc)
+        logger.error("db-writer call failed during identity resolve traceId=%s: %s", req.traceId, exc)
         raise HTTPException(status_code=502, detail="db-writer unavailable") from exc
