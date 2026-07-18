@@ -66,6 +66,7 @@ public class TicketService {
         t.sentimentScore = num(body, "sentimentScore");
         t.channelOrigin = channelOrigin;
         t.threadId = str(body, "threadId");
+        t.originMessageId = str(body, "originMessageId");
         t.isDuplicate = intOr(body, "isDuplicate", 0);
         t.parentTicketId = str(body, "parentTicketId");
         t.serviceId = str(body, "serviceId");

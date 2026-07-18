@@ -25,7 +25,9 @@ public class EmailAdapterResource {
     @Inject
     EmailAdapter emailAdapter;
 
-    public record TestSendRequest(String to, String subject, String body) {
+    /** {@code inReplyToMessageId} (Feature 15) — the ticket's origin inbound Message-ID, when
+     * known, so this email threads into the same chain instead of arriving as a fresh message. */
+    public record TestSendRequest(String to, String subject, String body, String inReplyToMessageId) {
     }
 
     @POST
@@ -52,7 +54,7 @@ public class EmailAdapterResource {
                 request.to(),
                 request.subject() == null ? "(no subject)" : request.subject(),
                 request.body() == null ? "" : request.body(),
-                null);
+                request.inReplyToMessageId());
         return Response.ok(Map.of("sent", sent)).build();
     }
 }

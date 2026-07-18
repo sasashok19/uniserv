@@ -58,6 +58,22 @@ def test_deliver_reply_embeds_ticket_number_in_subject_and_adds_do_not_remove_no
     assert "do not remove" in kwargs["json"]["body"].lower()
 
 
+def test_deliver_reply_forwards_origin_message_id_for_thread_continuity():
+    ctx, client = _mock_async_client({"sent": True})
+    payload = {
+        "channel": "email",
+        "channelIdentityValue": "citizen@example.com",
+        "messageText": "Following up on your complaint.",
+        "ticketNumber": "TKT-00051",
+        "originMessageId": "orig-msg-id-123",
+    }
+    with patch("app.notifications.sender.httpx.AsyncClient", return_value=ctx):
+        _run(deliver_reply(payload, trace_id="trace-thread"))
+
+    kwargs = client.post.await_args.kwargs
+    assert kwargs["json"]["inReplyToMessageId"] == "orig-msg-id-123"
+
+
 def test_deliver_reply_skips_whatsapp_no_outbound_send():
     payload = {
         "channel": "whatsapp",
@@ -89,6 +105,17 @@ def test_send_ticket_ack_email_includes_ticket_number_in_subject_and_body():
     assert "TKT-00042" in kwargs["json"]["subject"]
     assert "TKT-00042" in kwargs["json"]["body"]
     assert "billing" in kwargs["json"]["body"]
+
+
+def test_send_ticket_ack_email_forwards_origin_message_id_for_thread_continuity():
+    ctx, client = _mock_async_client({"sent": True})
+    with patch("app.notifications.sender.httpx.AsyncClient", return_value=ctx):
+        _run(send_ticket_ack_email(
+            channel="email", to_address="citizen@example.com", ticket_number="TKT-00042",
+            origin_message_id="orig-msg-id-456",
+        ))
+    kwargs = client.post.await_args.kwargs
+    assert kwargs["json"]["inReplyToMessageId"] == "orig-msg-id-456"
 
 
 def test_send_ticket_ack_email_skips_non_email_channel():

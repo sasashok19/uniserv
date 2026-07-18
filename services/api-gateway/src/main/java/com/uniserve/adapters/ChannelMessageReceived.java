@@ -38,7 +38,13 @@ public record ChannelMessageReceived(
         // prior thread, letting the dedup pipeline match it precisely
         // instead of guessing by identity+category. Null for channels
         // without a subject concept (WhatsApp) or older callers.
-        String subject
+        String subject,
+
+        // This message's OWN Message-ID (Feature 15, email only) — distinct
+        // from inReplyTo (the PARENT's id). Persisted as the ticket's origin
+        // message id so every outbound reply can set In-Reply-To/References
+        // and land in the same email chain instead of as a fresh message.
+        String messageId
 ) {
     public static final String TYPE = "channel.message.received";
 
@@ -51,6 +57,18 @@ public record ChannelMessageReceived(
             String sentAt, String receivedAt,
             String traceId) {
         this(id, tenantId, type, timestamp, channel, channelIdentity, rawText, rawMediaUrls,
-                languageHint, threadId, inReplyTo, sentAt, receivedAt, traceId, null);
+                languageHint, threadId, inReplyTo, sentAt, receivedAt, traceId, null, null);
+    }
+
+    /** Compatibility constructor for callers that predate the {@code messageId} field. */
+    public ChannelMessageReceived(
+            String id, String tenantId, String type, String timestamp,
+            String channel, ChannelIdentity channelIdentity,
+            String rawText, List<String> rawMediaUrls, String languageHint,
+            String threadId, String inReplyTo,
+            String sentAt, String receivedAt,
+            String traceId, String subject) {
+        this(id, tenantId, type, timestamp, channel, channelIdentity, rawText, rawMediaUrls,
+                languageHint, threadId, inReplyTo, sentAt, receivedAt, traceId, subject, null);
     }
 }

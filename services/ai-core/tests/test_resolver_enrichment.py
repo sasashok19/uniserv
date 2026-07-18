@@ -79,6 +79,47 @@ def test_phone_found_same_record_both_ways_does_not_merge():
     db.merge_identity.assert_not_called()
 
 
+def test_whatsapp_verified_phone_with_citizen_provided_email_enriches_existing_record():
+    """Feature 15/16: a WhatsApp citizen asked for (and supplying) their
+    email must have it treated exactly like a native email for enrichment —
+    this was the gap where confirmedEmail was silently ignored for any
+    channel other than "email"."""
+    db = AsyncMock()
+    db.find_by_phone = AsyncMock(return_value=None)
+    db.find_by_email = AsyncMock(return_value={"id": "row-1", "master_id": "m-1", "name": "Ravi"})
+    db.update_identity = AsyncMock(return_value={})
+
+    req = ResolveRequest(
+        tenantId="t1",
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
+        confirmedEmail="ravi@example.com",
+    )
+    result = _run(_resolver(db).resolve(req))
+
+    assert result == {"masterId": "m-1", "identityStatus": "confirmed", "isNew": False}
+    db.update_identity.assert_awaited_once_with("row-1", {"phone": "+919876543210"}, trace_id=None)
+    db.create_identity.assert_not_called()
+
+
+def test_whatsapp_verified_phone_with_citizen_provided_email_pointing_elsewhere_merges():
+    db = AsyncMock()
+    db.find_by_phone = AsyncMock(return_value={"id": "row-phone", "master_id": "m-phone"})
+    db.find_by_email = AsyncMock(return_value={"id": "row-email", "master_id": "m-email"})
+    db.merge_identity = AsyncMock(return_value={})
+
+    req = ResolveRequest(
+        tenantId="t1",
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
+        confirmedEmail="ravi@example.com",
+    )
+    result = _run(_resolver(db).resolve(req))
+
+    assert result["masterId"] == "m-phone"
+    db.merge_identity.assert_awaited_once_with("row-phone", "m-email", trace_id=None)
+
+
 def test_phone_not_found_and_no_existing_email_creates_fresh():
     db = AsyncMock()
     db.find_by_phone = AsyncMock(return_value=None)

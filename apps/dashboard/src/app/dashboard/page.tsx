@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 
 import AnalyticsPanel from "@/components/analytics/AnalyticsPanel";
 import TeamPanel from "@/components/admin/TeamPanel";
+import IntakeFieldsPanel from "@/components/admin/IntakeFieldsPanel";
 import { priorityBadgeClass, statusBadgeClass } from "@/lib/badges";
 
 type Ticket = {
@@ -133,8 +134,11 @@ function TicketQueue({ role }: { role: string }) {
 }
 
 function Administration() {
-  const [subTab, setSubTab] = useState<"team">("team");
-  const subTabs: { key: typeof subTab; label: string }[] = [{ key: "team", label: "Team" }];
+  const [subTab, setSubTab] = useState<"team" | "intake">("team");
+  const subTabs: { key: typeof subTab; label: string }[] = [
+    { key: "team", label: "Team" },
+    { key: "intake", label: "Intake Fields" },
+  ];
 
   return (
     <div>
@@ -152,6 +156,7 @@ function Administration() {
         ))}
       </nav>
       {subTab === "team" && <TeamPanel />}
+      {subTab === "intake" && <IntakeFieldsPanel />}
     </div>
   );
 }

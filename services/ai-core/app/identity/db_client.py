@@ -1,5 +1,6 @@
 """Async HTTP client for the db-writer identity API (Feature 03 → 04)."""
 
+import json
 import logging
 from typing import Optional
 
@@ -107,3 +108,16 @@ class DbWriterClient:
     async def add_message(self, ticket_id: str, payload: dict, trace_id: Optional[str] = None) -> dict:
         resp = await self._request("POST", f"/api/v1/db/tickets/{ticket_id}/messages", trace_id, json=payload)
         return resp.json()
+
+    async def get_tenant_config(self, tenant_id: str, trace_id: Optional[str] = None) -> dict:
+        """Parsed `config_json` for a tenant (Feature 15/16 intake fields,
+        categories, SLA) — `{}` on any failure so a config problem never
+        blocks the conversation turn itself."""
+        try:
+            resp = await self._request("GET", f"/api/v1/db/tenants/{tenant_id}", trace_id)
+            raw = resp.json().get("config_json")
+            return json.loads(raw) if raw else {}
+        except Exception as exc:  # noqa: BLE001 - config fetch is best-effort
+            logger.warning("failed to load tenant config traceId=%s tenantId=%s error=%s",
+                           trace_id, tenant_id, exc)
+            return {}

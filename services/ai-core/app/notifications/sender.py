@@ -38,10 +38,18 @@ def _subject_with_ticket(base_subject: str, ticket_number: Optional[str]) -> str
     return f"{base_subject} [Ticket {ticket_number}]"
 
 
-async def send_email(to_address: str, subject: str, body: str, trace_id: Optional[str] = None) -> dict:
+async def send_email(
+    to_address: str, subject: str, body: str, trace_id: Optional[str] = None,
+    in_reply_to: Optional[str] = None,
+) -> dict:
     """Deliver an email via api-gateway's `EmailAdapter.sendReply` (reused
     through its `/test-send` endpoint rather than duplicating SMTP config
-    here). Shared by every citizen-facing email this service sends."""
+    here). Shared by every citizen-facing email this service sends.
+
+    `in_reply_to` — the ticket's origin inbound Message-ID (Feature 15), when
+    known — sets In-Reply-To/References so this lands in the same chain in
+    the citizen's mailbox instead of as a fresh, disconnected email.
+    """
     url = f"{settings.api_gateway_url.rstrip('/')}/api/v1/internal/adapters/email/test-send"
     headers = {"Content-Type": "application/json"}
     if trace_id:
@@ -51,6 +59,7 @@ async def send_email(to_address: str, subject: str, body: str, trace_id: Optiona
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(url, headers=headers, json={
                 "to": to_address, "subject": subject, "body": body,
+                "inReplyToMessageId": in_reply_to,
             })
         resp.raise_for_status()
         sent = bool(resp.json().get("sent"))
@@ -70,6 +79,7 @@ async def deliver_reply(payload: dict, trace_id: Optional[str] = None) -> dict:
     message_text = payload.get("messageText") or ""
     is_identity_request = bool(payload.get("isIdentityRequest"))
     ticket_number = payload.get("ticketNumber")
+    origin_message_id = payload.get("originMessageId")
 
     if channel != "email":
         logger.info(
@@ -86,7 +96,7 @@ async def deliver_reply(payload: dict, trace_id: Optional[str] = None) -> dict:
     base_subject = IDENTITY_REQUEST_SUBJECT if is_identity_request else DEFAULT_SUBJECT
     subject = _subject_with_ticket(base_subject, ticket_number)
     body = message_text + (DO_NOT_REMOVE_NOTE if ticket_number else "")
-    return await send_email(to_address, subject, body, trace_id)
+    return await send_email(to_address, subject, body, trace_id, in_reply_to=origin_message_id)
 
 
 def _format_ticket_ack_body(ticket_number: str, category: Optional[str], status: str, is_duplicate: bool) -> str:
@@ -112,6 +122,7 @@ async def send_ticket_ack_email(
     status: str = "open",
     is_duplicate: bool = False,
     trace_id: Optional[str] = None,
+    origin_message_id: Optional[str] = None,
 ) -> dict:
     """Structured acknowledgment sent once a citizen's message becomes a
     tracked ticket (new or appended to an existing one) — carries the ticket
@@ -131,4 +142,4 @@ async def send_ticket_ack_email(
 
     subject = TICKET_ACK_SUBJECT_TEMPLATE.format(ticket_number=ticket_number)
     body = _format_ticket_ack_body(ticket_number, category, status, is_duplicate)
-    return await send_email(to_address, subject, body, trace_id)
+    return await send_email(to_address, subject, body, trace_id, in_reply_to=origin_message_id)

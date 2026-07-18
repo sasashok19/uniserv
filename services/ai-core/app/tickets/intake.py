@@ -46,7 +46,8 @@ def extract_ticket_number(subject: Optional[str]) -> Optional[str]:
 
 async def ensure_ticket_stub(
     db: DbWriterClient, tenant_id: str, thread_key: str, channel: str,
-    subject: Optional[str] = None, trace_id: Optional[str] = None,
+    subject: Optional[str] = None, origin_message_id: Optional[str] = None,
+    trace_id: Optional[str] = None,
 ) -> dict:
     """Find the ticket this message belongs to, or create a bare stub.
 
@@ -55,7 +56,10 @@ async def ensure_ticket_stub(
     inferred one, and is what lets a reply to an old ticket resolve to that
     exact ticket even if the underlying transport thread/message-id
     tracking (In-Reply-To headers, etc.) fails or the citizen re-quotes an
-    old message in a new one.
+    old message in a new one. `thread_key` itself is now unique per email
+    when there's no real In-Reply-To (see `ConversationAgent._thread_key`),
+    so step 2 below only ever matches a GENUINE prior thread, never an
+    unrelated new email from the same address.
     """
     referenced = extract_ticket_number(subject)
     if referenced:
@@ -77,6 +81,7 @@ async def ensure_ticket_stub(
         "channelOrigin": channel,
         "identityStatus": "pending",
         "status": "open",
+        "originMessageId": origin_message_id,
     }, trace_id=trace_id)
     logger.info("ticket stub created traceId=%s threadId=%s ticketId=%s ticketNumber=%s",
                 trace_id, thread_key, ticket.get("id"), ticket.get("ticketNumber"))

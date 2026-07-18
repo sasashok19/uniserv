@@ -47,7 +47,7 @@ public class TicketNotifier {
         }
         body.append("\nIf you have further questions, just reply to this email.");
         try {
-            emailAdapter.sendReply(toAddress, subject, body.toString(), null);
+            emailAdapter.sendReply(toAddress, subject, body.toString(), str(ticket, "origin_message_id"));
         } catch (Exception e) {
             LOG.errorf(e, "Failed to send status-update email for ticket %s", ticket.get("id"));
         }

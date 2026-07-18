@@ -17,6 +17,14 @@ from pydantic import BaseModel
 
 from app.classify.classifier import classify
 from app.config import settings
+from app.conversation.intake_fields import (
+    FIELD_CATALOG,
+    build_identity_request_message,
+    extract_configured_fields,
+    fields_for_channel,
+    is_native_field,
+    missing_fields,
+)
 from app.conversation.openai_gateway import OpenAIAssistantGateway
 from app.events import streams
 from app.events.client import get_valkey
@@ -29,96 +37,29 @@ from app.tickets.intake import update_ticket_identity
 
 logger = logging.getLogger("ai-core")
 
-IDENTITY_REQUEST_MESSAGE = (
-    "Thanks for reaching out. To register your complaint, please reply with "
-    "the following details:\n\n"
-    "1. Name:\n"
-    "2. Mobile Number (10 digits):\n"
-    "3. Service/Customer ID (if available):\n"
-    "4. Area Pin Code (if available, 6 digits):\n\n"
-    "If we don't hear back within 14 days, this request will be automatically closed."
-)
-
 FOLLOWUP_QUESTION = (
     "Thanks for reaching out. Could you tell us a bit more about what went wrong "
     "so we can help — for example the service affected and what happened?"
 )
 
-# Rule-based fallback only (no LLM to interpret a free-text reply). Identity
-# is confirmed by "anonymous", or by Name + a contact method — a mobile
-# number in the reply, or (for email) the native from-address, which is
-# already known without asking. So Name is the only field that actually
-# blocks the gate; Mobile/Service ID/Pin Code are extracted best-effort and
-# only checked for FORMAT (not presence) when supplied. Each field is
-# extracted by its label, tolerant of a ":"/"-"/"is" separator or none at
-# all. The mobile/pincode capture bounds are deliberately wide enough to also
-# catch too-short/too-long values — so a badly-formatted number is reported
-# as "invalid", not silently treated as "missing".
-# A self-typed value with no label isn't handled here (that needs real NLU —
-# see the OpenAI assistant path's confirm_identity tool).
+# Rule-based fallback only (no LLM to interpret a free-text reply). Which
+# fields are asked, and which are mandatory, is now configurable per tenant
+# per channel (Feature 15/16 — see app/conversation/intake_fields.py) rather
+# than a single hardcoded "only Name blocks the gate" rule. A self-typed
+# value with no label isn't handled here (that needs real NLU — see the
+# OpenAI assistant path's confirm_identity tool).
 _ANONYMOUS_REPLY_RE = re.compile(r"\banonymous\b", re.IGNORECASE)
-_SEP = r"(?:\s*(?:is\b|[:=\-])\s*)?"
-_SERVICE_ID_RE = re.compile(rf"(?:service|customer)[\s/]*id{_SEP}([A-Za-z0-9\-]{{2,20}})", re.IGNORECASE)
-_MOBILE_RE = re.compile(rf"mobile(?:\s*number)?\s*(?:\([^)]*\))?{_SEP}(\+?[\d\s\-]{{4,15}})", re.IGNORECASE)
-_NAME_RE = re.compile(rf"\bname{_SEP}([A-Za-z][A-Za-z .]{{1,60}})", re.IGNORECASE)
-_PINCODE_RE = re.compile(rf"(?:area\s*)?pin\s*code\s*(?:\([^)]*\))?{_SEP}([\d\s\-]{{4,10}})", re.IGNORECASE)
-
-_INTAKE_FIELD_LABELS = {
-    "serviceId": "Service/Customer ID",
-    "mobile": "Mobile Number (10 digits)",
-    "name": "Name",
-    "pinCode": "Area Pin Code (6 digits)",
-}
 
 
-def _digits_only(value: Optional[str]) -> str:
-    return re.sub(r"\D", "", value or "")
-
-
-def _extract_intake_fields(text: str) -> dict:
-    """Best-effort extraction of the four intake fields from a labeled reply."""
-    text = text or ""
-    service_id_match = _SERVICE_ID_RE.search(text)
-    mobile_match = _MOBILE_RE.search(text)
-    name_match = _NAME_RE.search(text)
-    pincode_match = _PINCODE_RE.search(text)
-
-    mobile_digits = _digits_only(mobile_match.group(1)) if mobile_match else None
-    pincode_digits = _digits_only(pincode_match.group(1)) if pincode_match else None
-
-    return {
-        "serviceId": service_id_match.group(1).strip() if service_id_match else None,
-        "mobile": mobile_digits or None,
-        "mobileValid": bool(mobile_digits) and len(mobile_digits) == 10,
-        "name": name_match.group(1).strip() if name_match else None,
-        "pinCode": pincode_digits or None,
-        "pinCodeValid": bool(pincode_digits) and len(pincode_digits) == 6,
-    }
-
-
-def _missing_intake_fields(intake: dict) -> list[str]:
-    """Human-readable list of what's missing or invalid, empty when complete.
-
-    Name is the only field that's actually required to block the gate — a
-    contact method is satisfied by Mobile (if supplied) or by the native
-    channel address, which is already known for email without asking.
-    Service ID / Pin Code are best-effort only. Mobile/Pin Code are still
-    flagged if supplied but malformed, since accepting a garbled number
-    would be worse than asking once more.
-    """
-    missing = []
-    if not intake["name"]:
-        missing.append(_INTAKE_FIELD_LABELS["name"])
-    if intake["mobile"] is not None and not intake["mobileValid"]:
-        missing.append("a valid 10-digit Mobile Number (the one you sent isn't 10 digits)")
-    if intake["pinCode"] is not None and not intake["pinCodeValid"]:
-        missing.append("a valid 6-digit Area Pin Code (the one you sent isn't 6 digits)")
-    return missing
-
-
-def _followup_missing_message(missing: list[str]) -> str:
-    bullets = "\n".join(f"- {item}" for item in missing)
-    return f"Thanks for the details. We still need:\n{bullets}"
+def _flatten_intake(intake: dict) -> dict:
+    """`{key: {"value":..., "source":...}}` -> `{key: value}`, keeping only
+    what the citizen actually wrote in THIS message — the shape every OTHER
+    consumer (ticket message formatting, service_id persistence) expects.
+    Native (channel address) and known (already-on-file) values are
+    deliberately excluded: they'd otherwise pad every ticket's "citizen
+    provided" summary with facts that were never actually written down in
+    this particular message."""
+    return {k: v["value"] for k, v in intake.items() if v.get("source") == "extracted"}
 
 
 class ChannelIdentityIn(BaseModel):
@@ -149,6 +90,13 @@ class TestEventRequest(BaseModel):
     # Email subject line of the inbound message, when the channel has one
     # (Feature 15) — used to detect a ticket number the citizen replied to.
     subject: Optional[str] = None
+    # This message's own Message-ID (Feature 15, email only) — used as a
+    # per-message-unique fallback thread key so a brand-new, unrelated email
+    # from an address that already has an open ticket never gets folded into
+    # it just because there's no real In-Reply-To to disambiguate (see
+    # ConversationAgent._thread_key). Also persisted as the ticket's
+    # origin_message_id for outbound reply threading.
+    messageId: Optional[str] = None
 
 
 class ConversationAgent:
@@ -182,47 +130,48 @@ class ConversationAgent:
         # rather than classify the intake reply itself.
         state = await self._load_state(thread_key) or {}
 
-        # --- Identity gate ---
+        # --- Identity gate (Feature 15/16: configurable per-channel fields) ---
         declared_anonymous = req.declaredAnonymous or bool(_ANONYMOUS_REPLY_RE.search(req.rawText or ""))
-        intake = None
-        summary_source = req.rawText
-        master_id = None
+        tenant_config = await self._db.get_tenant_config(req.tenantId, trace_id=req.traceId)
+        field_configs = fields_for_channel(tenant_config, req.channel)
 
-        if req.channelIdentity.verified or declared_anonymous:
-            master_id = await self._resolve_master_id(req, declared_anonymous)
-        else:
-            known = await self._find_known_identity(req)
-            if known:
-                # Returning citizen on this same email/phone with a name
-                # already on file — no need to ask again.
-                master_id = known["masterId"]
-            else:
-                intake = _extract_intake_fields(req.rawText)
-                missing = _missing_intake_fields(intake)
-                if missing:
-                    original_text = state.get("original_raw_text") or req.rawText
-                    is_first_ask = not state.get("original_raw_text")
-                    message = IDENTITY_REQUEST_MESSAGE if is_first_ask else _followup_missing_message(missing)
-                    logger.info("identity gate: requesting identity traceId=%s threadId=%s missing=%s",
-                                req.traceId, thread_key, missing)
-                    await self._send_reply(req, thread_key, message, is_identity_request=True)
-                    await self._save_state(thread_key, {
-                        "identity_status": "pending",
-                        "questions_asked": 0,
-                        "original_raw_text": original_text,
-                    })
-                    return {
-                        "identityStatus": "pending",
-                        "identityRequestSent": True,
-                        "complaintReady": False,
-                    }
-                # Name (+ optionally a valid mobile) present — gate passes.
-                # This reply is the intake form, not the complaint
-                # description; use whatever we captured on the first
-                # (pending) message instead.
-                summary_source = state.get("original_raw_text") or req.rawText
-                master_id = await self._resolve_master_id(req, declared_anonymous=False, intake=intake)
+        # A declared-anonymous citizen is never looked up (they've explicitly
+        # opted out of being identified) — only fields flagged
+        # mandatory-even-if-anonymous (e.g. a Service/Customer ID needed to
+        # route the complaint) can still block the gate for them.
+        known = None if declared_anonymous else await self._find_known_identity(req)
+        intake = extract_configured_fields(
+            req.rawText, req.channel, req.channelIdentity.value, req.channelIdentity.verified,
+            field_configs, known=known,
+        )
+        missing = missing_fields(intake, field_configs, declared_anonymous)
+        if missing:
+            original_text = state.get("original_raw_text") or req.rawText
+            is_first_ask = not state.get("original_raw_text")
+            message = build_identity_request_message(
+                field_configs, req.channel, req.channelIdentity.verified, missing, is_first_ask)
+            logger.info("identity gate: requesting identity traceId=%s threadId=%s missing=%s",
+                        req.traceId, thread_key, missing)
+            await self._send_reply(req, thread_key, message, is_identity_request=True)
+            await self._save_state(thread_key, {
+                "identity_status": "pending",
+                "questions_asked": 0,
+                "original_raw_text": original_text,
+            })
+            return {
+                "identityStatus": "pending",
+                "identityRequestSent": True,
+                "complaintReady": False,
+            }
 
+        # Gate passed. If this thread was previously asked for identity, this
+        # reply IS the intake form, not the complaint description — recall
+        # what the citizen originally wrote instead of classifying the
+        # intake reply itself. Otherwise (identity resolved immediately —
+        # known citizen, native channel, or everything mandatory was already
+        # in the first message) this message itself is the complaint.
+        summary_source = state.get("original_raw_text") or req.rawText
+        master_id = await self._resolve_master_id(req, declared_anonymous, intake=intake)
         identity_status = "anonymous" if declared_anonymous else "confirmed"
 
         # Reflect identity onto the stub ticket immediately (Feature 12) —
@@ -249,8 +198,9 @@ class ConversationAgent:
             complaint_ready = True
 
         extracted = {"complaint_summary": summary, "category_hint": category_hint}
-        if intake:
-            extracted["intake"] = intake
+        flat_intake = _flatten_intake(intake)
+        if flat_intake:
+            extracted["intake"] = flat_intake
 
         if complaint_ready:
             logger.info("complaint ready traceId=%s threadId=%s identityStatus=%s category=%s masterId=%s",
@@ -280,19 +230,17 @@ class ConversationAgent:
         }
 
     async def _find_known_identity(self, req: TestEventRequest) -> Optional[dict]:
-        """Skip the intake ask entirely for a returning citizen: same email or
-        phone seen before, with a name already on file."""
+        """The existing identity profile for this citizen's channel address,
+        if any (Feature 15/16) — used by `extract_configured_fields` to
+        auto-satisfy already-on-file fields per-field, instead of the old
+        all-or-nothing "has a name on file -> skip everything" check."""
         value = req.channelIdentity.value
         if not value:
             return None
         if req.channelIdentity.type == "email":
-            existing = await self._db.find_by_email(req.tenantId, value, trace_id=req.traceId)
-        elif req.channelIdentity.type == "phone":
-            existing = await self._db.find_by_phone(req.tenantId, value, trace_id=req.traceId)
-        else:
-            existing = None
-        if existing and existing.get("name"):
-            return {"masterId": existing.get("master_id")}
+            return await self._db.find_by_email(req.tenantId, value, trace_id=req.traceId)
+        if req.channelIdentity.type == "phone":
+            return await self._db.find_by_phone(req.tenantId, value, trace_id=req.traceId)
         return None
 
     async def _resolve_master_id(
@@ -303,10 +251,25 @@ class ConversationAgent:
         than once per thread (e.g. once when the gate passes, again if a
         later turn re-derives it) is safe — the anonymous path's
         fresh-ref-per-call behaviour is an accepted Phase-1 simplification.
+
+        Only "native" (the channel's own address) or "extracted" (freshly
+        written in THIS message) intake values are trusted here — a "known"
+        value is already on file and isn't a new signal, and feeding it back
+        in would risk re-triggering resolution/merge logic based on stale
+        data (see app/conversation/intake_fields.py).
         """
+        def _trusted(key: str) -> Optional[str]:
+            entry = (intake or {}).get(key)
+            if not entry or entry.get("source") not in ("native", "extracted"):
+                return None
+            if entry.get("valid") is False:
+                return None
+            return entry.get("value")
+
         native_email = req.channelIdentity.value if req.channelIdentity.type == "email" else None
-        confirmed_phone = intake.get("mobile") if intake and intake.get("mobileValid") else None
-        confirmed_name = intake.get("name") if intake else None
+        confirmed_phone = _trusted("mobile")
+        confirmed_email = (native_email if not declared_anonymous else None) or _trusted("email")
+        confirmed_name = _trusted("name")
         resolve_req = ResolveRequest(
             tenantId=req.tenantId,
             channel=req.channel,
@@ -316,7 +279,7 @@ class ConversationAgent:
             threadId=req.threadId,
             declaredAnonymous=declared_anonymous,
             confirmedPhone=confirmed_phone,
-            confirmedEmail=native_email if not declared_anonymous else None,
+            confirmedEmail=confirmed_email,
             confirmedName=confirmed_name,
             rawText=req.rawText,
             traceId=req.traceId,
@@ -339,8 +302,11 @@ class ConversationAgent:
             "complaint_ready": False,
         }
 
+        tenant_config = await self._db.get_tenant_config(req.tenantId, trace_id=req.traceId)
+        field_configs = fields_for_channel(tenant_config, req.channel)
+
         user_message = self._render_user_message(req)
-        additional_instructions = self._render_additional_instructions(req, state)
+        additional_instructions = self._render_additional_instructions(req, state, field_configs)
 
         async def execute_tool(name: str, args: dict) -> dict:
             if name == "confirm_identity":
@@ -433,7 +399,7 @@ class ConversationAgent:
         return "\n".join(lines)
 
     @staticmethod
-    def _render_additional_instructions(req: TestEventRequest, state: dict) -> str:
+    def _render_additional_instructions(req: TestEventRequest, state: dict, field_configs: list[dict]) -> str:
         remaining = max(settings.ai_max_followup_questions - state["questions_asked"], 0)
         parts = [
             f"identity_status={state['identity_status']}",
@@ -442,6 +408,17 @@ class ConversationAgent:
         ]
         if remaining == 0 and not state["complaint_ready"]:
             parts.append("You have used all follow-up questions: call submit_complaint now.")
+        # Feature 15/16: best-effort hint only — the Assistant's own tool
+        # schema/instructions aren't regenerated per tenant, so this can't
+        # enforce the configurable mandatory-field gate the way the
+        # rule-based path does; it just tells the model what this tenant
+        # currently requires for this channel before confirm_identity.
+        mandatory = [
+            FIELD_CATALOG[fc["key"]]["label"] for fc in field_configs
+            if fc.get("mandatory") and not is_native_field(fc["key"], req.channel, req.channelIdentity.verified)
+        ]
+        if mandatory:
+            parts.append(f"required_identity_fields_for_this_channel={', '.join(mandatory)}")
         return "; ".join(parts)
 
     # ------------------------------------------------------------------
@@ -450,12 +427,37 @@ class ConversationAgent:
 
     @staticmethod
     def _thread_key(req: TestEventRequest) -> str:
-        """Stable conversation key, used even when the channel omits threadId."""
-        return req.threadId or f"{req.channel}:{req.channelIdentity.value or 'anon'}"
+        """Stable conversation key, used even when the channel omits threadId.
+
+        WhatsApp has no subject/message-id concept and one persistent thread
+        per phone number is correct there, so it keeps the address-based
+        fallback. Email is different: a citizen sends many UNRELATED emails
+        from the same address over time, and folding every one of them
+        without a real In-Reply-To into a single "email:<address>" key would
+        (and did) collapse a brand-new complaint into whatever ticket that
+        address last had open. Falling back to this message's own
+        Message-ID instead makes every email-without-a-reply-header its own
+        thread by default — a genuine reply is still found via its
+        In-Reply-To (req.threadId) or, more robustly, via the ticket-number
+        embedded in the subject (see app/tickets/intake.py).
+        """
+        if req.threadId:
+            return req.threadId
+        if req.channel == "email" and req.messageId:
+            return f"email:{req.messageId}"
+        return f"{req.channel}:{req.channelIdentity.value or 'anon'}"
 
     async def _send_reply(
         self, req: TestEventRequest, thread_key: str, text: str, is_identity_request: bool = False,
     ) -> None:
+        origin_message_id = None
+        if req.ticketId:
+            try:
+                ticket = await self._db.get_ticket(req.ticketId, trace_id=req.traceId)
+                origin_message_id = ticket.get("origin_message_id")
+            except Exception:  # noqa: BLE001 - threading is best-effort, never blocks the reply itself
+                logger.warning("failed to fetch origin_message_id for reply threading traceId=%s ticketId=%s",
+                                req.traceId, req.ticketId)
         await self._publisher.publish(streams.AI_REPLY_SEND, build_event(
             self._tenant_id, "ai.reply.send", {
                 "channel": req.channel,
@@ -465,6 +467,7 @@ class ConversationAgent:
                 "isIdentityRequest": is_identity_request,
                 "isAnonymousAck": req.declaredAnonymous,
                 "ticketNumber": req.ticketNumber,
+                "originMessageId": origin_message_id,
             }, trace_id=req.traceId))
 
     async def _load_state(self, thread_key: str) -> Optional[dict]:

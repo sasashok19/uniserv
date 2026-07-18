@@ -196,3 +196,20 @@ HTTP/1.1 200 OK
 - `DB_WRITER_URL` is **http://db-writer:8090** (doc says 8081); db-writer runs on 8090 across the stack.
 - Anon-ref uniqueness is checked via db-writer `GET /api/v1/db/identities/anon-check`.
 - Pending-queue timeout job is **partial**: enqueue + timed-out query exist, but the ticket-status timeout sweep is deferred (tickets don't link to pending entries until later features).
+- **Cross-channel merge via citizen-provided email.** `_resolve_phone()`
+  previously derived an "email to check for a cross-channel merge" only from
+  an address *native* to the channel (i.e. `channel == "email"`). A WhatsApp
+  citizen's phone was treated as sufficient identity on its own, so any email
+  they later supplied was never fed into the resolver — the same person on
+  both channels ended up as two identities. `_resolve_phone()` now also
+  honours a citizen-*provided* `confirmedEmail`, so a WhatsApp-solicited email
+  actually enriches/merges the identity. This is driven by the intake gate now
+  asking WhatsApp users for their email by default (see Feature 15/16,
+  *Configurable per-channel intake fields* — `app/conversation/intake_fields.py`
+  and the README). Covered by `tests/test_resolver_enrichment.py`.
+- **Configurable intake fields.** Which fields the resolver's upstream intake
+  gate collects (and which are mandatory) is now tenant-configurable per
+  channel, read via `DbWriterClient.get_tenant_config()`. The resolver only
+  trusts values whose `source` is `native` or `extracted` (not `known`,
+  already-on-file) when deciding what to merge on. See the README's
+  *Configurable per-channel intake fields* section.

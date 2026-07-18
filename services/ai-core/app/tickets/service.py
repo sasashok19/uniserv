@@ -112,6 +112,7 @@ async def create_ticket_from_complaint(
             "ticketNumber": existing_ticket.get("ticket_number"),
             "category": existing_ticket.get("category") or category,
             "status": existing_ticket.get("status") or "open",
+            "originMessageId": existing_ticket.get("origin_message_id"),
         }
 
     priority = score(ScoreRequest(
@@ -158,4 +159,5 @@ async def create_ticket_from_complaint(
         "ticketNumber": ticket_number,
         "category": category,
         "status": "open",
+        "originMessageId": existing_stub.get("origin_message_id") if existing_stub else None,
     }

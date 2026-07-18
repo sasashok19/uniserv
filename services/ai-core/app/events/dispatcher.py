@@ -37,6 +37,7 @@ async def _handle_channel_message(tenant_id: str, event: dict) -> None:
         rawText=payload.get("rawText") or "",
         threadId=payload.get("threadId"),
         subject=payload.get("subject"),
+        messageId=payload.get("messageId"),
         traceId=trace_id,
     )
     thread_key = ConversationAgent._thread_key(req)
@@ -48,7 +49,8 @@ async def _handle_channel_message(tenant_id: str, event: dict) -> None:
     # once identity is confirmed — see app/tickets/intake.py. A subject-line
     # ticket reference (email only) takes priority over thread matching.
     stub = await ensure_ticket_stub(
-        DbWriterClient(), tenant_id, thread_key, req.channel, subject=req.subject, trace_id=trace_id)
+        DbWriterClient(), tenant_id, thread_key, req.channel,
+        subject=req.subject, origin_message_id=req.messageId, trace_id=trace_id)
     req.ticketId = stub["id"]
     req.ticketNumber = stub.get("ticketNumber")
     try:
@@ -111,6 +113,7 @@ async def _handle_complaint_ready(tenant_id: str, event: dict) -> None:
             status=result.get("status"),
             is_duplicate=result.get("action") == "append_to_existing",
             trace_id=trace_id,
+            origin_message_id=result.get("originMessageId"),
         )
     except Exception:  # noqa: BLE001 - the ticket itself is already saved; a failed ack email must not roll it back
         logger.exception("ticket ack email failed traceId=%s ticketId=%s", trace_id, result.get("ticketId"))

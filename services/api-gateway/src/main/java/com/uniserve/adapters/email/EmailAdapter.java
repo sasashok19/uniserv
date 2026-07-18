@@ -162,6 +162,7 @@ public class EmailAdapter {
         String from = extractFrom(message);
         String rawText = extractText(message);
         String threadId = extractThreadId(message);
+        String messageId = extractMessageId(message);
         String subject = message.getSubject();
         String nowIso = Instant.now().toString();
         String sentAt = message.getSentDate() != null
@@ -182,7 +183,8 @@ public class EmailAdapter {
                 sentAt,
                 nowIso,
                 UUID.randomUUID().toString(),
-                subject);
+                subject,
+                messageId);
     }
 
     static String extractFrom(Message message) throws Exception {
@@ -202,6 +204,16 @@ public class EmailAdapter {
         if (references != null && references.length > 0 && !isBlank(references[0])) {
             String[] ids = references[0].trim().split("\\s+");
             return stripBrackets(ids[ids.length - 1]);
+        }
+        return null;
+    }
+
+    /** This message's OWN Message-ID (Feature 15) — distinct from {@link #extractThreadId},
+     * which reads the PARENT's id. Used so our replies can thread back to this exact message. */
+    static String extractMessageId(Message message) throws Exception {
+        String[] messageId = message.getHeader("Message-ID");
+        if (messageId != null && messageId.length > 0 && !isBlank(messageId[0])) {
+            return stripBrackets(messageId[0].trim());
         }
         return null;
     }

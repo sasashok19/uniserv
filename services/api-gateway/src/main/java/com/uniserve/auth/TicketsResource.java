@@ -247,6 +247,7 @@ public class TicketsResource {
         String channel = str(t, "channel_origin");
         String identityId = str(t, "identity_id");
         String ticketNumber = str(t, "ticket_number");
+        String originMessageId = str(t, "origin_message_id");
 
         Map<String, Object> messageBody = new LinkedHashMap<>();
         messageBody.put("channel", channel);
@@ -268,7 +269,7 @@ public class TicketsResource {
             if (toAddress != null && !toAddress.isBlank()) {
                 try {
                     emailSent = emailAdapter.sendReply(
-                            toAddress, "Update on your complaint " + ticketNumber, content, null);
+                            toAddress, "Update on your complaint " + ticketNumber, content, originMessageId);
                 } catch (Exception e) {
                     emailError = e.getMessage();
                     LOG.errorf(e, "Failed to send reply email for ticket %s", id);

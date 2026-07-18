@@ -100,17 +100,24 @@ class IdentityResolver:
             normalise_email(req.channelIdentity.value)
             if req.channel == "email" and req.channelIdentity.value else None
         )
+        # A citizen-PROVIDED email (Feature 15/16 — e.g. a WhatsApp user
+        # asked for their email as part of the configurable intake fields)
+        # is just as good a cross-channel key as a native one; without this,
+        # an email actively solicited from a WhatsApp citizen would be
+        # silently ignored for enrichment/merge purposes.
+        provided_email = native_email or (normalise_email(req.confirmedEmail) if req.confirmedEmail else None)
         existing_by_phone = await self._db.find_by_phone(req.tenantId, phone, trace_id=req.traceId)
 
         if existing_by_phone:
             master_id = existing_by_phone["master_id"]
-            # Cross-channel merge: this request also carries a native email
-            # that already belongs to a SEPARATE, independently-created
-            # identity (e.g. emailed in once before ever giving a phone, and
-            # separately WhatsApp'd in) — same person, two records so far;
-            # combine them (moves the older one's tickets onto this one).
-            if native_email:
-                other = await self._db.find_by_email(req.tenantId, native_email, trace_id=req.traceId)
+            # Cross-channel merge: this request also carries an email
+            # (native or citizen-provided) that already belongs to a
+            # SEPARATE, independently-created identity (e.g. emailed in
+            # once before ever giving a phone, and separately WhatsApp'd
+            # in) — same person, two records so far; combine them (moves
+            # the older one's tickets onto this one).
+            if provided_email:
+                other = await self._db.find_by_email(req.tenantId, provided_email, trace_id=req.traceId)
                 if other and other["master_id"] != master_id:
                     await self._db.merge_identity(existing_by_phone["id"], other["master_id"], trace_id=req.traceId)
                     logger.info(
@@ -122,12 +129,12 @@ class IdentityResolver:
             return {"masterId": master_id, "identityStatus": "confirmed", "isNew": False}
 
         # Not found by phone — before creating fresh, check whether the
-        # native email (for email channel) already has a record from an
-        # earlier interaction; enrich it with the phone instead of creating
-        # a duplicate for the same person.
+        # email (native, or citizen-provided via intake) already has a
+        # record from an earlier interaction; enrich it with the phone
+        # instead of creating a duplicate for the same person.
         existing_by_email = (
-            await self._db.find_by_email(req.tenantId, native_email, trace_id=req.traceId)
-            if native_email else None
+            await self._db.find_by_email(req.tenantId, provided_email, trace_id=req.traceId)
+            if provided_email else None
         )
         if existing_by_email:
             master_id = existing_by_email["master_id"]
@@ -149,8 +156,8 @@ class IdentityResolver:
         }
         if req.confirmedName:
             payload["name"] = req.confirmedName
-        if native_email:
-            payload["email"] = native_email
+        if provided_email:
+            payload["email"] = provided_email
         await self._db.create_identity(payload, trace_id=req.traceId)
         await self._emit_resolved(req.tenantId, master_id, "confirmed", trace_id=req.traceId)
         logger.info("identity resolved traceId=%s tenantId=%s masterId=%s status=confirmed isNew=True",

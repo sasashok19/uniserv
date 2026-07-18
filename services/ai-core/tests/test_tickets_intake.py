@@ -67,6 +67,18 @@ def test_ensure_ticket_stub_falls_back_to_thread_when_subject_ticket_not_found()
     assert db.list_tickets.await_count == 2
 
 
+def test_ensure_ticket_stub_persists_origin_message_id_on_create():
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(return_value=[])
+    db.create_ticket = AsyncMock(return_value={"id": "t-3", "ticketNumber": "TKT-00003"})
+
+    _run(ensure_ticket_stub(
+        db, "t1", "email:msg-xyz", "email", origin_message_id="msg-xyz", trace_id="tr-5"))
+
+    payload = db.create_ticket.await_args.args[0]
+    assert payload["originMessageId"] == "msg-xyz"
+
+
 def test_extract_ticket_number_finds_reference_anywhere_in_subject():
     assert extract_ticket_number("Re: Billing issue [Ticket TKT-00042]") == "TKT-00042"
     assert extract_ticket_number("No reference here") is None

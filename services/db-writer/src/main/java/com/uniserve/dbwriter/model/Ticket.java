@@ -65,6 +65,12 @@ public class Ticket extends PanacheEntityBase {
     @Column(name = "thread_id")
     public String threadId;
 
+    /** The originating inbound email's own Message-ID (Feature 15, email only) —
+     * set once, reused as In-Reply-To/References on every outbound reply so the
+     * whole conversation stays in one chain in the citizen's mailbox. */
+    @Column(name = "origin_message_id")
+    public String originMessageId;
+
     /** Soft-delete (Feature 12): non-null hides the ticket from every queue.
      * Never physically removed. */
     @Column(name = "archived_at")
@@ -148,6 +154,7 @@ public class Ticket extends PanacheEntityBase {
         m.put("sentiment_score", sentimentScore);
         m.put("channel_origin", channelOrigin);
         m.put("thread_id", threadId);
+        m.put("origin_message_id", originMessageId);
         m.put("archived_at", archivedAt);
         m.put("is_duplicate", isDuplicate);
         m.put("parent_ticket_id", parentTicketId);

@@ -25,6 +25,7 @@ resolution workflow and full audit trail.
 - [Queue separation & ticket lifecycle](#queue-separation--ticket-lifecycle)
 - [Citizen-facing notifications](#citizen-facing-notifications)
 - [Subject-line ticket threading & dedup](#subject-line-ticket-threading--dedup)
+- [Configurable per-channel intake fields](#configurable-per-channel-intake-fields)
 - [HTTP API reference](#http-api-reference)
 - [Environment variables](#environment-variables)
 - [Logging, log levels & transaction tracing](#logging-log-levels--transaction-tracing)
@@ -226,17 +227,37 @@ cd services/db-writer  && mvn quarkus:dev
   citizen is identified or explicitly anonymous), info-gathering follow-up
   questions, and either the OpenAI Assistants API path (tool-calling
   `confirm_identity`/`submit_complaint`) or a deterministic rule-based
-  fallback when no LLM key is configured. For unverified channels (email),
-  the rule-based path asks a structured intake question — Service/Customer
-  ID, Mobile Number (10 digits), Name, Area Pin Code (6 digits), or "reply
-  anonymous" — extracts each field by its label, validates the two numeric
-  ones, and re-asks only for whatever's still missing or invalid. It
-  remembers the original complaint text across that back-and-forth (saved to
-  Valkey conversation state) so the ticket's initial message is the actual
-  complaint, not the intake reply.
+  fallback when no LLM key is configured. The rule-based path asks a
+  structured intake question driven entirely by the tenant's **configurable
+  per-channel intake fields** (`app/conversation/intake_fields.py`; see
+  [Configurable per-channel intake fields](#configurable-per-channel-intake-fields))
+  — it renders a numbered form of every askable field for that channel
+  (marking which are required), extracts each field by its label, validates
+  the numeric ones (10-digit mobile, 6-digit pin code), and re-asks only for
+  whatever mandatory field is still missing or invalid. A field that's native
+  to the channel (the email address on the email channel, the verified phone
+  on WhatsApp) is auto-satisfied and never asked; a field already on file for
+  a returning citizen is reused rather than re-requested. It remembers the
+  original complaint text across that back-and-forth (saved to Valkey
+  conversation state) so the ticket's initial message is the actual
+  complaint, not the intake reply. The OpenAI Assistants path gets a
+  best-effort hint about the mandatory fields injected into its per-turn
+  instructions, but cannot enforce the config as strictly as the rule-based
+  path (its system prompt isn't regenerated per tenant — a known limitation).
 - `app/identity/resolver.py` + `db_client.py` — resolves a channel identity
   (phone/email/anonymous) to a canonical `master_id` via db-writer, merging
-  across channels by matching phone/email.
+  across channels by matching phone/email. `_resolve_phone()` now also honours
+  a citizen-*provided* email (`confirmedEmail`), not just an email native to
+  the channel, so a WhatsApp-solicited email actually links/merges the two
+  identities instead of being silently dropped. `db_client.py` also exposes
+  `get_tenant_config()`, which the intake gate reads to know each channel's
+  configured field list.
+- `app/conversation/intake_fields.py` — the field catalog (Name, Mobile,
+  Email, Service/Customer ID, Area Pin Code — each with an extractor +
+  validator), the built-in per-channel defaults, and the helpers
+  (`fields_for_channel`, `extract_configured_fields`, `missing_fields`,
+  `build_identity_request_message`) that drive the configurable intake gate.
+  See [Configurable per-channel intake fields](#configurable-per-channel-intake-fields).
 - `app/notifications/sender.py` — consumes `ai.reply.send` (a third
   background consumer): actually delivers the conversation agent's replies
   (identity requests, follow-ups) via api-gateway's email send endpoint.
@@ -524,6 +545,92 @@ thread/subject signal available. `EmailAdapter.parseMessage` (api-gateway)
 and the `ChannelMessageReceived` event both carry this subject line
 end-to-end (`subject` field, nullable — WhatsApp has none).
 
+**Thread-key collapse fix.** `ConversationAgent._thread_key()` used to fall
+back to `email:<address>` whenever an inbound email had no real `In-Reply-To`
+header — a key identical for *every* email that address ever sent, so a
+brand-new, unrelated complaint collapsed onto whatever ticket that address
+last had open. It now falls back to `email:<message-id>` (unique per message)
+instead, so two unrelated emails from the same sender get distinct thread
+keys. WhatsApp's address-based fallback is deliberately unchanged — one
+persistent thread per phone number is correct there. Regression-tested in
+`tests/test_thread_key.py`.
+
+**Outbound reply-chain threading (RFC 5322).** Every inbound email's own
+`Message-ID` is now captured end-to-end — `EmailAdapter.extractMessageId`
+(api-gateway) → `ChannelMessageReceived.messageId` → `tickets.origin_message_id`
+(migration `V7__ticket_origin_message_id.sql`), set once when the stub is
+created. Every reply UniServe sends (identity request, ack, notes-triggered
+update, status change) now threads back into the original chain by passing
+that stored value as `EmailAdapter.sendReply(...)`'s `inReplyToMessageId`
+(sets both `In-Reply-To` and `References`). Previously every caller
+(`/test-send`, `TicketsResource.reply()`, `TicketNotifier`, and ai-core's
+`app/notifications/sender.py`) hard-coded `null`, so replies arrived as
+disconnected new emails. `app/tickets/service.py` returns `originMessageId`
+from `create_ticket_from_complaint` so `dispatcher.py` can thread the ack too.
+
+---
+
+## Configurable per-channel intake fields
+
+**What it is.** Which identity/intake fields the assistant collects — Name,
+Mobile Number, Email, Service/Customer ID, Area Pin Code — and whether each is
+mandatory is **configurable per channel** by a tenant admin, replacing the old
+hardcoded "only Name is mandatory, everything else best-effort" gate. Each
+field carries two independent flags:
+
+- `mandatory` — required before the ticket is fully confirmed.
+- `mandatoryIfAnonymous` — still required even when the citizen has explicitly
+  declared themselves anonymous (e.g. a Service/Customer ID needed to route
+  the complaint from someone who won't give their name).
+
+A ticket only becomes fully confirmed once every mandatory field for its
+channel is satisfied.
+
+**The field catalog** lives in `services/ai-core/app/conversation/intake_fields.py`
+(`FIELD_CATALOG`) — each entry pairs a label with an extractor (parses the
+value out of the citizen's reply by label) and a validator (10-digit mobile,
+6-digit pin code, non-empty otherwise). A second copy of the same
+(key, label) list exists in `IntakeFieldsResource.java` for the config UI and
+PUT validation; **the two must be kept in sync by hand** — there's no shared
+source of truth across the Java/Python boundary.
+
+**Built-in defaults** (`DEFAULT_INTAKE_FIELDS`, used until a tenant configures
+its own):
+
+| Channel  | Name | Mobile | Email | Service/Customer ID | Pin Code |
+|----------|------|--------|-------|---------------------|----------|
+| Email    | mandatory | optional | *native* | mandatory-if-anonymous | optional |
+| WhatsApp | mandatory | *native (verified)* | **mandatory** | mandatory-if-anonymous | — |
+
+WhatsApp defaulting Email to **mandatory** is the concrete fix for the
+cross-channel identity gap: a verified WhatsApp phone used to skip the
+identity ask entirely, so the same citizen complaining via both WhatsApp and
+email became two separate identities. Asking WhatsApp users for their email
+lets the resolver merge them into one (`_resolve_phone()` honours the
+provided `confirmedEmail`).
+
+**Native fields.** A field already carried by the channel — the email address
+on the email channel, the phone on a *verified* WhatsApp sender — is
+auto-satisfied and never asked (`is_native_field`). The admin UI greys these
+cells out.
+
+**Field sourcing.** `extract_configured_fields` tags each value with a
+`source`: `native` (from the channel), `known` (already on a returning
+citizen's profile), `extracted` (parsed from this message), or `None` (absent).
+The distinction matters — `missing_fields` treats `native`/`known` as already
+satisfied, but only `native`/`extracted` values are trustworthy enough to feed
+back into identity resolution, and only `extracted` values go into the
+ticket's citizen-provided-details summary.
+
+**Admin UI.** Administration → **Intake Fields**
+(`apps/dashboard/src/components/admin/IntakeFieldsPanel.tsx`): a grid, rows =
+the 5 catalog fields, columns = channels, each cell a select with **Not asked /
+Optional / Mandatory / Mandatory even if anonymous** (mapping directly to a
+field config's absence/presence and its two flags). Native cells are shown as
+"Provided by channel" and disabled. Saving `PUT`s to
+`/api/v1/tenant/intake-fields`; the backend rejects a channel with no mandatory
+identity field (name/mobile/email) with a `422` shown inline.
+
 ---
 
 ## HTTP API reference
@@ -545,6 +652,14 @@ end-to-end (`subject` field, nullable — WhatsApp has none).
 - `PATCH /api/v1/agents/{id}/password` — admin sets a new password directly
   (8+ chars, bcrypt-hashed; no reset-link email flow)
 - `GET|PUT /api/v1/tenant/config`
+- `GET|PUT /api/v1/tenant/intake-fields` — per-channel configurable
+  identity/intake fields (`IntakeFieldsResource`). `GET` returns the current
+  config (or built-in defaults) plus the field `catalog`; `PUT` validates and
+  saves it under the `intakeFields` key inside the tenant's `config_json`
+  (merging, not clobbering `categories`/`sla`). Rejects unknown channels/field
+  keys, non-boolean flags, and any channel left without at least one mandatory
+  identity field (name/mobile/email) with `422 INVALID_INTAKE_FIELDS`. See
+  [Configurable per-channel intake fields](#configurable-per-channel-intake-fields).
 
 **Analytics** (any role may view; `agentId`/customer filters beyond one's
 own tickets and `/agents` performance are lead/admin only via
@@ -648,6 +763,8 @@ Every route below is a thin proxy to the matching api-gateway endpoint via
 - `GET /api/health`
 - `POST /api/auth/login`
 - `GET/POST /api/agents`, `PATCH /api/agents/[id]`, `PATCH /api/agents/[id]/password`
+- `GET/PUT /api/tenant/intake-fields` — proxies the intake-fields config for
+  the Administration → Intake Fields admin UI
 - `GET /api/tickets`, `GET /api/tickets/[id]`
 - `POST /api/tickets/[id]/transition`, `PATCH /api/tickets/[id]/assign`,
   `GET/POST /api/tickets/[id]/notes`, `POST /api/tickets/[id]/reply`,
