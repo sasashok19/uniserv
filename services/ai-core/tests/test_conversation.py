@@ -502,3 +502,44 @@ def test_tool_submit_complaint_publishes_complaint_ready():
     assert stream_arg == "complaint.ready"
     assert event_arg["payload"]["threadId"] == "thread-key"
     assert event_arg["payload"]["masterId"] == "m-1"
+
+
+# ---------------------------------------------------------------------------
+# Assistant path: confirm_identity must not drop the channel's native identity
+# ---------------------------------------------------------------------------
+
+
+def test_tool_confirm_identity_carries_native_email_when_model_confirms_by_phone():
+    """TKT-00001 regression: an email citizen who replies with a phone number
+    must not end up with a phone-only profile — the sender address (and the
+    real channel identity) ride along so the profile gets both."""
+    agent = ConversationAgent("t1")
+    req = _req(channelIdentity=ChannelIdentityIn(type="email", value="nithin@example.com", verified=False))
+    state = {"identity_status": "pending", "master_id": None}
+
+    with patch("app.conversation.agent.IdentityResolver") as resolver_cls:
+        resolver_cls.return_value.resolve = AsyncMock(return_value={"masterId": "m-9", "identityStatus": "confirmed"})
+        _run(agent._tool_confirm_identity(req, state, {"identityType": "phone", "identityValue": "+917890678908"}))
+
+    resolve_req = resolver_cls.return_value.resolve.await_args.args[0]
+    assert resolve_req.confirmedPhone == "+917890678908"
+    assert resolve_req.confirmedEmail == "nithin@example.com"
+    # The REAL channel identity is preserved (not overwritten with the phone).
+    assert resolve_req.channelIdentity.type == "email"
+    assert resolve_req.channelIdentity.value == "nithin@example.com"
+
+
+def test_tool_confirm_identity_anonymous_does_not_leak_native_email():
+    agent = ConversationAgent("t1")
+    req = _req(channelIdentity=ChannelIdentityIn(type="email", value="nithin@example.com", verified=False))
+    state = {"identity_status": "pending", "master_id": None}
+
+    with patch("app.conversation.agent.IdentityResolver") as resolver_cls:
+        resolver_cls.return_value.resolve = AsyncMock(
+            return_value={"masterId": "m-a", "identityStatus": "anonymous"})
+        _run(agent._tool_confirm_identity(req, state, {"declaredAnonymous": True}))
+
+    resolve_req = resolver_cls.return_value.resolve.await_args.args[0]
+    assert resolve_req.declaredAnonymous is True
+    assert resolve_req.confirmedEmail is None
+    assert resolve_req.confirmedPhone is None

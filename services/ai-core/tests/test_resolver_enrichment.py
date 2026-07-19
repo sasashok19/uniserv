@@ -169,3 +169,45 @@ def test_phone_not_found_and_no_existing_email_creates_fresh():
     assert payload["phone"] == "+919876543210"
     assert payload["name"] == "New Person"
     assert payload["email"] == "new@example.com"
+
+
+def test_phone_match_backfills_missing_email_and_name_on_existing_profile():
+    """TKT-00001 regression: a phone-only profile (citizen confirmed by phone
+    on an email thread) later learns their email/name — backfill, never
+    overwrite."""
+    db = AsyncMock()
+    db.find_by_phone = AsyncMock(return_value={"id": "row-1", "master_id": "m-1", "email": None, "name": None})
+    db.find_by_email = AsyncMock(return_value=None)
+    db.update_identity = AsyncMock(return_value={})
+
+    req = ResolveRequest(
+        tenantId="t1",
+        channel="email",
+        channelIdentity=ChannelIdentityIn(type="email", value="nithin@example.com", verified=False),
+        confirmedPhone="+917890678908",
+        confirmedName="Nithin",
+    )
+    result = _run(_resolver(db).resolve(req))
+
+    assert result["masterId"] == "m-1"
+    db.update_identity.assert_awaited_once_with(
+        "row-1", {"email": "nithin@example.com", "name": "Nithin"}, trace_id=None)
+
+
+def test_phone_match_does_not_overwrite_existing_email_or_name():
+    db = AsyncMock()
+    db.find_by_phone = AsyncMock(return_value={
+        "id": "row-1", "master_id": "m-1", "email": "kept@example.com", "name": "Kept Name"})
+    db.find_by_email = AsyncMock(return_value={"id": "row-1", "master_id": "m-1"})
+    db.update_identity = AsyncMock()
+
+    req = ResolveRequest(
+        tenantId="t1",
+        channel="email",
+        channelIdentity=ChannelIdentityIn(type="email", value="new@example.com", verified=False),
+        confirmedPhone="+917890678908",
+        confirmedName="New Name",
+    )
+    _run(_resolver(db).resolve(req))
+
+    db.update_identity.assert_not_called()

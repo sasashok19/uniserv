@@ -371,16 +371,34 @@ class ConversationAgent:
         # identity (unchanged value); a value the citizen typed in chat is not.
         verified = req.channelIdentity.verified and identity_value == req.channelIdentity.value
 
+        confirmed_email = identity_value if (identity_type == "email" and not declared_anonymous) else None
+        confirmed_phone = identity_value if (identity_type == "phone" and not declared_anonymous) else None
+        # The channel's own NATIVE identity always rides along, whatever the model
+        # confirmed with. Without this, an email citizen who confirms via a typed
+        # phone number gets a phone-only profile — their sender address (known all
+        # along) is silently dropped, the dashboard's Email column stays blank, and
+        # a later email from them can't find the profile. Mirrors the rule-based
+        # path, where the native identity is always fed to the resolver.
+        if not declared_anonymous:
+            if confirmed_email is None and req.channelIdentity.type == "email":
+                confirmed_email = req.channelIdentity.value
+            if confirmed_phone is None and req.channelIdentity.type == "phone" and req.channelIdentity.verified:
+                confirmed_phone = req.channelIdentity.value
+
         resolve_req = ResolveRequest(
             tenantId=self._tenant_id,
             channel=req.channel,
+            # The REAL channel identity — the model's confirmed value travels via
+            # confirmedEmail/confirmedPhone above, so overriding the channel
+            # identity with it would only corrupt channel_ids_json (e.g. an
+            # "email" channel entry holding a phone number).
             channelIdentity=ResolverChannelIdentityIn(
-                type=identity_type, value=identity_value, verified=verified,
+                type=req.channelIdentity.type, value=req.channelIdentity.value, verified=verified,
             ),
             threadId=req.threadId,
             declaredAnonymous=declared_anonymous,
-            confirmedEmail=identity_value if (identity_type == "email" and not declared_anonymous) else None,
-            confirmedPhone=identity_value if (identity_type == "phone" and not declared_anonymous) else None,
+            confirmedEmail=confirmed_email,
+            confirmedPhone=confirmed_phone,
             confirmedName=args.get("name"),
             rawText=req.rawText,
             traceId=req.traceId,
@@ -456,17 +474,37 @@ class ConversationAgent:
                 "call submit_complaint as soon as identity is resolved — do not ask them to repeat "
                 "what they already told you."
             )
-        # Feature 15/16: best-effort hint only — the Assistant's own tool
-        # schema/instructions aren't regenerated per tenant, so this can't
-        # enforce the configurable mandatory-field gate the way the
-        # rule-based path does; it just tells the model what this tenant
-        # currently requires for this channel before confirm_identity.
-        mandatory = [
-            FIELD_CATALOG[fc["key"]]["label"] for fc in field_configs
-            if fc.get("mandatory") and not is_native_field(fc["key"], req.channel, req.channelIdentity.verified)
-        ]
-        if mandatory:
-            parts.append(f"required_identity_fields_for_this_channel={', '.join(mandatory)}")
+        # Feature 15/16: the Assistant's own tool schema/instructions aren't
+        # regenerated per tenant, so per-turn instructions are how the tenant's
+        # configured intake fields reach it. Be DIRECTIVE, not a passive hint —
+        # the base instructions ("ask for an email or phone number") otherwise
+        # win and the model ignores the tenant's field list entirely.
+        if not state.get("complaint_ready") and state.get("identity_status") != "confirmed":
+            mandatory = [
+                FIELD_CATALOG[fc["key"]]["label"] for fc in field_configs
+                if fc.get("mandatory") and not is_native_field(fc["key"], req.channel, req.channelIdentity.verified)
+            ]
+            optional = [
+                FIELD_CATALOG[fc["key"]]["label"] for fc in field_configs
+                if not fc.get("mandatory") and not is_native_field(fc["key"], req.channel, req.channelIdentity.verified)
+            ]
+            if req.channel == "email" and req.channelIdentity.value:
+                parts.append(
+                    f"The citizen's email address is already known from the channel ({req.channelIdentity.value}) — "
+                    "NEVER ask for their email; treat it as provided."
+                )
+            if mandatory:
+                parts.append(
+                    "This tenant REQUIRES these details before the complaint can be confirmed: "
+                    + ", ".join(mandatory)
+                    + ". Ask for ALL of them (that the citizen hasn't already given) in ONE message"
+                    + (", optionally also offering: " + ", ".join(optional) if optional else "")
+                    + ". Do not ask for anything not in this list."
+                )
+            parts.append(
+                "When you call confirm_identity, pass the citizen's name in the `name` argument if they "
+                'have stated it anywhere in this conversation (e.g. "My name is ...").'
+            )
         return "; ".join(parts)
 
     # ------------------------------------------------------------------

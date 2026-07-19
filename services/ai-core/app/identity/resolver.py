@@ -141,6 +141,18 @@ class IdentityResolver:
                     logger.info(
                         "identities merged traceId=%s tenantId=%s keptMasterId=%s mergedMasterId=%s",
                         req.traceId, req.tenantId, master_id, other["master_id"])
+            # Backfill facts this request knows that the profile is missing —
+            # e.g. a phone-only profile (citizen confirmed by phone on an email
+            # thread) later learning their email/name. Never overwrites.
+            enrichment = {}
+            if provided_email and not existing_by_phone.get("email"):
+                enrichment["email"] = provided_email
+            if req.confirmedName and not existing_by_phone.get("name"):
+                enrichment["name"] = req.confirmedName
+            if enrichment:
+                await self._db.update_identity(existing_by_phone["id"], enrichment, trace_id=req.traceId)
+                logger.info("identity backfilled traceId=%s tenantId=%s masterId=%s fields=%s",
+                            req.traceId, req.tenantId, master_id, sorted(enrichment))
             await self._emit_resolved(req.tenantId, master_id, "confirmed", trace_id=req.traceId)
             logger.info("identity resolved traceId=%s tenantId=%s masterId=%s status=confirmed isNew=False",
                         req.traceId, req.tenantId, master_id)
@@ -187,6 +199,11 @@ class IdentityResolver:
         existing = await self._db.find_by_email(req.tenantId, email, trace_id=req.traceId)
         if existing:
             master_id = existing["master_id"]
+            # Backfill a newly-learned name onto a name-less profile (never overwrites).
+            if req.confirmedName and not existing.get("name"):
+                await self._db.update_identity(existing["id"], {"name": req.confirmedName}, trace_id=req.traceId)
+                logger.info("identity backfilled traceId=%s tenantId=%s masterId=%s fields=['name']",
+                            req.traceId, req.tenantId, master_id)
             await self._emit_resolved(req.tenantId, master_id, "confirmed", trace_id=req.traceId)
             logger.info(
                 "identity resolved traceId=%s tenantId=%s masterId=%s status=confirmed merged=False isNew=False",

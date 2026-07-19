@@ -213,6 +213,22 @@ HTTP/1.1 200 OK
   trusts values whose `source` is `native` or `extracted` (not `known`,
   already-on-file) when deciding what to merge on. See the README's
   *Configurable per-channel intake fields* section.
+- **confirm_identity always carries the channel's native identity (TKT-00001
+  fix).** On the assistant path, `_tool_confirm_identity` used to REPLACE the
+  channel identity with whatever the model confirmed — an email citizen who
+  replied with a phone number got a phone-only profile: their sender address
+  was dropped, the dashboard's Name/Email columns stayed blank, and their next
+  email couldn't find the profile. Now the model's confirmed value travels via
+  `confirmedPhone`/`confirmedEmail`, the REAL channel identity is preserved on
+  the request, and the native identity (email address / verified WhatsApp
+  phone) is always added as a confirmed value unless the citizen declared
+  anonymous. Regression-tested in `tests/test_conversation.py`.
+- **Existing profiles are backfilled, never overwritten.** `_resolve_phone`
+  (found-by-phone branch) and `_resolve_confirmed_email` (found-by-email
+  branch) now fill in email/name fields the profile is missing when the
+  current request knows them — e.g. a phone-only profile later learning the
+  citizen's email/name. Existing values are never replaced. Covered in
+  `tests/test_resolver_enrichment.py`.
 - **`_resolve_phone` guards native-email extraction by identity TYPE, not
   channel (assistant-path crash fix).** On the OpenAI Assistant path the model
   can call `confirm_identity` with a *phone* value on an email-origin thread —
