@@ -66,7 +66,7 @@ public class TicketResource {
                                     @QueryParam("includeArchived") @DefaultValue("false") boolean includeArchived,
                                     @QueryParam("page") @DefaultValue("1") int page,
                                     @QueryParam("pageSize") @DefaultValue("30") int pageSize,
-                                    @QueryParam("sortBy") String sortBy,
+                                    @QueryParam("sortBy") @DefaultValue("createdAt") String sortBy,
                                     @QueryParam("sortDir") @DefaultValue("desc") String sortDir) {
         if (tenantId == null || tenantId.isBlank()) {
             throw new ApiException(400, "TENANT_REQUIRED", "tenantId is required");

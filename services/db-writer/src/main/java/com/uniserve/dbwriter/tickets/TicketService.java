@@ -119,7 +119,10 @@ public class TicketService {
         Map<String, Object> params = new HashMap<>();
         String where = buildWhere(tenantId, status, assignedTo, channel, category, identityId,
                 identityStatus, threadId, ticketNumber, includeArchived, params);
-        String sortCol = SORT_COLUMNS.getOrDefault(sortBy, "t.created_at");
+        // NOTE: SORT_COLUMNS is an immutable Map.ofEntries map — get(null) throws
+        // NPE, so guard the null (callers without an explicit sortBy: ai-core's
+        // thread-id stub lookups, older dashboard sessions).
+        String sortCol = sortBy == null ? "t.created_at" : SORT_COLUMNS.getOrDefault(sortBy, "t.created_at");
         String dir = "asc".equalsIgnoreCase(sortDir) ? "asc" : "desc";
         int size = Math.min(Math.max(pageSize, 1), 100);
 
