@@ -50,6 +50,16 @@ async def send_email(
     known — sets In-Reply-To/References so this lands in the same chain in
     the citizen's mailbox instead of as a fresh, disconnected email.
     """
+    # Never email RFC 2606 reserved/documentation domains (dev seed data uses
+    # them). A real SMTP send to anon@example.com just generates a Gmail
+    # bounce, which used to come back through IMAP and get filed as a new
+    # "complaint" from mailer-daemon — a seed→bounce→ticket feedback loop.
+    domain = (to_address or "").rsplit("@", 1)[-1].lower()
+    if (domain in ("example.com", "example.org", "example.net", "example.edu")
+            or domain.endswith((".example", ".invalid", ".test", ".localhost"))):
+        logger.info("email skipped (reserved test domain): traceId=%s to=%s", trace_id, to_address)
+        return {"delivered": False, "reason": "reserved test-domain recipient"}
+
     url = f"{settings.api_gateway_url.rstrip('/')}/api/v1/internal/adapters/email/test-send"
     headers = {"Content-Type": "application/json"}
     if trace_id:

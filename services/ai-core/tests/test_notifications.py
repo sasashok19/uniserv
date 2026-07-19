@@ -26,7 +26,7 @@ def test_deliver_reply_sends_email_for_email_channel():
     ctx, client = _mock_async_client({"sent": True})
     payload = {
         "channel": "email",
-        "channelIdentityValue": "citizen@example.com",
+        "channelIdentityValue": "citizen@citizen-mail.dev",
         "messageText": "Please share your email or reply anonymous.",
         "isIdentityRequest": True,
     }
@@ -37,7 +37,7 @@ def test_deliver_reply_sends_email_for_email_channel():
     client.post.assert_awaited_once()
     url, kwargs = client.post.await_args.args, client.post.await_args.kwargs
     assert url[0].endswith("/api/v1/internal/adapters/email/test-send")
-    assert kwargs["json"]["to"] == "citizen@example.com"
+    assert kwargs["json"]["to"] == "citizen@citizen-mail.dev"
     assert kwargs["headers"]["X-Trace-Id"] == "trace-1"
 
 
@@ -45,7 +45,7 @@ def test_deliver_reply_embeds_ticket_number_in_subject_and_adds_do_not_remove_no
     ctx, client = _mock_async_client({"sent": True})
     payload = {
         "channel": "email",
-        "channelIdentityValue": "citizen@example.com",
+        "channelIdentityValue": "citizen@citizen-mail.dev",
         "messageText": "Please share your name and mobile number.",
         "isIdentityRequest": True,
         "ticketNumber": "TKT-00050",
@@ -62,7 +62,7 @@ def test_deliver_reply_forwards_origin_message_id_for_thread_continuity():
     ctx, client = _mock_async_client({"sent": True})
     payload = {
         "channel": "email",
-        "channelIdentityValue": "citizen@example.com",
+        "channelIdentityValue": "citizen@citizen-mail.dev",
         "messageText": "Following up on your complaint.",
         "ticketNumber": "TKT-00051",
         "originMessageId": "orig-msg-id-123",
@@ -86,7 +86,7 @@ def test_deliver_reply_skips_whatsapp_no_outbound_send():
 
 def test_deliver_reply_reports_failure_without_raising_when_gateway_says_not_sent():
     ctx, _client = _mock_async_client({"sent": False})
-    payload = {"channel": "email", "channelIdentityValue": "citizen@example.com", "messageText": "hi"}
+    payload = {"channel": "email", "channelIdentityValue": "citizen@citizen-mail.dev", "messageText": "hi"}
     with patch("app.notifications.sender.httpx.AsyncClient", return_value=ctx):
         result = _run(deliver_reply(payload))
     assert result == {"delivered": False}
@@ -96,7 +96,7 @@ def test_send_ticket_ack_email_includes_ticket_number_in_subject_and_body():
     ctx, client = _mock_async_client({"sent": True})
     with patch("app.notifications.sender.httpx.AsyncClient", return_value=ctx):
         result = _run(send_ticket_ack_email(
-            channel="email", to_address="citizen@example.com", ticket_number="TKT-00042",
+            channel="email", to_address="citizen@citizen-mail.dev", ticket_number="TKT-00042",
             category="billing", status="open", trace_id="trace-3",
         ))
 
@@ -111,7 +111,7 @@ def test_send_ticket_ack_email_forwards_origin_message_id_for_thread_continuity(
     ctx, client = _mock_async_client({"sent": True})
     with patch("app.notifications.sender.httpx.AsyncClient", return_value=ctx):
         _run(send_ticket_ack_email(
-            channel="email", to_address="citizen@example.com", ticket_number="TKT-00042",
+            channel="email", to_address="citizen@citizen-mail.dev", ticket_number="TKT-00042",
             origin_message_id="orig-msg-id-456",
         ))
     kwargs = client.post.await_args.kwargs
@@ -126,5 +126,5 @@ def test_send_ticket_ack_email_skips_non_email_channel():
 
 
 def test_send_ticket_ack_email_skips_when_no_ticket_number():
-    result = _run(send_ticket_ack_email(channel="email", to_address="citizen@example.com", ticket_number=None))
+    result = _run(send_ticket_ack_email(channel="email", to_address="citizen@citizen-mail.dev", ticket_number=None))
     assert result == {"delivered": False, "reason": "no ticket number"}

@@ -417,6 +417,8 @@ public class TicketsResource {
         return switch (toStatus == null ? "" : toStatus) {
             case "assigned" -> "ticket.status.open_to_assigned";
             case "in_progress" -> "ticket.status.assigned_to_inprogress";
+            // Agent asked the citizen a question — any role may park the ticket.
+            case "pending_customer" -> "ticket.status.to_pending_customer";
             case "resolved" -> "ticket.status.inprogress_to_resolved";
             case "closed" -> "ticket.status.resolved_to_closed";
             case "reopened" -> "ticket.status.closed_to_reopened";

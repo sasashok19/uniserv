@@ -18,6 +18,7 @@ public final class RbacPolicy {
             case "ticket.assignee.edit" -> adminOrLead;
             case "ticket.status.open_to_assigned" -> adminOrLead;
             case "ticket.status.assigned_to_inprogress" -> true;
+            case "ticket.status.to_pending_customer" -> true;
             case "ticket.status.inprogress_to_resolved" -> true;
             case "ticket.status.resolved_to_closed" -> adminOrLead;
             case "ticket.status.closed_to_reopened" -> adminOrLead;

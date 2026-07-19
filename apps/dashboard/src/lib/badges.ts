@@ -10,6 +10,8 @@ export function statusBadgeClass(status: string | null | undefined): string {
       return `${BASE} bg-indigo-100 text-indigo-700`;
     case "in_progress":
       return `${BASE} bg-amber-100 text-amber-700`;
+    case "pending_customer":
+      return `${BASE} bg-purple-100 text-purple-700`;
     case "resolved":
       return `${BASE} bg-green-100 text-green-700`;
     case "closed":

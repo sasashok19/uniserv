@@ -297,3 +297,10 @@ INSERT INTO agents(id, tenant_id, name, email, password_hash, role) VALUES
   enable `foreign_keys`, which the tenant DB-reset feature (`/api/v1/db/admin/reset`)
   relies on when it writes its surviving `tenant.reset` audit event with a
   synthetic ticket id.
+- **V9 widens `tickets.status`** with `pending_customer` (agent asked the
+  citizen a question and parks the ticket awaiting the reply). SQLite cannot
+  alter a CHECK constraint, so V9 rebuilds the table in place (create-copy-
+  swap + index recreation) with the widened CHECK; data and the
+  `UNIQUE(tenant_id, ticket_number)` constraint are preserved. Flow:
+  `in_progress ⇄ pending_customer` and `pending_customer → resolved`; RBAC
+  action `ticket.status.to_pending_customer` (all roles).
