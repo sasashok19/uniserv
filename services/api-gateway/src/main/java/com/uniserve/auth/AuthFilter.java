@@ -67,10 +67,15 @@ public class AuthFilter implements ContainerRequestFilter {
     }
 
     private boolean isProtected(String path) {
+        // NOTE: substring matching — "/api/v1/public/announcements" (login-page
+        // ticker, PublicAnnouncementsResource) deliberately does NOT match the
+        // "api/v1/announcements" prefix below because of the "public/" segment.
         return path.contains("api/v1/agents")
                 || path.contains("api/v1/tenant")
                 || path.contains("api/v1/tickets")
-                || path.contains("api/v1/analytics");
+                || path.contains("api/v1/analytics")
+                || path.contains("api/v1/announcements")
+                || path.contains("api/v1/admin");
     }
 
     private String claim(DecodedJWT jwt, String name) {

@@ -316,11 +316,23 @@ cd services/db-writer  && mvn quarkus:dev
 
 - `src/app/page.tsx` — landing page (agent sign-in / track-a-complaint
   links).
-- `src/app/login/page.tsx` — agent login.
+- `src/app/login/page.tsx` — agent login, split layout (UI_REVAMP_v2 §A4):
+  navy brand panel with tagline, the **BBC Tamil headlines widget**
+  (`src/components/news/NewsWidget.tsx`, fed by the RSS-parsing `/api/news`
+  route — no API key) and the **public announcement ticker**
+  (`AnnouncementTicker.tsx`, CSS marquee, hidden when empty); sign-in card on
+  the right with the original submit logic unchanged.
 - `src/app/dashboard/page.tsx` — role-gated agent dashboard (Analytics /
-  Ticket Queue / Administration). Ticket Queue rows link to the detail page
-  below; nav tabs and status/priority/identity badges use a shared colour
-  palette (`src/lib/badges.ts`). The Ticket Queue shows admins and leads a
+  Ticket Queue / Administration) wrapped in the UI_REVAMP_v2 §A3 shell:
+  sticky **topbar** (`src/components/layout/Topbar.tsx` — teal wordmark,
+  announcement bell with unread badge + mark-all-read, role pill, logout) and
+  a collapsible **sidebar** (`Sidebar.tsx` — w-56/w-14 with a 200ms
+  transition, teal active accents; becomes a bottom tab bar ≤768px) that
+  drives the same tab state the old top tab bar did. A dismissible
+  **announcement banner** (`AnnouncementBanner.tsx`, per-session dismissal)
+  renders under the topbar. Status/priority/identity badges use the shared
+  palette (`src/lib/badges.ts`); brand colours live in
+  `src/lib/design-tokens.ts` (UI_REVAMP_v2 §A1). The Ticket Queue shows admins and leads a
   **Confirmed vs "Needs identity" scope toggle** (Confirmed →
   `?identityStatus=confirmed`, Needs-identity →
   `?identityStatus=pending,anonymous`) and an **Identity** column, so
@@ -364,9 +376,20 @@ cd services/db-writer  && mvn quarkus:dev
   `PUT /api/v1/tenant/priority-rubric`.
 - `src/components/admin/GeneralSettingsPanel.tsx` — Administration → Settings
   sub-tab: tenant general settings (currently the max follow-up-question count,
-  0–5); saves to `PUT /api/v1/tenant/general-settings`. Both new panels are
+  0–5); saves to `PUT /api/v1/tenant/general-settings`. Both panels are
   described in
   [Configurable priority rubric & general settings](#configurable-priority-rubric--general-settings).
+- `src/components/admin/AnnouncementsPanel.tsx` — Administration →
+  Announcements sub-tab: active + expired/inactive lists with
+  create/edit/deactivate/delete (modal with char counters, optional expiry
+  date, active toggle) against `/api/announcements`.
+- `src/components/admin/SystemPanel.tsx` — Administration → System sub-tab:
+  live service-health dots (api-gateway/db-writer/ai-core via
+  `/api/system/health`, 30s auto-refresh + manual refresh) and the
+  **danger-zone database reset** — a non-dismissible modal requiring the
+  admin's current password AND typing `RESET` exactly; the confirm button
+  stays disabled until both are valid, then handles 401 (wrong password),
+  429 (rate-limited), and success (toast + redirect to login).
 - `src/app/dashboard/tickets/[id]/page.tsx` — ticket detail, reflowed into a
   2-column layout: the left (main) column has citizen details
   (Name/Email/Phone/Service-Customer-ID — read-only, sourced from the
@@ -443,6 +466,7 @@ See [05_TICKET_SCHEMA](docs/05_TICKET_SCHEMA.md) for full DDL.
 | `ticket_notes` | `content`, `is_mandatory`, `transition_from`/`transition_to` |
 | `ticket_events` | `event_type`, `actor_type`, `actor_id`, `meta_json` (full audit trail) |
 | `identity_pending_queue` | `thread_id`, `channel`, `channel_identity_value`, `raw_message`, `timeout_at` (default 48h) |
+| `announcements` | `tenant_id`, `title` (≥3 chars), `body` (≥10 chars), `created_by` (agent), `is_active`, `expires_at` (NULL = never; evaluated at read time, no sweep), `created_at`/`updated_at` — migration `V8__announcements.sql` |
 
 **Ticket status flow:** `Open → Assigned → In-Progress → Resolved → Closed`,
 with `Closed → Reopened → In-Progress`. Mandatory ≥20-character notes are
@@ -759,6 +783,34 @@ constant and a Python string) that must be kept in agreement by hand.
   merge-one-key pattern, so `categories`/`sla`/`intakeFields`/`priorityRubric`/
   `generalSettings` never clobber one another.
 
+**Announcements** (UI_REVAMP_v2 Feature C; RBAC `announcements.view` = all
+roles, `announcements.manage` = admin)
+- `GET /api/v1/announcements?activeOnly=` — active = `is_active=1` AND not past
+  `expires_at` (evaluated at read time). Any authenticated role.
+- `POST /api/v1/announcements` `{title, body, expiresAt?}` /
+  `PATCH /api/v1/announcements/{id}` `{title?, body?, isActive?, expiresAt?}` /
+  `DELETE /api/v1/announcements/{id}` — admin only; title ≥3 / body ≥10 chars
+  (`422 INVALID_ANNOUNCEMENT`). Stored per tenant (`AnnouncementsResource` →
+  db-writer `/api/v1/db/announcements`, table from `V8__announcements.sql`).
+- `GET /api/v1/public/announcements` — **no auth** (login-page ticker):
+  `{id, title}` only, for the default tenant's active announcements
+  (`PublicAnnouncementsResource`; lives under the `/api/v1/public/` exclusion,
+  like the citizen status lookup).
+
+**Admin system operations** (UI_REVAMP_v2 Feature D; RBAC `admin.system.reset`)
+- `POST /api/v1/admin/reset` `{password, confirmation:"RESET"}` — wipes ALL
+  tenant data (tickets/messages/notes/events, identities, pending queue,
+  announcements, non-admin agents) keeping the tenants row and the calling
+  admin. Layered safeguards: JWT (`/api/v1/admin` in `AuthFilter`), admin role,
+  bcrypt re-verification of the admin's CURRENT password (401
+  `INVALID_PASSWORD`), literal `RESET` confirmation (400
+  `CONFIRMATION_REQUIRED`, re-checked in db-writer), and a 60s per-tenant rate
+  limit (429 `RATE_LIMITED`). A `tenant.reset` audit event with per-table
+  delete counts is written inside the same transaction (after the deletes, so
+  it survives the `ticket_events` wipe — the WARN log line fires before);
+  db-writer's ticket cache is flushed. `SystemAdminResource` → db-writer
+  `POST /api/v1/db/admin/reset`.
+
 **Analytics** (any role may view; `agentId`/customer filters beyond one's
 own tickets and `/agents` performance are lead/admin only via
 `analytics.view.all`)
@@ -866,7 +918,8 @@ Every route below is a thin proxy to the matching api-gateway endpoint via
 `gatewayFetch` (`src/lib/gateway.ts`), forwarding the `access_token` cookie.
 
 - `GET /api/health`
-- `POST /api/auth/login`
+- `POST /api/auth/login`, `POST /api/auth/logout` (revokes the refresh token,
+  clears the `access_token`/`role` cookies — used by the topbar Logout button)
 - `GET/POST /api/agents`, `PATCH /api/agents/[id]`, `PATCH /api/agents/[id]/password`
 - `GET/PUT /api/tenant/intake-fields` — proxies the intake-fields config for
   the Administration → Intake Fields admin UI
@@ -880,6 +933,15 @@ Every route below is a thin proxy to the matching api-gateway endpoint via
   `GET/POST /api/tickets/[id]/notes`, `POST /api/tickets/[id]/reply`,
   `POST /api/tickets/[id]/generate-resolution-summary`
 - `GET /api/analytics/volume|sla|priority|agents|agents-directory|customers`
+- `GET/POST /api/announcements`, `PATCH/DELETE /api/announcements/[id]` —
+  announcements (bell/banner + Administration → Announcements)
+- `GET /api/public/announcements` — login-page ticker (public, no cookie)
+- `POST /api/admin/reset` — the Administration → System danger-zone reset
+- `GET /api/news` — **not** a gateway proxy: fetches + parses the configured
+  RSS feed server-side (default BBC Tamil, `NEWS_RSS_URL` to change); returns
+  `{articles: []}` on any failure so the login widget hides silently
+- `GET /api/system/health` — **not** a gateway proxy: probes each service's
+  health endpoint server-side for the Administration → System panel
 
 ---
 
@@ -929,8 +991,10 @@ hardcodes max 1000 / 2-min TTL.)
 ### dashboard
 `APP_ENV`, `NEXT_PUBLIC_TENANT_ID`, `NEXT_PUBLIC_API_GATEWAY_URL`
 (browser-facing), `API_GATEWAY_INTERNAL_URL` (server-side/Docker-mode
-container-name URL). No NextAuth — auth is a custom cookie set by
-`app/api/auth/login/route.ts`, which proxies straight to api-gateway.
+container-name URL), `NEWS_RSS_URL` (optional — RSS 2.0 feed for the login
+page's headlines widget; defaults to BBC Tamil, no API key; the widget hides
+itself if the feed is unreachable). No NextAuth — auth is a custom cookie set
+by `app/api/auth/login/route.ts`, which proxies straight to api-gateway.
 
 ---
 

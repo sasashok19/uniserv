@@ -31,6 +31,11 @@ public class TicketCache {
         cache.invalidate(key(ticketId));
     }
 
+    /** Flush everything — used by the tenant DB reset (UI_REVAMP_v2 Feature D). */
+    public void invalidateAll() {
+        cache.invalidateAll();
+    }
+
     private String key(String ticketId) {
         return "ticket:" + ticketId;
     }

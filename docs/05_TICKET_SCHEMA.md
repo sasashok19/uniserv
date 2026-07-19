@@ -283,3 +283,17 @@ INSERT INTO agents(id, tenant_id, name, email, password_hash, role) VALUES
   fresh volume: Flyway applies V1→V2→V3 cleanly, `schema/version` and `schema/tables`
   report correctly, and all 5 seeded identity profiles / 3 seeded agents / 1 pending
   entry are readable through the new entity layer.
+- **V8 adds a 9th table: `announcements`** (UI_REVAMP_v2 Feature C) —
+  tenant-scoped admin notices for the dashboard bell/banner and the public
+  login-page ticker. Columns: `id` (uuid), `tenant_id` → tenants, `title`
+  (CHECK ≥3 chars), `body` (CHECK ≥10 chars), `created_by` → agents,
+  `is_active` (default 1), `expires_at` (TEXT, NULL = never — expiry is
+  evaluated at read time by `AnnouncementService`, no background sweep),
+  `created_at`/`updated_at`. Index `idx_announcements_tenant_active`
+  on `(tenant_id, is_active, expires_at)`. Mapped by the
+  `com.uniserve.dbwriter.model.Announcement` Panache entity, same
+  Flyway-owns-DDL rule as every other table. Note the schema's `REFERENCES`
+  clauses are decorative here as elsewhere: the sqlite JDBC URL does not
+  enable `foreign_keys`, which the tenant DB-reset feature (`/api/v1/db/admin/reset`)
+  relies on when it writes its surviving `tenant.reset` audit event with a
+  synthetic ticket id.

@@ -8,6 +8,11 @@ import TeamPanel from "@/components/admin/TeamPanel";
 import IntakeFieldsPanel from "@/components/admin/IntakeFieldsPanel";
 import PriorityRulesPanel from "@/components/admin/PriorityRulesPanel";
 import GeneralSettingsPanel from "@/components/admin/GeneralSettingsPanel";
+import AnnouncementsPanel from "@/components/admin/AnnouncementsPanel";
+import SystemPanel from "@/components/admin/SystemPanel";
+import AnnouncementBanner from "@/components/announcements/AnnouncementBanner";
+import Topbar from "@/components/layout/Topbar";
+import Sidebar, { type NavKey } from "@/components/layout/Sidebar";
 import { identityBadgeClass, priorityBadgeClass, statusBadgeClass } from "@/lib/badges";
 
 type Ticket = {
@@ -31,51 +36,34 @@ function readCookie(name: string): string {
   return m ? decodeURIComponent(m[1]) : "";
 }
 
-/** Agent dashboard (Feature 12): Analytics / Ticket Queue / Administration tabs. */
+/**
+ * Agent dashboard (Feature 12): Analytics / Ticket Queue / Administration.
+ * UI_REVAMP_v2 §A3 shell: topbar (wordmark, announcement bell, role, logout) +
+ * announcement banner + collapsible sidebar navigation (bottom tab bar on
+ * mobile). The `tab` state model and tab contents are unchanged — the sidebar
+ * simply drives the same union the old top tab bar did.
+ */
 export default function DashboardPage() {
   const [role, setRole] = useState("");
-  const [tab, setTab] = useState<"analytics" | "queue" | "admin">("queue");
+  const [tab, setTab] = useState<NavKey>("queue");
 
   useEffect(() => {
     setRole(readCookie("role"));
   }, []);
 
-  const tabs: { key: typeof tab; label: string }[] = [
-    { key: "analytics", label: "Analytics" },
-    { key: "queue", label: "Ticket Queue" },
-    ...(role === "admin"
-      ? [{ key: "admin" as const, label: "Administration" }]
-      : []),
-  ];
-
   return (
-    <main className="mx-auto max-w-4xl bg-slate-50 p-6">
-      <div className="mb-2 flex items-center justify-between">
-        <h1 className="text-xl font-bold text-indigo-700">UniServe</h1>
-        <span className="rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs uppercase text-indigo-700">
-          {role || "guest"}
-        </span>
+    <div className="min-h-screen bg-slate-50">
+      <Topbar role={role} />
+      <AnnouncementBanner />
+      <div className="flex">
+        <Sidebar active={tab} role={role} onSelect={setTab} />
+        <main className="min-w-0 flex-1 p-6 pb-24 md:pb-6">
+          {tab === "queue" && <TicketQueue role={role} />}
+          {tab === "analytics" && <AnalyticsPanel canViewAll={role === "admin" || role === "lead"} />}
+          {tab === "admin" && role === "admin" && <Administration />}
+        </main>
       </div>
-      <nav className="mb-6 flex gap-2 rounded-lg bg-white p-1 shadow-sm">
-        {tabs.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`rounded-md px-3 py-2 text-sm transition-colors ${
-              tab === t.key
-                ? "bg-indigo-600 font-semibold text-white"
-                : "text-slate-600 hover:bg-slate-100"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </nav>
-
-      {tab === "queue" && <TicketQueue role={role} />}
-      {tab === "analytics" && <AnalyticsPanel canViewAll={role === "admin" || role === "lead"} />}
-      {tab === "admin" && role === "admin" && <Administration />}
-    </main>
+    </div>
   );
 }
 
@@ -381,12 +369,16 @@ function TicketQueue({ role }: { role: string }) {
 }
 
 function Administration() {
-  const [subTab, setSubTab] = useState<"team" | "intake" | "priority" | "settings">("team");
+  const [subTab, setSubTab] = useState<
+    "team" | "intake" | "priority" | "settings" | "announcements" | "system"
+  >("team");
   const subTabs: { key: typeof subTab; label: string }[] = [
     { key: "team", label: "Team" },
     { key: "intake", label: "Intake Fields" },
     { key: "priority", label: "Priority Rules" },
     { key: "settings", label: "Settings" },
+    { key: "announcements", label: "Announcements" },
+    { key: "system", label: "System" },
   ];
 
   return (
@@ -408,6 +400,8 @@ function Administration() {
       {subTab === "intake" && <IntakeFieldsPanel />}
       {subTab === "priority" && <PriorityRulesPanel />}
       {subTab === "settings" && <GeneralSettingsPanel />}
+      {subTab === "announcements" && <AnnouncementsPanel />}
+      {subTab === "system" && <SystemPanel />}
     </div>
   );
 }
