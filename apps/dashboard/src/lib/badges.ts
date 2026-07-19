@@ -36,6 +36,19 @@ export function priorityBadgeClass(label: string | null | undefined): string {
   }
 }
 
+export function identityBadgeClass(status: string | null | undefined): string {
+  switch (status) {
+    case "confirmed":
+      return `${BASE} bg-green-100 text-green-700`;
+    case "pending":
+      return `${BASE} bg-amber-100 text-amber-700`;
+    case "anonymous":
+      return `${BASE} bg-slate-200 text-slate-600`;
+    default:
+      return `${BASE} bg-slate-100 text-slate-500`;
+  }
+}
+
 export function roleBadgeClass(role: string | null | undefined): string {
   switch (role) {
     case "admin":

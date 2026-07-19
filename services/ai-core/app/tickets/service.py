@@ -13,6 +13,7 @@ from app.classify.classifier import classify
 from app.dedup.service import check_duplicate
 from app.identity.db_client import DbWriterClient
 from app.priority.engine import ScoreRequest, score
+from app.priority.llm_scorer import rubric_available, score_with_rubric
 
 logger = logging.getLogger("ai-core")
 
@@ -34,6 +35,31 @@ def _format_message_content(complaint_summary: str, intake: Optional[dict]) -> s
     if not details:
         return complaint_summary
     return complaint_summary + "\n\n---\nCitizen-provided details:\n" + "\n".join(details)
+
+
+async def _score_priority(
+    db: DbWriterClient, tenant_id: str, complaint_text: str, category: str,
+    channel: str, sentiment: float, trace_id: Optional[str],
+) -> dict:
+    """Score priority via the tenant's LLM rubric when configured+available,
+    else the deterministic engine (Feature 03).
+
+    An LLM failure never breaks ticket creation: the rubric fetch is best-effort
+    (`get_tenant_config` already returns `{}` on error) and `score_with_rubric`
+    returns None on any error/timeout, so we always fall through to the engine.
+    """
+    tenant_config = await db.get_tenant_config(tenant_id, trace_id=trace_id)
+    rubric = (tenant_config.get("priorityRubric") or "").strip()
+    if rubric and rubric_available():
+        result = await score_with_rubric(rubric, complaint_text, category, channel)
+        if result is not None:
+            logger.info("priority scored via rubric traceId=%s category=%s label=%s",
+                        trace_id, category, result["label"])
+            return result
+        logger.info("rubric scoring unavailable/failed, using deterministic engine traceId=%s", trace_id)
+    return score(ScoreRequest(
+        tenantId=tenant_id, sentimentScore=sentiment, categoryLabel=category, channel=channel,
+    ))
 
 
 async def create_ticket_from_complaint(
@@ -115,9 +141,7 @@ async def create_ticket_from_complaint(
             "originMessageId": existing_ticket.get("origin_message_id"),
         }
 
-    priority = score(ScoreRequest(
-        tenantId=tenant_id, sentimentScore=sentiment, categoryLabel=category, channel=channel,
-    ))
+    priority = await _score_priority(db, tenant_id, complaint_summary, category, channel, sentiment, trace_id)
     intake = extracted.get("intake") or {}
     ticket_fields = {
         "identityId": master_id,

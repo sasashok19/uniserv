@@ -51,6 +51,19 @@ FOLLOWUP_QUESTION = (
 _ANONYMOUS_REPLY_RE = re.compile(r"\banonymous\b", re.IGNORECASE)
 
 
+def _effective_max_followups(tenant_config: dict) -> int:
+    """Follow-up-question budget for this tenant (Feature 04 general settings).
+
+    Uses ``generalSettings.maxFollowupQuestions`` when it's a valid int in
+    [0, 5]; otherwise falls back to the ``AI_MAX_FOLLOWUP_QUESTIONS`` env
+    default. `bool` is rejected explicitly (it's an `int` subclass in Python,
+    and a stray `true`/`false` in config should not be read as 1/0)."""
+    value = (tenant_config or {}).get("generalSettings", {}).get("maxFollowupQuestions")
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 5:
+        return value
+    return settings.ai_max_followup_questions
+
+
 def _flatten_intake(intake: dict) -> dict:
     """`{key: {"value":..., "source":...}}` -> `{key: value}`, keeping only
     what the citizen actually wrote in THIS message — the shape every OTHER
@@ -138,6 +151,7 @@ class ConversationAgent:
         declared_anonymous = req.declaredAnonymous or bool(_ANONYMOUS_REPLY_RE.search(req.rawText or ""))
         tenant_config = await self._db.get_tenant_config(req.tenantId, trace_id=req.traceId)
         field_configs = fields_for_channel(tenant_config, req.channel)
+        max_followups = _effective_max_followups(tenant_config)
 
         # A declared-anonymous citizen is never looked up (they've explicitly
         # opted out of being identified) — only fields flagged
@@ -191,7 +205,7 @@ class ConversationAgent:
         category_hint = classification["category"]
         vague = category_hint == "other" or len(summary.split()) < 4
 
-        if vague and settings.ai_max_followup_questions >= 1:
+        if vague and max_followups >= 1:
             questions_asked = 1
             logger.info("info gathering: vague complaint, asking follow-up traceId=%s threadId=%s",
                         req.traceId, thread_key)
@@ -319,9 +333,10 @@ class ConversationAgent:
 
         tenant_config = await self._db.get_tenant_config(req.tenantId, trace_id=req.traceId)
         field_configs = fields_for_channel(tenant_config, req.channel)
+        max_followups = _effective_max_followups(tenant_config)
 
         user_message = self._render_user_message(req)
-        additional_instructions = self._render_additional_instructions(req, state, field_configs)
+        additional_instructions = self._render_additional_instructions(req, state, field_configs, max_followups)
 
         async def execute_tool(name: str, args: dict) -> dict:
             if name == "confirm_identity":
@@ -414,12 +429,17 @@ class ConversationAgent:
         return "\n".join(lines)
 
     @staticmethod
-    def _render_additional_instructions(req: TestEventRequest, state: dict, field_configs: list[dict]) -> str:
-        remaining = max(settings.ai_max_followup_questions - state["questions_asked"], 0)
+    def _render_additional_instructions(
+        req: TestEventRequest, state: dict, field_configs: list[dict], max_followups: int,
+    ) -> str:
+        # max_followups is the tenant-effective budget (Feature 04) threaded in
+        # by the caller — generalSettings.maxFollowupQuestions when valid, else
+        # the AI_MAX_FOLLOWUP_QUESTIONS env default.
+        remaining = max(max_followups - state["questions_asked"], 0)
         parts = [
             f"identity_status={state['identity_status']}",
             f"questions_asked={state['questions_asked']}",
-            f"max_followup_questions={settings.ai_max_followup_questions}",
+            f"max_followup_questions={max_followups}",
         ]
         if remaining == 0 and not state["complaint_ready"]:
             parts.append("You have used all follow-up questions: call submit_complaint now.")

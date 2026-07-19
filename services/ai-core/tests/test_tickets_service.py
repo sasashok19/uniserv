@@ -25,6 +25,7 @@ def _payload(**overrides):
 def test_create_ticket_from_complaint_updates_the_existing_stub_not_a_new_row():
     db = AsyncMock()
     db.get_ticket = AsyncMock(return_value={"id": "stub-1", "category": None})  # fresh stub
+    db.get_tenant_config = AsyncMock(return_value={})  # no rubric -> deterministic engine
     db.list_tickets = AsyncMock(return_value=[])
     db.update_ticket = AsyncMock(return_value={"ticket_number": "TKT-00010"})
     db.add_message = AsyncMock()
@@ -49,6 +50,7 @@ def test_create_ticket_from_complaint_updates_the_existing_stub_not_a_new_row():
 def test_create_ticket_from_complaint_persists_service_id_when_present():
     db = AsyncMock()
     db.get_ticket = AsyncMock(return_value={"id": "stub-1", "category": None})
+    db.get_tenant_config = AsyncMock(return_value={})
     db.list_tickets = AsyncMock(return_value=[])
     db.update_ticket = AsyncMock(return_value={"ticket_number": "TKT-00011"})
     db.add_message = AsyncMock()
@@ -91,6 +93,7 @@ def test_create_ticket_from_complaint_never_cross_merges_a_different_new_complai
     lookup would find the other one — this was the reported bug."""
     db = AsyncMock()
     db.get_ticket = AsyncMock(return_value={"id": "stub-2", "category": None})  # brand-new stub
+    db.get_tenant_config = AsyncMock(return_value={})
     db.update_ticket = AsyncMock(return_value={"ticket_number": "TKT-00020"})
     db.add_message = AsyncMock()
 
@@ -110,6 +113,7 @@ def test_create_ticket_from_complaint_creates_fresh_when_no_stub_given():
     """Direct/test callers that bypass the live pipeline still work."""
     db = AsyncMock()
     db.list_tickets = AsyncMock(return_value=[])
+    db.get_tenant_config = AsyncMock(return_value={})
     db.create_ticket = AsyncMock(return_value={"id": "t-99", "ticketNumber": "TKT-00099"})
     db.add_message = AsyncMock()
 
@@ -120,6 +124,63 @@ def test_create_ticket_from_complaint_creates_fresh_when_no_stub_given():
     assert result["ticketId"] == "t-99"
     assert result["ticketNumber"] == "TKT-00099"
     db.create_ticket.assert_awaited_once()
+
+
+def test_create_ticket_from_complaint_falls_back_to_engine_when_no_rubric():
+    """Feature 03: with no priorityRubric in tenant config, priority is scored
+    by the deterministic engine — the LLM scorer is never called."""
+    db = AsyncMock()
+    db.get_ticket = AsyncMock(return_value={"id": "stub-1", "category": None})
+    db.get_tenant_config = AsyncMock(return_value={})  # no rubric configured
+    db.update_ticket = AsyncMock(return_value={"ticket_number": "TKT-00030"})
+    db.add_message = AsyncMock()
+
+    with patch("app.tickets.service.score_with_rubric", new=AsyncMock()) as llm, \
+         patch("app.tickets.service.rubric_available", return_value=True):
+        result = _run(create_ticket_from_complaint(db, "t1", _payload(), trace_id="tr-30"))
+
+    assert result["action"] == "new_ticket"
+    llm.assert_not_awaited()  # engine path — no LLM call
+    fields_arg = db.update_ticket.await_args.args[1]
+    # Engine gives category "product" (severity 5) a medium-ish deterministic score.
+    assert fields_arg["priorityLabel"] in {"critical", "high", "medium", "low"}
+
+
+def test_create_ticket_from_complaint_uses_rubric_when_configured_and_available():
+    """Feature 03: a configured rubric + available LLM drives the priority."""
+    db = AsyncMock()
+    db.get_ticket = AsyncMock(return_value={"id": "stub-1", "category": None})
+    db.get_tenant_config = AsyncMock(return_value={"priorityRubric": "escalate everything"})
+    db.update_ticket = AsyncMock(return_value={"ticket_number": "TKT-00031"})
+    db.add_message = AsyncMock()
+
+    with patch("app.tickets.service.rubric_available", return_value=True), \
+         patch("app.tickets.service.score_with_rubric",
+               new=AsyncMock(return_value={"score": 9.2, "label": "critical"})) as llm:
+        _run(create_ticket_from_complaint(db, "t1", _payload(), trace_id="tr-31"))
+
+    llm.assert_awaited_once()
+    fields_arg = db.update_ticket.await_args.args[1]
+    assert fields_arg["priorityScore"] == 9.2
+    assert fields_arg["priorityLabel"] == "critical"
+
+
+def test_create_ticket_from_complaint_falls_back_when_rubric_scoring_returns_none():
+    """Feature 03: an LLM failure (score_with_rubric -> None) must not break
+    ticket creation — the deterministic engine takes over."""
+    db = AsyncMock()
+    db.get_ticket = AsyncMock(return_value={"id": "stub-1", "category": None})
+    db.get_tenant_config = AsyncMock(return_value={"priorityRubric": "some rubric"})
+    db.update_ticket = AsyncMock(return_value={"ticket_number": "TKT-00032"})
+    db.add_message = AsyncMock()
+
+    with patch("app.tickets.service.rubric_available", return_value=True), \
+         patch("app.tickets.service.score_with_rubric", new=AsyncMock(return_value=None)):
+        result = _run(create_ticket_from_complaint(db, "t1", _payload(), trace_id="tr-32"))
+
+    assert result["action"] == "new_ticket"
+    fields_arg = db.update_ticket.await_args.args[1]
+    assert fields_arg["priorityLabel"] in {"critical", "high", "medium", "low"}
 
 
 def test_create_ticket_from_complaint_no_stub_fallback_still_dedups_by_category():

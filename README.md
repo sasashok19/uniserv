@@ -26,6 +26,7 @@ resolution workflow and full audit trail.
 - [Citizen-facing notifications](#citizen-facing-notifications)
 - [Subject-line ticket threading & dedup](#subject-line-ticket-threading--dedup)
 - [Configurable per-channel intake fields](#configurable-per-channel-intake-fields)
+- [Configurable priority rubric & general settings](#configurable-priority-rubric--general-settings)
 - [HTTP API reference](#http-api-reference)
 - [Environment variables](#environment-variables)
 - [Logging, log levels & transaction tracing](#logging-log-levels--transaction-tracing)
@@ -300,6 +301,13 @@ cd services/db-writer  && mvn quarkus:dev
   exposed as a standalone internal HTTP endpoint for direct testing, and
   `dedup`/`priority`/`classify` are also used in-process by the ticket
   pipeline above (PII scrubbing is not yet wired into the automatic flow).
+  **Priority scoring is now rubric-aware** (`app/priority/llm_scorer.py`): when
+  a tenant has configured a free-text `priorityRubric` *and* an OpenAI key is
+  present, `create_ticket_from_complaint` asks the LLM to score priority by
+  applying that rubric (strict-JSON `{score,label}`); otherwise — no rubric, no
+  key, or any LLM error/timeout — it transparently falls back to the
+  deterministic weighted engine (`app/priority/engine.py`). See
+  [Configurable priority rubric & general settings](#configurable-priority-rubric--general-settings).
 - Every stage logs at INFO with the transaction's `traceId` (see below);
   `DbWriterClient` sends it onward as `X-Trace-Id` on every call to
   db-writer.
@@ -311,8 +319,14 @@ cd services/db-writer  && mvn quarkus:dev
 - `src/app/login/page.tsx` — agent login.
 - `src/app/dashboard/page.tsx` — role-gated agent dashboard (Analytics /
   Ticket Queue / Administration). Ticket Queue rows link to the detail page
-  below; nav tabs and status/priority badges use a shared colour palette
-  (`src/lib/badges.ts`).
+  below; nav tabs and status/priority/identity badges use a shared colour
+  palette (`src/lib/badges.ts`). The Ticket Queue shows admins and leads a
+  **Confirmed vs "Needs identity" scope toggle** (Confirmed →
+  `?identityStatus=confirmed`, Needs-identity →
+  `?identityStatus=pending,anonymous`) and an **Identity** column, so
+  not-yet-resolved stub tickets are viewable in their own queue and move to the
+  main (Confirmed) queue automatically once identity resolves; agents still see
+  only their own assigned tickets with no toggle.
 - `src/components/analytics/AnalyticsPanel.tsx` — real charts (via
   `recharts`): ticket volume (stacked bar by day/channel), SLA performance
   (donut), priority distribution (horizontal bar), and agent performance
@@ -332,6 +346,18 @@ cd services/db-writer  && mvn quarkus:dev
   (`EMAIL_IMMUTABLE`, `AgentAdminResource.java`). Field-level validation
   (name required, email format, 8+ char passwords, role enum, duplicate-email
   check) runs both client-side and in `AgentAdminResource`/`AgentService`.
+- `src/components/admin/IntakeFieldsPanel.tsx` — Administration → Intake Fields
+  sub-tab: the per-channel intake-field matrix (see
+  [Configurable per-channel intake fields](#configurable-per-channel-intake-fields)).
+- `src/components/admin/PriorityRulesPanel.tsx` — Administration → Priority
+  Rules sub-tab: a free-text editor (pre-filled with the current default
+  rubric) for the tenant's AI priority rubric; saves to
+  `PUT /api/v1/tenant/priority-rubric`.
+- `src/components/admin/GeneralSettingsPanel.tsx` — Administration → Settings
+  sub-tab: tenant general settings (currently the max follow-up-question count,
+  0–5); saves to `PUT /api/v1/tenant/general-settings`. Both new panels are
+  described in
+  [Configurable priority rubric & general settings](#configurable-priority-rubric--general-settings).
 - `src/app/dashboard/tickets/[id]/page.tsx` — ticket detail, reflowed into a
   2-column layout: the left (main) column has citizen details
   (Name/Email/Phone/Service-Customer-ID — read-only, sourced from the
@@ -640,6 +666,48 @@ identity field (name/mobile/email) with a `422` shown inline.
 
 ---
 
+## Configurable priority rubric & general settings
+
+Two more admin-authored, per-tenant config surfaces, both stored as their own
+key inside the tenant's free-form `config_json` (merge-one-key, so they never
+clobber `categories`/`sla`/`intakeFields` or each other) and both gated on the
+`admin.tenant.config` RBAC action.
+
+**AI priority rubric (`priorityRubric`).** Priority scoring used to be a fixed
+weighted rule engine. An admin can now write a **free-text rubric** describing
+how priority should be assessed; when it's set *and* an OpenAI key is
+configured, ai-core scores each new complaint by asking the LLM
+(`app/priority/llm_scorer.py` → `chat.completions`, strict-JSON
+`{score: 0-10, label: critical|high|medium|low}`) to apply that rubric.
+Fallbacks are total and silent: no rubric, no key, or any LLM error/timeout →
+the deterministic engine (`app/priority/engine.py`) scores it instead, so ticket
+creation never breaks and behaviour is unchanged until an admin opts in. The
+config screen (Administration → **Priority Rules**) is **pre-filled with the
+`default` rubric served by the backend — a plain-English writeup of exactly what
+the engine does today** (the six weighted factors + the 8/6/4 label
+thresholds), so saving it as-is keeps current behaviour. Endpoint:
+`GET|PUT /api/v1/tenant/priority-rubric` (`PriorityRubricResource`).
+
+**General settings (`generalSettings`).** A small, growing bag of tenant knobs
+that were previously process-wide env constants. Currently one field:
+`maxFollowupQuestions` (integer 0–5, default 2) — how many clarifying questions
+the conversation agent may ask before it must log the complaint. ai-core reads
+it per turn (`_effective_max_followups`, `app/conversation/agent.py`) with the
+`AI_MAX_FOLLOWUP_QUESTIONS` env value as fallback. Admin screen: Administration
+→ **Settings**. Endpoint: `GET|PUT /api/v1/tenant/general-settings`
+(`GeneralSettingsResource`).
+
+*Not yet configurable (kept hardcoded deliberately, to avoid config that
+nothing reads):* classifier category set/keywords, SLA due-date computation,
+priority factor weights/severity maps, unconfirmed auto-close window, phone
+default region, and identity timeouts. These are documented as candidates for a
+future round rather than half-wired now — the two consistency gaps worth noting
+are that the stored `categories`/`sla` keys are not yet consumed by the runtime,
+and the "14 days" auto-close appears as two independent literals (a Java
+constant and a Python string) that must be kept in agreement by hand.
+
+---
+
 ## HTTP API reference
 
 ### api-gateway — `http://localhost:8080`
@@ -667,6 +735,20 @@ identity field (name/mobile/email) with a `422` shown inline.
   keys, non-boolean flags, and any channel left without at least one mandatory
   identity field (name/mobile/email) with `422 INVALID_INTAKE_FIELDS`. See
   [Configurable per-channel intake fields](#configurable-per-channel-intake-fields).
+- `GET|PUT /api/v1/tenant/priority-rubric` — the tenant's free-text AI priority
+  rubric (`PriorityRubricResource`). `GET` returns `{rubric, default}` (the
+  `default` is the plain-English writeup of the current scoring engine, so the
+  admin screen is pre-filled with today's logic); `PUT {rubric}` validates a
+  string ≤ 8000 chars (`422 INVALID_PRIORITY_RUBRIC`) and merges only the
+  `priorityRubric` key (empty string clears it). See
+  [Configurable priority rubric & general settings](#configurable-priority-rubric--general-settings).
+- `GET|PUT /api/v1/tenant/general-settings` — tenant general settings
+  (`GeneralSettingsResource`). `GET` returns `{settings, defaults}`; `PUT`
+  validates `maxFollowupQuestions` as an integer in `[0,5]`
+  (`422 INVALID_GENERAL_SETTINGS`) and merges only the `generalSettings` key.
+  Both endpoints reuse the `admin.tenant.config` RBAC action and the
+  merge-one-key pattern, so `categories`/`sla`/`intakeFields`/`priorityRubric`/
+  `generalSettings` never clobber one another.
 
 **Analytics** (any role may view; `agentId`/customer filters beyond one's
 own tickets and `/agents` performance are lead/admin only via
@@ -772,7 +854,12 @@ Every route below is a thin proxy to the matching api-gateway endpoint via
 - `GET/POST /api/agents`, `PATCH /api/agents/[id]`, `PATCH /api/agents/[id]/password`
 - `GET/PUT /api/tenant/intake-fields` — proxies the intake-fields config for
   the Administration → Intake Fields admin UI
-- `GET /api/tickets`, `GET /api/tickets/[id]`
+- `GET/PUT /api/tenant/priority-rubric` — proxies the AI priority-rubric config
+  (Administration → Priority Rules)
+- `GET/PUT /api/tenant/general-settings` — proxies tenant general settings
+  (Administration → Settings)
+- `GET /api/tickets` (forwards `?identityStatus=` for the Confirmed / Needs-identity
+  queue toggle), `GET /api/tickets/[id]`
 - `POST /api/tickets/[id]/transition`, `PATCH /api/tickets/[id]/assign`,
   `GET/POST /api/tickets/[id]/notes`, `POST /api/tickets/[id]/reply`,
   `POST /api/tickets/[id]/generate-resolution-summary`

@@ -10,7 +10,12 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from app.conversation.agent import ChannelIdentityIn, ConversationAgent, TestEventRequest
+from app.conversation.agent import (
+    ChannelIdentityIn,
+    ConversationAgent,
+    TestEventRequest,
+    _effective_max_followups,
+)
 from app.conversation.openai_gateway import OpenAIAssistantGateway
 
 
@@ -337,6 +342,65 @@ def test_rule_based_whatsapp_email_provided_feeds_resolver_as_confirmed_email():
     resolve_req = resolver_cls.return_value.resolve.await_args.args[0]
     assert resolve_req.confirmedEmail == "ravi@example.com"
     assert resolve_req.confirmedName == "Ravi Kumar"
+
+
+# ---------------------------------------------------------------------------
+# Feature 04: tenant-configurable max follow-up questions
+# ---------------------------------------------------------------------------
+
+def test_effective_max_followups_uses_valid_tenant_override():
+    assert _effective_max_followups({"generalSettings": {"maxFollowupQuestions": 0}}) == 0
+    assert _effective_max_followups({"generalSettings": {"maxFollowupQuestions": 5}}) == 5
+
+
+def test_effective_max_followups_falls_back_to_env_default_when_invalid_or_absent():
+    from app.config import settings
+    # Absent, out of range, wrong type, and bool (an int subclass) all fall back.
+    assert _effective_max_followups({}) == settings.ai_max_followup_questions
+    assert _effective_max_followups({"generalSettings": {"maxFollowupQuestions": 9}}) == settings.ai_max_followup_questions
+    assert _effective_max_followups({"generalSettings": {"maxFollowupQuestions": "3"}}) == settings.ai_max_followup_questions
+    assert _effective_max_followups({"generalSettings": {"maxFollowupQuestions": True}}) == settings.ai_max_followup_questions
+
+
+def test_rule_based_tenant_override_zero_suppresses_followup_for_vague_complaint():
+    """With maxFollowupQuestions=0 a vague complaint is filed immediately
+    instead of asking a follow-up (contrast the default-2 behaviour in
+    test_rule_based_vague_complaint_asks_one_followup)."""
+    agent = ConversationAgent("t1")
+    req = _req(
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
+        rawText="Something is wrong",
+    )
+    known = {"master_id": "m-5", "name": "Ravi Kumar", "email": "ravi@example.com", "phone": "+919876543210"}
+    tenant_config = {"generalSettings": {"maxFollowupQuestions": 0}}
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+         patch.object(agent, "_publisher") as publisher, \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=known)), \
+         patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value=tenant_config)), \
+         patch.object(agent, "_save_state", new=AsyncMock()), \
+         patch("app.conversation.agent.IdentityResolver") as resolver_cls:
+        publisher.publish = AsyncMock(return_value="1-0")
+        resolver_cls.return_value.resolve = AsyncMock(return_value={"masterId": "m-5", "identityStatus": "confirmed"})
+        result = _run(agent.process(req))
+
+    assert result["questionsAsked"] == 0
+    assert result["complaintReady"] is True
+    # complaint.ready published straight away — no follow-up question sent.
+    stream_arg = publisher.publish.await_args.args[0]
+    assert stream_arg == "complaint.ready"
+
+
+def test_render_additional_instructions_uses_threaded_max_followups():
+    """The staticmethod reports and enforces the effective budget passed in,
+    not the env default."""
+    req = _req()
+    state = {"identity_status": "confirmed", "questions_asked": 1, "complaint_ready": False}
+    instr = ConversationAgent._render_additional_instructions(req, state, [], 1)
+    assert "max_followup_questions=1" in instr
+    # questions_asked (1) == budget (1) -> no remaining -> must submit now.
+    assert "call submit_complaint now" in instr
 
 
 # ---------------------------------------------------------------------------
