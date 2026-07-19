@@ -11,8 +11,10 @@ import io.quarkus.panache.common.Page;
 import io.quarkus.panache.common.Sort;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.persistence.Tuple;
 import jakarta.transaction.Transactional;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -98,53 +100,144 @@ public class TicketService {
     public record CacheResult(Map<String, Object> ticket, boolean hit) {
     }
 
+    /**
+     * Queue list (Feature 12), backed by a native SQL query that LEFT JOINs
+     * {@code identity_profiles} so each row carries the citizen's
+     * name/email/phone (for the dashboard's Name/Email/Mobile columns) and can
+     * be sorted by ANY column — including those citizen fields — server-side,
+     * across the whole result set rather than just the current page. Panache's
+     * active-record queries can't express the join (a ticket references its
+     * identity by the free `identity_id` string, not a mapped association), so
+     * this drops to native SQL. {@code sortBy} is whitelisted via
+     * {@link #SORT_COLUMNS} (never interpolated raw) to keep it injection-safe.
+     */
     public List<Map<String, Object>> list(String tenantId, String status, String assignedTo,
                                           String channel, String category, String identityId,
                                           String identityStatus, String threadId, String ticketNumber,
-                                          boolean includeArchived, int page, int pageSize) {
-        StringBuilder query = new StringBuilder("tenantId = :tenantId");
+                                          boolean includeArchived, int page, int pageSize,
+                                          String sortBy, String sortDir) {
         Map<String, Object> params = new HashMap<>();
+        String where = buildWhere(tenantId, status, assignedTo, channel, category, identityId,
+                identityStatus, threadId, ticketNumber, includeArchived, params);
+        String sortCol = SORT_COLUMNS.getOrDefault(sortBy, "t.created_at");
+        String dir = "asc".equalsIgnoreCase(sortDir) ? "asc" : "desc";
+        int size = Math.min(Math.max(pageSize, 1), 100);
+
+        String sql = "select " + String.join(", ", listSelectColumns()) + ", "
+                + "ip.name as citizen_name, ip.email as citizen_email, ip.phone as citizen_phone "
+                + "from tickets t "
+                + "left join identity_profiles ip on ip.master_id = t.identity_id and ip.tenant_id = t.tenant_id "
+                + "where " + where
+                // Stable, deterministic ordering: primary sort, then newest ticket as tiebreaker.
+                + " order by " + sortCol + " " + dir + ", t.ticket_number desc "
+                + "limit :limit offset :offset";
+
+        var q = Panache.getEntityManager().createNativeQuery(sql, Tuple.class);
+        params.forEach(q::setParameter);
+        q.setParameter("limit", size);
+        q.setParameter("offset", Math.max(page - 1, 0) * size);
+
+        List<String> cols = new ArrayList<>(LIST_COLUMNS);
+        cols.add("citizen_name");
+        cols.add("citizen_email");
+        cols.add("citizen_phone");
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Object rowObj : q.getResultList()) {
+            Tuple row = (Tuple) rowObj;
+            Map<String, Object> m = new LinkedHashMap<>();
+            for (String c : cols) {
+                m.put(c, row.get(c));
+            }
+            out.add(m);
+        }
+        return out;
+    }
+
+    /** Full count of tickets matching the same filters (for pagination). */
+    public long count(String tenantId, String status, String assignedTo, String channel, String category,
+                      String identityId, String identityStatus, String threadId, String ticketNumber,
+                      boolean includeArchived) {
+        Map<String, Object> params = new HashMap<>();
+        String where = buildWhere(tenantId, status, assignedTo, channel, category, identityId,
+                identityStatus, threadId, ticketNumber, includeArchived, params);
+        var q = Panache.getEntityManager().createNativeQuery("select count(*) from tickets t where " + where);
+        params.forEach(q::setParameter);
+        return ((Number) q.getSingleResult()).longValue();
+    }
+
+    /** API sort key -> SQL column, whitelisted so {@code sortBy} is never interpolated raw. */
+    private static final Map<String, String> SORT_COLUMNS = Map.ofEntries(
+            Map.entry("ticketNumber", "t.ticket_number"),
+            Map.entry("createdAt", "t.created_at"),
+            Map.entry("status", "t.status"),
+            Map.entry("category", "t.category"),
+            Map.entry("priorityScore", "t.priority_score"),
+            Map.entry("priorityLabel", "t.priority_label"),
+            Map.entry("channel", "t.channel_origin"),
+            Map.entry("identityStatus", "t.identity_status"),
+            Map.entry("citizenName", "ip.name"),
+            Map.entry("citizenEmail", "ip.email"),
+            Map.entry("citizenPhone", "ip.phone"));
+
+    /** Ticket columns returned by the list query (snake_case, matching {@link Ticket#toMap}). */
+    private static final List<String> LIST_COLUMNS = List.of(
+            "id", "ticket_number", "status", "category", "subcategory", "priority_score",
+            "priority_label", "sentiment_score", "channel_origin", "assigned_to", "identity_id",
+            "identity_status", "identity_source", "thread_id", "origin_message_id", "is_duplicate",
+            "parent_ticket_id", "service_id", "resolution", "sla_due_at", "resolved_at", "closed_at",
+            "reopened_count", "reopened_by", "created_at", "updated_at");
+
+    private static List<String> listSelectColumns() {
+        List<String> cols = new ArrayList<>();
+        for (String c : LIST_COLUMNS) {
+            cols.add("t." + c);
+        }
+        return cols;
+    }
+
+    /** Shared native-SQL WHERE clause (alias {@code t}); fills {@code params}. */
+    private static String buildWhere(String tenantId, String status, String assignedTo, String channel,
+                                     String category, String identityId, String identityStatus,
+                                     String threadId, String ticketNumber, boolean includeArchived,
+                                     Map<String, Object> params) {
+        StringBuilder w = new StringBuilder("t.tenant_id = :tenantId");
         params.put("tenantId", tenantId);
         if (status != null && !status.isBlank()) {
-            query.append(" and status in :statuses");
+            w.append(" and t.status in (:statuses)");
             params.put("statuses", List.of(status.split(",")));
         }
         if (assignedTo != null && !assignedTo.isBlank()) {
-            query.append(" and assignedTo = :assignedTo");
+            w.append(" and t.assigned_to = :assignedTo");
             params.put("assignedTo", assignedTo);
         }
         if (identityId != null && !identityId.isBlank()) {
-            query.append(" and identityId = :identityId");
+            w.append(" and t.identity_id = :identityId");
             params.put("identityId", identityId);
         }
         if (identityStatus != null && !identityStatus.isBlank()) {
-            query.append(" and identityStatus in :identityStatuses");
+            w.append(" and t.identity_status in (:identityStatuses)");
             params.put("identityStatuses", List.of(identityStatus.split(",")));
         }
         if (threadId != null && !threadId.isBlank()) {
-            query.append(" and threadId = :threadId");
+            w.append(" and t.thread_id = :threadId");
             params.put("threadId", threadId);
         }
         if (ticketNumber != null && !ticketNumber.isBlank()) {
-            query.append(" and ticketNumber = :ticketNumber");
+            w.append(" and t.ticket_number = :ticketNumber");
             params.put("ticketNumber", ticketNumber);
         }
         if (channel != null && !channel.isBlank()) {
-            query.append(" and channelOrigin = :channel");
+            w.append(" and t.channel_origin = :channel");
             params.put("channel", channel);
         }
         if (category != null && !category.isBlank()) {
-            query.append(" and category = :category");
+            w.append(" and t.category = :category");
             params.put("category", category);
         }
         if (!includeArchived) {
-            query.append(" and archivedAt is null");
+            w.append(" and t.archived_at is null");
         }
-
-        List<Ticket> rows = Ticket.find(query.toString(), Sort.by("priorityScore", Sort.Direction.Descending), params)
-                .page(Page.of(Math.max(page - 1, 0), pageSize))
-                .list();
-        return rows.stream().map(Ticket::toMap).toList();
+        return w.toString();
     }
 
     /** Find the ticket already tracking this conversation thread, if any (Feature 06). */

@@ -50,7 +50,9 @@ public class TicketsResource {
                          @QueryParam("category") String category,
                          @QueryParam("identityStatus") String identityStatus,
                          @QueryParam("page") String page,
-                         @QueryParam("pageSize") String pageSize) {
+                         @QueryParam("pageSize") String pageSize,
+                         @QueryParam("sortBy") String sortBy,
+                         @QueryParam("sortDir") String sortDir) {
         String role = user.role();
         String resolvedAssignee = assignedTo;
 
@@ -75,14 +77,35 @@ public class TicketsResource {
         append(q, "identityStatus", identityStatus);
         append(q, "page", page);
         append(q, "pageSize", pageSize);
+        append(q, "sortBy", sortBy);
+        append(q, "sortDir", sortDir);
 
-        List<Map<String, Object>> tickets = db.listTickets(q.toString());
+        // Use the raw call so we can surface db-writer's FULL matching count
+        // (`total`) for pagination — `listTickets` only returns the page's rows.
+        DbWriterClient.ApiResult result = db.call("GET", "/api/v1/db/tickets?" + q, null);
+        Object rawData = result.body() == null ? null : result.body().get("data");
+        List<Map<String, Object>> tickets = new ArrayList<>();
+        if (rawData instanceof List<?> list) {
+            for (Object o : list) {
+                if (o instanceof Map<?, ?> mm) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> t = (Map<String, Object>) mm;
+                    tickets.add(t);
+                }
+            }
+        }
+        Object total = result.body() == null ? null : result.body().get("total");
         Map<String, String> agentNames = agentDirectory();
         for (Map<String, Object> t : tickets) {
             String assignedAgentId = str(t, "assigned_to");
             t.put("assigned_to_name", assignedAgentId == null ? null : agentNames.get(assignedAgentId));
         }
-        return Response.ok(Map.of("tickets", tickets, "total", tickets.size(), "page", 1)).build();
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("tickets", tickets);
+        body.put("total", total != null ? total : tickets.size());
+        body.put("page", page == null ? 1 : page);
+        body.put("pageSize", pageSize);
+        return Response.ok(body).build();
     }
 
     /** Lead/Admin only — reassign (or unassign, with a null/blank body value) a ticket. */

@@ -65,14 +65,18 @@ public class TicketResource {
                                     @QueryParam("ticketNumber") String ticketNumber,
                                     @QueryParam("includeArchived") @DefaultValue("false") boolean includeArchived,
                                     @QueryParam("page") @DefaultValue("1") int page,
-                                    @QueryParam("pageSize") @DefaultValue("20") int pageSize) {
+                                    @QueryParam("pageSize") @DefaultValue("30") int pageSize,
+                                    @QueryParam("sortBy") String sortBy,
+                                    @QueryParam("sortDir") @DefaultValue("desc") String sortDir) {
         if (tenantId == null || tenantId.isBlank()) {
             throw new ApiException(400, "TENANT_REQUIRED", "tenantId is required");
         }
         int size = Math.min(Math.max(pageSize, 1), 100);
         List<Map<String, Object>> data = tickets.list(tenantId, status, assignedTo, channel, category, identityId,
-                identityStatus, threadId, ticketNumber, includeArchived, page, size);
-        return Map.of("data", data, "page", page, "pageSize", size, "total", data.size());
+                identityStatus, threadId, ticketNumber, includeArchived, page, size, sortBy, sortDir);
+        long total = tickets.count(tenantId, status, assignedTo, channel, category, identityId,
+                identityStatus, threadId, ticketNumber, includeArchived);
+        return Map.of("data", data, "page", page, "pageSize", size, "total", total);
     }
 
     /** Archive (soft-delete) unconfirmed tickets older than N days (Feature 12 admin cleanup). */

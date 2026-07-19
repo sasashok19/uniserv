@@ -326,7 +326,16 @@ cd services/db-writer  && mvn quarkus:dev
   `?identityStatus=pending,anonymous`) and an **Identity** column, so
   not-yet-resolved stub tickets are viewable in their own queue and move to the
   main (Confirmed) queue automatically once identity resolves; agents still see
-  only their own assigned tickets with no toggle.
+  only their own assigned tickets with no toggle. The queue also shows
+  **Name / Email / Mobile** columns (the citizen behind each ticket, joined from
+  the identity profile), **server-side sortable column headers** (click to sort
+  by any column incl. the citizen fields; default **newest-first** by created
+  date), and **pagination** (30 per page by default, selectable 30/50/100, with
+  Prev/Next + total-count navigation above the table). It **auto-refreshes every
+  30s**, has a **manual Refresh button**, and **persists its view state**
+  (scope, page, page size, sort) in `sessionStorage` — so returning from a
+  ticket-detail page refreshes the list and lands the user back on the same
+  queue scope they left.
 - `src/components/analytics/AnalyticsPanel.tsx` — real charts (via
   `recharts`): ticket volume (stacked bar by day/channel), SLA performance
   (donut), priority distribution (horizontal bar), and agent performance
@@ -763,7 +772,14 @@ own tickets and `/agents` performance are lead/admin only via
 
 **Tickets** (RBAC-scoped: agents see their own, lead/admin see all)
 - `GET /api/v1/tickets` (`?identityStatus=confirmed` for the main queue,
-  `?identityStatus=pending,anonymous` for the Unconfirmed queue),
+  `?identityStatus=pending,anonymous` for the Unconfirmed queue). Also accepts
+  `?page=` (1-based), `?pageSize=` (default 30, max 100), `?sortBy=` (one of
+  `ticketNumber`/`createdAt`/`status`/`category`/`priorityScore`/`priorityLabel`/
+  `channel`/`identityStatus`/`citizenName`/`citizenEmail`/`citizenPhone`) and
+  `?sortDir=asc|desc` (default `createdAt` `desc` — newest first). Each row is
+  enriched with `citizen_name`/`citizen_email`/`citizen_phone` (db-writer LEFT
+  JOINs `identity_profiles`), and the response carries the **full matching
+  `total`** (not just the page size) for pagination.
   `GET /api/v1/tickets/{id}` (detail includes the full message timeline and
   internal notes)
 - `POST /api/v1/tickets/{id}/transition` — on transition to `resolved` or
