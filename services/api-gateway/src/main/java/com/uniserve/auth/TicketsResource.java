@@ -119,8 +119,52 @@ public class TicketsResource {
         String assignedTo = input == null ? null : str(input, "assignedTo");
         Map<String, Object> patch = new LinkedHashMap<>();
         patch.put("assignedTo", (assignedTo == null || assignedTo.isBlank()) ? null : assignedTo);
+        // Who performed the (re)assignment — recorded in the ticket's audit trail.
+        patch.put("actorAgentId", user.agentId());
         DbWriterClient.ApiResult result = db.call("PATCH", "/api/v1/db/tickets/" + id, patch);
         return Response.status(result.status()).entity(result.body()).build();
+    }
+
+    /**
+     * Audit trail for the ticket-detail page: creation, assignments, status
+     * transitions — each with actor and timestamp. Actor/assignee agent ids are
+     * resolved to display names here so the UI doesn't need the agents list.
+     */
+    @GET
+    @Path("/{id}/events")
+    public Response events(@PathParam("id") String id) {
+        DbWriterClient.ApiResult result = db.call("GET", "/api/v1/db/tickets/" + id + "/events", null);
+        if (result.status() >= 400) {
+            return Response.status(result.status()).entity(result.body()).build();
+        }
+        Map<String, String> agentNames = agentDirectory();
+        List<Map<String, Object>> events = new ArrayList<>();
+        Object data = result.body() == null ? null : result.body().get("data");
+        if (data instanceof List<?> list) {
+            for (Object o : list) {
+                if (!(o instanceof Map<?, ?> raw)) {
+                    continue;
+                }
+                Map<String, Object> e = new LinkedHashMap<>();
+                e.put("eventType", raw.get("event_type"));
+                e.put("actorType", raw.get("actor_type"));
+                String actorId = raw.get("actor_id") == null ? null : String.valueOf(raw.get("actor_id"));
+                e.put("actorName", actorId == null ? null : agentNames.getOrDefault(actorId, actorId));
+                e.put("createdAt", raw.get("created_at"));
+                // meta_json is tiny ({"assignedTo": "<agent id>"}); resolve the name.
+                Object meta = raw.get("meta_json");
+                if (meta != null) {
+                    String metaStr = String.valueOf(meta);
+                    int idx = metaStr.indexOf("\"assignedTo\":\"");
+                    if (idx >= 0) {
+                        String assignee = metaStr.substring(idx + 14, metaStr.indexOf('"', idx + 14));
+                        e.put("assignedToName", agentNames.getOrDefault(assignee, assignee));
+                    }
+                }
+                events.add(e);
+            }
+        }
+        return Response.ok(Map.of("events", events)).build();
     }
 
     /** id -> name for every agent/lead/admin in the tenant, for the assign-to dropdown and queue display. */

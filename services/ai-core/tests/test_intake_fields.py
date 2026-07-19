@@ -144,3 +144,72 @@ def test_build_identity_request_message_followup_lists_only_missing():
     assert "still need" in message
     assert message.count("Name") == 1
     assert "Mobile" not in message
+
+
+# ---------------------------------------------------------------------------
+# Tenant-defined custom fields (admin "Add field" — cascades everywhere)
+# ---------------------------------------------------------------------------
+
+from app.conversation.intake_fields import catalog_for_tenant  # noqa: E402
+
+_CUSTOM_CONFIG = {
+    "intakeFieldCatalog": [
+        {"key": "consumerNumber", "label": "Consumer Number", "validation": "digits", "digits": 8},
+        {"key": "street", "label": "Street", "validation": "text"},
+        # Invalid entries must be skipped, never crash:
+        {"key": "name", "label": "Collides with builtin"},
+        {"key": "bad key!", "label": "Bad key"},
+        {"label": "No key at all"},
+        "not-a-dict",
+    ],
+    "intakeFields": {
+        "email": [
+            {"key": "name", "mandatory": True, "mandatoryIfAnonymous": False},
+            {"key": "consumerNumber", "mandatory": True, "mandatoryIfAnonymous": True},
+            {"key": "street", "mandatory": False, "mandatoryIfAnonymous": False},
+        ],
+    },
+}
+
+
+def test_catalog_for_tenant_merges_valid_customs_and_skips_invalid():
+    catalog = catalog_for_tenant(_CUSTOM_CONFIG)
+    assert "consumerNumber" in catalog and "street" in catalog
+    assert catalog["consumerNumber"]["label"] == "Consumer Number (8 digits)"
+    # Built-in collision kept the BUILT-IN definition.
+    assert catalog["name"]["label"] == "Name"
+    assert "bad key!" not in catalog
+
+
+def test_custom_digits_field_extracts_validates_and_blocks_gate():
+    catalog = catalog_for_tenant(_CUSTOM_CONFIG)
+    fields = fields_for_channel(_CUSTOM_CONFIG, "email", catalog=catalog)
+    assert [f["key"] for f in fields] == ["name", "consumerNumber", "street"]
+
+    # Missing consumer number -> gate blocks with the custom label.
+    extracted = extract_configured_fields(
+        "Name: Nithin\nMy meter is broken", "email", "n@x.com", False, fields, catalog=catalog)
+    missing = missing_fields(extracted, fields, declared_anonymous=False, catalog=catalog)
+    assert missing == ["Consumer Number (8 digits)"]
+
+    # Provided + valid (8 digits, label-anchored, punctuation-tolerant).
+    extracted = extract_configured_fields(
+        "Name: Nithin\nConsumer Number: 1234-5678\nStreet: 12 Elm Street",
+        "email", "n@x.com", False, fields, catalog=catalog)
+    assert extracted["consumerNumber"] == {"value": "12345678", "valid": True, "source": "extracted"}
+    assert extracted["street"]["value"] == "12 Elm Street"
+    assert missing_fields(extracted, fields, declared_anonymous=False, catalog=catalog) == []
+
+    # Wrong length -> flagged invalid with the custom label.
+    extracted = extract_configured_fields(
+        "Name: N\nConsumer Number: 123", "email", "n@x.com", False, fields, catalog=catalog)
+    missing = missing_fields(extracted, fields, declared_anonymous=False, catalog=catalog)
+    assert any("Consumer Number" in m for m in missing)
+
+
+def test_custom_field_appears_in_identity_request_form():
+    catalog = catalog_for_tenant(_CUSTOM_CONFIG)
+    fields = fields_for_channel(_CUSTOM_CONFIG, "email", catalog=catalog)
+    message = build_identity_request_message(fields, "email", False, [], is_first_ask=True, catalog=catalog)
+    assert "Consumer Number (8 digits) (required):" in message
+    assert "Street (if available):" in message

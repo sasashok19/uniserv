@@ -697,6 +697,19 @@ field config's absence/presence and its two flags). Native cells are shown as
 `/api/v1/tenant/intake-fields`; the backend rejects a channel with no mandatory
 identity field (name/mobile/email) with a `422` shown inline.
 
+**Custom fields (admin "Add field").** Admins can extend the catalog with
+tenant-defined fields (label + free-text or numeric validation, optional exact
+digit count) from the same screen — stored as `intakeFieldCatalog` in
+`config_json` (max 10). ai-core merges them into the runtime catalog
+(`catalog_for_tenant`, `app/conversation/intake_fields.py`), giving each a
+generic label-anchored extractor and validator — so a new field cascades
+automatically into the per-channel grid, the bot's intake form, reply
+extraction/validation, the assistant's per-turn instructions, and the ticket's
+citizen-provided summary. Removing a custom field also strips it from every
+channel's configuration. Custom fields are a single source of truth in tenant
+config — unlike the 5 built-ins, nothing needs to be kept in sync across the
+Java/Python boundary.
+
 ---
 
 ## Configurable priority rubric & general settings
@@ -768,6 +781,17 @@ constant and a Python string) that must be kept in agreement by hand.
   keys, non-boolean flags, and any channel left without at least one mandatory
   identity field (name/mobile/email) with `422 INVALID_INTAKE_FIELDS`. See
   [Configurable per-channel intake fields](#configurable-per-channel-intake-fields).
+- `PUT /api/v1/tenant/intake-fields/catalog` — replace the tenant's **custom
+  field catalog** (`{customFields: [{key, label, validation: "text"|"digits",
+  digits?}]}`, ≤10 fields, keys letters/digits ≤30 chars and distinct from
+  built-ins; `422 INVALID_FIELD_CATALOG`). Stored under `intakeFieldCatalog`
+  in `config_json`; removing a field also strips it from every channel's
+  configured list. ai-core's `catalog_for_tenant()` gives each custom field a
+  generic label-anchored extractor + text/digits validator, so an
+  admin-added field cascades to the bot's intake form, extraction,
+  validation, and the assistant's instructions with no code changes.
+  `GET /api/v1/tenant/intake-fields` returns the merged catalog (entries
+  flagged `builtin`) plus the raw `customFields` list.
 - `GET|PUT /api/v1/tenant/priority-rubric` — the tenant's free-text AI priority
   rubric (`PriorityRubricResource`). `GET` returns `{rubric, default}` (the
   `default` is the plain-English writeup of the current scoring engine, so the
@@ -779,6 +803,11 @@ constant and a Python string) that must be kept in agreement by hand.
   (`GeneralSettingsResource`). `GET` returns `{settings, defaults}`; `PUT`
   validates `maxFollowupQuestions` as an integer in `[0,5]`
   (`422 INVALID_GENERAL_SETTINGS`) and merges only the `generalSettings` key.
+  Also accepts an optional `newsFeedUrl` (http(s), ≤500 chars; blank clears)
+  — the login page's RSS headline source, served without auth via
+  `GET /api/v1/public/news-config` (`PublicNewsConfigResource`) so the
+  dashboard's `/api/news` route can read it before its env/BBC-Tamil
+  fallbacks.
   Both endpoints reuse the `admin.tenant.config` RBAC action and the
   merge-one-key pattern, so `categories`/`sla`/`intakeFields`/`priorityRubric`/
   `generalSettings` never clobber one another.
@@ -834,6 +863,12 @@ own tickets and `/agents` performance are lead/admin only via
   `total`** (not just the page size) for pagination.
   `GET /api/v1/tickets/{id}` (detail includes the full message timeline and
   internal notes)
+- `GET /api/v1/tickets/{id}/events` — the ticket's **audit trail** (creation,
+  assignments, status transitions) with actor/assignee agent ids resolved to
+  display names; backed by the `ticket_events` table. Assignments are audited
+  via a `ticket.assigned`/`ticket.unassigned` event recorded by db-writer
+  whenever `assignedTo` changes (the gateway's assign endpoint passes
+  `actorAgentId` so the trail shows who did it).
 - `POST /api/v1/tickets/{id}/transition` — on transition to `resolved` or
   `closed`, also sends the citizen a structured status-update email (see
   [Citizen-facing notifications](#citizen-facing-notifications))
@@ -928,7 +963,10 @@ Every route below is a thin proxy to the matching api-gateway endpoint via
 - `GET/PUT /api/tenant/general-settings` — proxies tenant general settings
   (Administration → Settings)
 - `GET /api/tickets` (forwards `?identityStatus=` for the Confirmed / Needs-identity
-  queue toggle), `GET /api/tickets/[id]`
+  queue toggle), `GET /api/tickets/[id]`, `GET /api/tickets/[id]/events` (the
+  detail page's Audit trail section)
+- `PUT /api/tenant/intake-fields/catalog` — add/remove custom intake fields
+  (Administration → Intake Fields → "Add field")
 - `POST /api/tickets/[id]/transition`, `PATCH /api/tickets/[id]/assign`,
   `GET/POST /api/tickets/[id]/notes`, `POST /api/tickets/[id]/reply`,
   `POST /api/tickets/[id]/generate-resolution-summary`

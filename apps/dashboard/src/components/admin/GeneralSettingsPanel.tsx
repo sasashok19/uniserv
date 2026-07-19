@@ -10,6 +10,7 @@ import { useEffect, useState } from "react";
  */
 export default function GeneralSettingsPanel() {
   const [value, setValue] = useState("");
+  const [newsFeedUrl, setNewsFeedUrl] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
@@ -25,6 +26,7 @@ export default function GeneralSettingsPanel() {
       const fallback = data?.defaults?.maxFollowupQuestions;
       const initial = typeof current === "number" ? current : fallback;
       setValue(typeof initial === "number" ? String(initial) : "");
+      setNewsFeedUrl(typeof data?.settings?.newsFeedUrl === "string" ? data.settings.newsFeedUrl : "");
       setLoading(false);
     })();
   }, []);
@@ -38,17 +40,23 @@ export default function GeneralSettingsPanel() {
       setValidationError("Enter a whole number between 0 and 5.");
       return;
     }
+    const url = newsFeedUrl.trim();
+    if (url && !/^https?:\/\//.test(url)) {
+      setValidationError("News feed URL must start with http:// or https://");
+      return;
+    }
     setSaving(true);
     const resp = await fetch("/api/tenant/general-settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ maxFollowupQuestions: parsed }),
+      body: JSON.stringify({ maxFollowupQuestions: parsed, newsFeedUrl: url }),
     });
     setSaving(false);
     if (resp.ok) {
       const data = await resp.json().catch(() => ({}));
       const current = data?.settings?.maxFollowupQuestions;
       if (typeof current === "number") setValue(String(current));
+      if (typeof data?.settings?.newsFeedUrl === "string") setNewsFeedUrl(data.settings.newsFeedUrl);
       setMessage("Settings saved.");
       return;
     }
@@ -103,6 +111,28 @@ export default function GeneralSettingsPanel() {
             setValue(e.target.value);
           }}
           className="w-24 rounded border p-2 text-sm"
+        />
+      </div>
+
+      <div className="max-w-xl rounded-lg border bg-white p-4 shadow-sm">
+        <label htmlFor="newsFeedUrl" className="block text-sm font-medium text-slate-700">
+          Login-page news feed (RSS URL)
+        </label>
+        <p className="mb-2 text-xs text-muted-foreground">
+          RSS 2.0 feed shown as headlines on the login page. Leave blank for the default (BBC Tamil).
+        </p>
+        <input
+          id="newsFeedUrl"
+          type="url"
+          placeholder="https://feeds.bbci.co.uk/tamil/rss.xml"
+          value={newsFeedUrl}
+          onChange={(e) => {
+            setMessage("");
+            setServerError("");
+            setValidationError("");
+            setNewsFeedUrl(e.target.value);
+          }}
+          className="w-full rounded border p-2 text-sm"
         />
       </div>
     </div>

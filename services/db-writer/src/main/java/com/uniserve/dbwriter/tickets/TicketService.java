@@ -271,7 +271,22 @@ public class TicketService {
             t.priorityLabel = str(body, "priorityLabel");
         }
         if (body.containsKey("assignedTo")) {
-            t.assignedTo = str(body, "assignedTo");
+            String newAssignee = str(body, "assignedTo");
+            // Audit assignment changes (dashboard's ticket-detail Audit section).
+            // actorAgentId is optional metadata from the gateway (who did it);
+            // meta_json records who it went TO (null = unassigned).
+            if (!java.util.Objects.equals(t.assignedTo, newAssignee)) {
+                TicketEvent event = new TicketEvent();
+                event.id = UUID.randomUUID().toString();
+                event.tenantId = t.tenantId;
+                event.ticketId = t.id;
+                event.eventType = newAssignee == null ? "ticket.unassigned" : "ticket.assigned";
+                event.actorType = str(body, "actorAgentId") == null ? "system" : "agent";
+                event.actorId = str(body, "actorAgentId");
+                event.metaJson = newAssignee == null ? null : "{\"assignedTo\":\"" + newAssignee + "\"}";
+                event.persist();
+            }
+            t.assignedTo = newAssignee;
         }
         if (body.containsKey("resolution")) {
             t.resolution = str(body, "resolution");

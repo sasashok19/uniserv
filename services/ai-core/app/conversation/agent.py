@@ -18,8 +18,8 @@ from pydantic import BaseModel
 from app.classify.classifier import classify
 from app.config import settings
 from app.conversation.intake_fields import (
-    FIELD_CATALOG,
     build_identity_request_message,
+    catalog_for_tenant,
     extract_configured_fields,
     fields_for_channel,
     is_native_field,
@@ -150,7 +150,8 @@ class ConversationAgent:
         # --- Identity gate (Feature 15/16: configurable per-channel fields) ---
         declared_anonymous = req.declaredAnonymous or bool(_ANONYMOUS_REPLY_RE.search(req.rawText or ""))
         tenant_config = await self._db.get_tenant_config(req.tenantId, trace_id=req.traceId)
-        field_configs = fields_for_channel(tenant_config, req.channel)
+        catalog = catalog_for_tenant(tenant_config)
+        field_configs = fields_for_channel(tenant_config, req.channel, catalog=catalog)
         max_followups = _effective_max_followups(tenant_config)
 
         # A declared-anonymous citizen is never looked up (they've explicitly
@@ -160,14 +161,15 @@ class ConversationAgent:
         known = None if declared_anonymous else await self._find_known_identity(req)
         intake = extract_configured_fields(
             req.rawText, req.channel, req.channelIdentity.value, req.channelIdentity.verified,
-            field_configs, known=known,
+            field_configs, known=known, catalog=catalog,
         )
-        missing = missing_fields(intake, field_configs, declared_anonymous)
+        missing = missing_fields(intake, field_configs, declared_anonymous, catalog=catalog)
         if missing:
             original_text = state.get("original_raw_text") or req.rawText
             is_first_ask = not state.get("original_raw_text")
             message = build_identity_request_message(
-                field_configs, req.channel, req.channelIdentity.verified, missing, is_first_ask)
+                field_configs, req.channel, req.channelIdentity.verified, missing, is_first_ask,
+                catalog=catalog)
             logger.info("identity gate: requesting identity traceId=%s threadId=%s missing=%s",
                         req.traceId, thread_key, missing)
             await self._send_reply(req, thread_key, message, is_identity_request=True)
@@ -332,11 +334,13 @@ class ConversationAgent:
             state["original_complaint"] = req.rawText.strip()
 
         tenant_config = await self._db.get_tenant_config(req.tenantId, trace_id=req.traceId)
-        field_configs = fields_for_channel(tenant_config, req.channel)
+        catalog = catalog_for_tenant(tenant_config)
+        field_configs = fields_for_channel(tenant_config, req.channel, catalog=catalog)
         max_followups = _effective_max_followups(tenant_config)
 
         user_message = self._render_user_message(req)
-        additional_instructions = self._render_additional_instructions(req, state, field_configs, max_followups)
+        additional_instructions = self._render_additional_instructions(
+            req, state, field_configs, max_followups, catalog)
 
         async def execute_tool(name: str, args: dict) -> dict:
             if name == "confirm_identity":
@@ -449,6 +453,7 @@ class ConversationAgent:
     @staticmethod
     def _render_additional_instructions(
         req: TestEventRequest, state: dict, field_configs: list[dict], max_followups: int,
+        catalog: Optional[dict] = None,
     ) -> str:
         # max_followups is the tenant-effective budget (Feature 04) threaded in
         # by the caller — generalSettings.maxFollowupQuestions when valid, else
@@ -480,12 +485,13 @@ class ConversationAgent:
         # the base instructions ("ask for an email or phone number") otherwise
         # win and the model ignores the tenant's field list entirely.
         if not state.get("complaint_ready") and state.get("identity_status") != "confirmed":
+            spec_by_key = catalog if catalog is not None else catalog_for_tenant(None)
             mandatory = [
-                FIELD_CATALOG[fc["key"]]["label"] for fc in field_configs
+                spec_by_key[fc["key"]]["label"] for fc in field_configs
                 if fc.get("mandatory") and not is_native_field(fc["key"], req.channel, req.channelIdentity.verified)
             ]
             optional = [
-                FIELD_CATALOG[fc["key"]]["label"] for fc in field_configs
+                spec_by_key[fc["key"]]["label"] for fc in field_configs
                 if not fc.get("mandatory") and not is_native_field(fc["key"], req.channel, req.channelIdentity.verified)
             ]
             if req.channel == "email" and req.channelIdentity.value:

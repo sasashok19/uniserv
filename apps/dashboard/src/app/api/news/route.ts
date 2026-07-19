@@ -1,15 +1,34 @@
 import { NextResponse } from "next/server";
 
+import { gatewayBase } from "@/lib/gateway";
+
 export const dynamic = "force-dynamic";
 
 /**
  * Local headlines for the login page (UI_REVAMP_v2 Feature B, revised): BBC
- * Tamil RSS — free, no API key, no geolocation. Fetched and parsed server-side;
- * `NEWS_RSS_URL` can point at any RSS 2.0 feed to change the source. Always
- * returns `{articles: []}` on any failure so the widget can hide silently.
+ * Tamil RSS — free, no API key, no geolocation. Fetched and parsed server-side.
+ * Feed source precedence: admin-configured URL (Administration → Settings →
+ * `generalSettings.newsFeedUrl`, read via the public news-config endpoint) →
+ * `NEWS_RSS_URL` env → BBC Tamil. Always returns `{articles: []}` on any
+ * failure so the widget can hide silently.
  */
 const DEFAULT_FEED = "https://feeds.bbci.co.uk/tamil/rss.xml";
 const MAX_ARTICLES = 4;
+
+async function configuredFeedUrl(): Promise<string | null> {
+  try {
+    const resp = await fetch(`${gatewayBase()}/api/v1/public/news-config`, {
+      next: { revalidate: 300 },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const url = typeof data.newsFeedUrl === "string" ? data.newsFeedUrl.trim() : "";
+    return url.startsWith("http") ? url : null;
+  } catch {
+    return null;
+  }
+}
 
 type Article = { title: string; url: string; publishedAt: string | null; source: string };
 
@@ -21,7 +40,7 @@ function textBetween(block: string, tag: string): string | null {
 }
 
 export async function GET() {
-  const feedUrl = process.env.NEWS_RSS_URL || DEFAULT_FEED;
+  const feedUrl = (await configuredFeedUrl()) || process.env.NEWS_RSS_URL || DEFAULT_FEED;
   try {
     const resp = await fetch(feedUrl, {
       next: { revalidate: 1800 },

@@ -29,6 +29,26 @@ type TicketDetail = {
 
 type Agent = { id: string; name: string };
 
+type AuditEvent = {
+  eventType: string;
+  actorType: string | null;
+  actorName: string | null;
+  assignedToName?: string;
+  createdAt: string;
+};
+
+/** Human-readable audit line: "Status → resolved — by Admin User". */
+function describeEvent(e: AuditEvent): string {
+  const by = e.actorName ? ` — by ${e.actorName}` : e.actorType === "system" ? " — system" : "";
+  if (e.eventType === "ticket.created") return `Ticket created${by}`;
+  if (e.eventType.startsWith("status.")) return `Status → ${e.eventType.slice(7).replace("_", " ")}${by}`;
+  if (e.eventType === "ticket.assigned") return `Assigned to ${e.assignedToName ?? "an agent"}${by}`;
+  if (e.eventType === "ticket.unassigned") return `Unassigned${by}`;
+  if (e.eventType === "ticket.archived") return `Archived${by}`;
+  if (e.eventType === "ticket.auto_closed") return `Auto-closed (no citizen response)${by}`;
+  return `${e.eventType}${by}`;
+}
+
 const NEXT_STATUS: Record<string, string | null> = {
   open: "assigned",
   assigned: "in_progress",
@@ -58,6 +78,7 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
   const [statusMsg, setStatusMsg] = useState("");
   const [agents, setAgents] = useState<Agent[]>([]);
   const [assigning, setAssigning] = useState(false);
+  const [events, setEvents] = useState<AuditEvent[]>([]);
 
   async function load() {
     setLoading(true);
@@ -70,6 +91,11 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
       const agentsData = await agentsResp.json().catch(() => ({}));
       setAgents(agentsData.agents ?? []);
     }
+    // Audit trail (creation, assignments, status transitions) — best-effort.
+    fetch(`/api/tickets/${params.id}/events`)
+      .then((r) => r.json())
+      .then((d) => setEvents(Array.isArray(d.events) ? d.events : []))
+      .catch(() => setEvents([]));
   }
 
   useEffect(() => {
@@ -271,6 +297,23 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
                 Send update
               </button>
             </form>
+          </section>
+
+          {/* Audit trail: who did what, when — creation, assignments, transitions. */}
+          <section className="rounded-lg border bg-white p-4 shadow-sm">
+            <h2 className="mb-2 text-sm font-semibold text-slate-700">Audit trail</h2>
+            {events.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No audit events recorded.</p>
+            ) : (
+              <ul className="max-h-64 space-y-1 overflow-y-auto pr-1">
+                {events.map((e, i) => (
+                  <li key={i} className="flex items-baseline gap-2 border-b py-1.5 text-sm last:border-b-0">
+                    <span className="whitespace-nowrap text-xs text-muted-foreground">{e.createdAt}</span>
+                    <span className="min-w-0 flex-1 text-slate-700">{describeEvent(e)}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
           </section>
         </div>
 

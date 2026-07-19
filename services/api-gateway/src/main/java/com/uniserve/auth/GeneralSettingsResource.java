@@ -42,15 +42,16 @@ public class GeneralSettingsResource {
     @Inject
     ObjectMapper mapper;
 
+    private static final int MAX_NEWS_URL_LENGTH = 500;
+
     @GET
     public Response get() {
         if (!user.can("admin.tenant.config")) {
             return forbidden();
         }
         Map<String, Object> config = readConfig();
-        int effective = configuredMaxFollowup(config);
         return Response.ok(Map.of(
-                "settings", Map.of("maxFollowupQuestions", effective),
+                "settings", settingsView(config),
                 "defaults", Map.of("maxFollowupQuestions", DEFAULT_MAX_FOLLOWUP_QUESTIONS))).build();
     }
 
@@ -66,20 +67,45 @@ public class GeneralSettingsResource {
             return invalid("'maxFollowupQuestions' must be an integer between "
                     + MIN_FOLLOWUP_QUESTIONS + " and " + MAX_FOLLOWUP_QUESTIONS);
         }
+        // Optional login-page news feed override (blank clears -> BBC Tamil default).
+        Object newsRaw = body == null ? null : body.get("newsFeedUrl");
+        String newsFeedUrl = null;
+        if (newsRaw != null && !String.valueOf(newsRaw).isBlank()) {
+            newsFeedUrl = String.valueOf(newsRaw).trim();
+            if (newsFeedUrl.length() > MAX_NEWS_URL_LENGTH
+                    || !(newsFeedUrl.startsWith("http://") || newsFeedUrl.startsWith("https://"))) {
+                return invalid("'newsFeedUrl' must be an http(s) URL of at most "
+                        + MAX_NEWS_URL_LENGTH + " characters");
+            }
+        }
         Map<String, Object> config = readConfig();
         Map<String, Object> settings = new LinkedHashMap<>();
         settings.put("maxFollowupQuestions", value);
+        if (newsFeedUrl != null) {
+            settings.put("newsFeedUrl", newsFeedUrl);
+        }
         config.put("generalSettings", settings);
         try {
             String json = mapper.writeValueAsString(config);
             db.updateTenantConfig(user.tenantId(), json);
             return Response.ok(Map.of(
-                    "settings", Map.of("maxFollowupQuestions", value),
+                    "settings", settingsView(config),
                     "defaults", Map.of("maxFollowupQuestions", DEFAULT_MAX_FOLLOWUP_QUESTIONS))).build();
         } catch (Exception e) {
             return Response.status(400).entity(Map.of("error", Map.of(
                     "code", "INVALID_CONFIG", "message", e.getMessage()))).build();
         }
+    }
+
+    /** The settings object as served to the admin panel. */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> settingsView(Map<String, Object> config) {
+        Map<String, Object> view = new LinkedHashMap<>();
+        view.put("maxFollowupQuestions", configuredMaxFollowup(config));
+        Object general = config.get("generalSettings");
+        Object url = general instanceof Map ? ((Map<String, Object>) general).get("newsFeedUrl") : null;
+        view.put("newsFeedUrl", url instanceof String ? url : "");
+        return view;
     }
 
     // ---- helpers -----------------------------------------------------
