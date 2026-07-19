@@ -57,10 +57,12 @@ public class AdminResetService {
             long retryAfter = (RATE_LIMIT_MS - (now - last) + 999) / 1000;
             throw new ApiException(429, "RATE_LIMITED", "retry after " + retryAfter + " seconds");
         }
-        lastReset.put(tenantId, now);
 
         LOG.warnf("TENANT RESET starting: tenantId=%s requestedBy=%s", tenantId, adminAgentId);
         Map<String, Object> counts = doReset(tenantId, adminAgentId);
+        // Stamp the rate limit only AFTER success — a failed/rolled-back attempt
+        // shouldn't lock the admin out for 60s.
+        lastReset.put(tenantId, now);
         cache.invalidateAll();
         LOG.warnf("TENANT RESET complete: tenantId=%s deleted=%s", tenantId, counts);
         return counts;
@@ -90,7 +92,9 @@ public class AdminResetService {
         audit.tenantId = tenantId;
         audit.ticketId = "tenant-reset-" + UUID.randomUUID();
         audit.eventType = "tenant.reset";
-        audit.actorType = "admin";
+        // ticket_events CHECKs actor_type IN ('system','ai','agent') — the admin
+        // is an agents-table row, so 'agent' + actor_id identifies them precisely.
+        audit.actorType = "agent";
         audit.actorId = adminAgentId;
         audit.metaJson = toJson(counts);
         audit.persist();
