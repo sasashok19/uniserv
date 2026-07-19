@@ -52,3 +52,31 @@ def test_thread_key_whatsapp_still_uses_persistent_address_based_key():
         messageId="whatsapp-has-no-message-id-but-even-if-set-should-be-ignored",
     )
     assert ConversationAgent._thread_key(req) == "whatsapp:+919876543210"
+
+
+# --- _conv_key: stable memory key across a multi-turn email exchange ---------
+
+
+def test_conv_key_prefers_stable_ticket_id():
+    """Conversation memory keys on the ticket, so the citizen's reply (which
+    threads off our identity-request email, giving it a DIFFERENT thread_key)
+    still finds the saved complaint instead of starting over."""
+    req = _req(ticketId="tkt-uuid-1", messageId="msg-1")
+    assert ConversationAgent._conv_key(req) == "ticket:tkt-uuid-1"
+
+
+def test_conv_key_stable_across_turns_with_different_message_ids():
+    """Two turns of the SAME conversation (original complaint, then the reply
+    with identity) have different email thread_keys but the same ticket, so
+    they must resolve to the same conversation-memory key."""
+    turn1 = _req(ticketId="tkt-uuid-9", messageId="original-msg", threadId=None)
+    turn2 = _req(ticketId="tkt-uuid-9", messageId="reply-msg", threadId="our-identity-request-msg-id")
+    assert ConversationAgent._conv_key(turn1) == ConversationAgent._conv_key(turn2) == "ticket:tkt-uuid-9"
+    # ...even though the raw email thread_keys differ.
+    assert ConversationAgent._thread_key(turn1) != ConversationAgent._thread_key(turn2)
+
+
+def test_conv_key_falls_back_to_thread_key_without_ticket():
+    """Direct/test calls with no ticket yet fall back to the email thread_key."""
+    req = _req(messageId="msg-xyz")
+    assert ConversationAgent._conv_key(req) == "email:msg-xyz"

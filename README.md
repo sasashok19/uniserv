@@ -244,6 +244,13 @@ cd services/db-writer  && mvn quarkus:dev
   best-effort hint about the mandatory fields injected into its per-turn
   instructions, but cannot enforce the config as strictly as the rule-based
   path (its system prompt isn't regenerated per tenant — a known limitation).
+  **Conversation memory (Valkey state + the OpenAI thread) is keyed by the
+  ticket** (`_conv_key` → `ticket:<id>`), not the per-message email thread key,
+  so a citizen's identity reply — which threads off *our* outbound email and so
+  carries a different `In-Reply-To` — still finds the original complaint
+  instead of starting over; the assistant path additionally carries the first
+  message forward as `original_complaint` so it submits the complaint the
+  citizen already sent rather than re-asking for it.
 - `app/identity/resolver.py` + `db_client.py` — resolves a channel identity
   (phone/email/anonymous) to a canonical `master_id` via db-writer, merging
   across channels by matching phone/email. `_resolve_phone()` now also honours

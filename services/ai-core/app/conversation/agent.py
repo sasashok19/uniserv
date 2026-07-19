@@ -123,12 +123,16 @@ class ConversationAgent:
 
     async def _process_rule_based(self, req: TestEventRequest) -> dict:
         thread_key = self._thread_key(req)
-        # No conversation memory across turns here (unlike the assistant
-        # path) except this one saved field: the intake form is a SEPARATE
-        # reply from the complaint description, so once identity is
-        # confirmed we need to recall what the citizen originally wrote
-        # rather than classify the intake reply itself.
-        state = await self._load_state(thread_key) or {}
+        # Conversation memory is keyed by the STABLE ticket (see _conv_key),
+        # not the per-message email thread_key — otherwise a citizen's reply
+        # (which threads off our identity-request email) would land on a new
+        # key and lose the saved complaint. thread_key is still used for
+        # event routing / the reply's threadId.
+        state_key = self._conv_key(req)
+        # The intake form is a SEPARATE reply from the complaint description,
+        # so once identity is confirmed we recall what the citizen originally
+        # wrote (saved below) rather than classify the intake reply itself.
+        state = await self._load_state(state_key) or {}
 
         # --- Identity gate (Feature 15/16: configurable per-channel fields) ---
         declared_anonymous = req.declaredAnonymous or bool(_ANONYMOUS_REPLY_RE.search(req.rawText or ""))
@@ -153,7 +157,7 @@ class ConversationAgent:
             logger.info("identity gate: requesting identity traceId=%s threadId=%s missing=%s",
                         req.traceId, thread_key, missing)
             await self._send_reply(req, thread_key, message, is_identity_request=True)
-            await self._save_state(thread_key, {
+            await self._save_state(state_key, {
                 "identity_status": "pending",
                 "questions_asked": 0,
                 "original_raw_text": original_text,
@@ -216,7 +220,7 @@ class ConversationAgent:
                     "extractedFields": extracted,
                 }, trace_id=req.traceId))
 
-        await self._save_state(thread_key, {
+        await self._save_state(state_key, {
             "identity_status": identity_status,
             "extracted_fields": extracted,
             "questions_asked": questions_asked,
@@ -294,13 +298,24 @@ class ConversationAgent:
 
     async def _process_via_assistant(self, req: TestEventRequest) -> dict:
         thread_key = self._thread_key(req)
-        state = await self._load_state(thread_key) or {
+        # Memory + the OpenAI thread are keyed by the stable ticket, not the
+        # per-message email thread_key (see _conv_key) — this is what keeps the
+        # original complaint in context across the identity back-and-forth so
+        # the assistant doesn't re-ask for details already given.
+        state_key = self._conv_key(req)
+        state = await self._load_state(state_key) or {
             "identity_status": "pending",
             "master_id": None,
             "extracted_fields": {},
             "questions_asked": 0,
             "complaint_ready": False,
         }
+        # Remember the citizen's first substantive message as the complaint, so
+        # that even if the OpenAI thread is reset (e.g. state TTL expired
+        # mid-conversation) the complaint is still carried into the per-turn
+        # instructions rather than being asked for again.
+        if not state.get("original_complaint") and (req.rawText or "").strip():
+            state["original_complaint"] = req.rawText.strip()
 
         tenant_config = await self._db.get_tenant_config(req.tenantId, trace_id=req.traceId)
         field_configs = fields_for_channel(tenant_config, req.channel)
@@ -316,7 +331,7 @@ class ConversationAgent:
             return {"error": f"unknown tool '{name}'"}
 
         reply_text = await self._openai.run_turn(
-            self._tenant_id, thread_key, user_message, execute_tool, additional_instructions,
+            self._tenant_id, state_key, user_message, execute_tool, additional_instructions,
         )
 
         if not state["complaint_ready"]:
@@ -324,7 +339,7 @@ class ConversationAgent:
         if reply_text:
             await self._send_reply(req, thread_key, reply_text)
 
-        await self._save_state(thread_key, state)
+        await self._save_state(state_key, state)
 
         return {
             "identityStatus": state["identity_status"],
@@ -408,6 +423,19 @@ class ConversationAgent:
         ]
         if remaining == 0 and not state["complaint_ready"]:
             parts.append("You have used all follow-up questions: call submit_complaint now.")
+        # Carry the citizen's original complaint forward so the assistant uses
+        # it instead of asking the citizen to repeat what they already sent in
+        # their first message (a common complaint when identity is collected
+        # across several email turns).
+        original = state.get("original_complaint")
+        if original and not state["complaint_ready"]:
+            snippet = original if len(original) <= 600 else original[:600]
+            parts.append(
+                "The citizen's original message was: " + json.dumps(snippet)
+                + ". If it already describes their problem, treat THAT as the complaint_summary and "
+                "call submit_complaint as soon as identity is resolved — do not ask them to repeat "
+                "what they already told you."
+            )
         # Feature 15/16: best-effort hint only — the Assistant's own tool
         # schema/instructions aren't regenerated per tenant, so this can't
         # enforce the configurable mandatory-field gate the way the
@@ -446,6 +474,23 @@ class ConversationAgent:
         if req.channel == "email" and req.messageId:
             return f"email:{req.messageId}"
         return f"{req.channel}:{req.channelIdentity.value or 'anon'}"
+
+    @staticmethod
+    def _conv_key(req: "TestEventRequest") -> str:
+        """Key for conversation MEMORY (Valkey state) and the OpenAI thread.
+
+        This must stay STABLE across a multi-turn email exchange. The email
+        ``_thread_key`` changes with every inbound Message-ID / In-Reply-To
+        (a citizen's reply threads off OUR identity-request email, not their
+        original), so keying memory on it made each turn a fresh conversation
+        with no recollection of the original complaint — the assistant then
+        re-asked for details the citizen already gave. The TICKET is the
+        stable anchor (matched by subject ticket-number in
+        ``ensure_ticket_stub``), so prefer it. Falls back to the thread_key
+        for direct/test calls that have no ticket yet."""
+        if req.ticketId:
+            return f"ticket:{req.ticketId}"
+        return ConversationAgent._thread_key(req)
 
     async def _send_reply(
         self, req: TestEventRequest, thread_key: str, text: str, is_identity_request: bool = False,

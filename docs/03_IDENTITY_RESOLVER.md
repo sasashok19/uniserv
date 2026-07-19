@@ -213,3 +213,14 @@ HTTP/1.1 200 OK
   trusts values whose `source` is `native` or `extracted` (not `known`,
   already-on-file) when deciding what to merge on. See the README's
   *Configurable per-channel intake fields* section.
+- **`_resolve_phone` guards native-email extraction by identity TYPE, not
+  channel (assistant-path crash fix).** On the OpenAI Assistant path the model
+  can call `confirm_identity` with a *phone* value on an email-origin thread —
+  the resolve request then has `channel="email"` but
+  `channelIdentity.type="phone"` and a mobile as the value. The old code
+  computed the channel's "native email" whenever `channel == "email"`, so it
+  ran `normalise_email("<mobile>")`, which raised `invalid email`, failed the
+  tool call, and made the assistant reply with a bogus "invalid mobile number"
+  message. Fixed: guard on `channelIdentity.type == "email"` and use a new
+  `_safe_email()` helper that returns `None` for a non-email value instead of
+  raising. Regression-tested in `tests/test_resolver_enrichment.py`.

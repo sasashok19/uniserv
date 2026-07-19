@@ -18,6 +18,20 @@ from app.identity.normalise import normalise_email, normalise_phone
 logger = logging.getLogger("ai-core")
 
 
+def _safe_email(value: Optional[str]) -> Optional[str]:
+    """normalise_email that returns None instead of raising when the value
+    isn't a valid email. Callers here receive identity values that can come
+    from an LLM tool call (assistant path), where the model may hand a phone
+    number to an email-typed field — a bad value must degrade to "no email",
+    not crash the whole identity-resolution turn."""
+    if not value:
+        return None
+    try:
+        return normalise_email(value)
+    except ValueError:
+        return None
+
+
 class ChannelIdentityIn(BaseModel):
     type: Optional[str] = None
     value: Optional[str] = None
@@ -96,16 +110,20 @@ class IdentityResolver:
 
     async def _resolve_phone(self, req: ResolveRequest, phone_value: str) -> dict:
         phone = normalise_phone(phone_value)
-        native_email = (
-            normalise_email(req.channelIdentity.value)
-            if req.channel == "email" and req.channelIdentity.value else None
-        )
+        # The email-channel's native address is only a usable cross-channel key
+        # when the channel identity really IS an email. On the assistant path
+        # the model can call confirm_identity with a phone value on an
+        # email-origin thread (req.channel stays "email" but the identity type
+        # becomes "phone"), so guard on the identity TYPE — not the channel —
+        # and tolerate a non-email value via _safe_email rather than crashing
+        # the whole turn in normalise_email.
+        native_email = _safe_email(req.channelIdentity.value) if req.channelIdentity.type == "email" else None
         # A citizen-PROVIDED email (Feature 15/16 — e.g. a WhatsApp user
         # asked for their email as part of the configurable intake fields)
         # is just as good a cross-channel key as a native one; without this,
         # an email actively solicited from a WhatsApp citizen would be
         # silently ignored for enrichment/merge purposes.
-        provided_email = native_email or (normalise_email(req.confirmedEmail) if req.confirmedEmail else None)
+        provided_email = native_email or _safe_email(req.confirmedEmail)
         existing_by_phone = await self._db.find_by_phone(req.tenantId, phone, trace_id=req.traceId)
 
         if existing_by_phone:

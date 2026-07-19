@@ -120,6 +120,35 @@ def test_whatsapp_verified_phone_with_citizen_provided_email_pointing_elsewhere_
     db.merge_identity.assert_awaited_once_with("row-phone", "m-email", trace_id=None)
 
 
+def test_email_channel_with_phone_typed_identity_does_not_crash_on_native_email():
+    """Assistant-path regression: on an email-origin thread the model can call
+    confirm_identity with a PHONE value, so the resolve request has
+    channel="email" but channelIdentity.type="phone" and value=<a mobile>.
+    _resolve_phone must guard native-email extraction on the identity TYPE,
+    not the channel, or normalise_email(<mobile>) raises 'invalid email' and
+    the whole turn fails (surfacing as a bogus 'invalid mobile' reply)."""
+    db = AsyncMock()
+    db.find_by_phone = AsyncMock(return_value=None)
+    db.find_by_email = AsyncMock(return_value=None)
+    db.create_identity = AsyncMock(return_value={})
+
+    req = ResolveRequest(
+        tenantId="t1",
+        channel="email",
+        channelIdentity=ChannelIdentityIn(type="phone", value="7890654367", verified=False),
+        confirmedPhone="7890654367",
+    )
+    result = _run(_resolver(db).resolve(req))
+
+    assert result["identityStatus"] == "confirmed"
+    assert result["isNew"] is True
+    # Resolved purely by phone; the phone value was never mistaken for an email.
+    db.find_by_email.assert_not_called()
+    payload = db.create_identity.await_args.args[0]
+    assert payload["phone"] == "+917890654367"
+    assert "email" not in payload
+
+
 def test_phone_not_found_and_no_existing_email_creates_fresh():
     db = AsyncMock()
     db.find_by_phone = AsyncMock(return_value=None)
