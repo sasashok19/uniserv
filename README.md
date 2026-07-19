@@ -330,8 +330,10 @@ cd services/db-writer  && mvn quarkus:dev
   (via `src/app/dashboard/layout.tsx`) render layered, colourful backdrops:
   a gradient/glow treatment that also acts as the fallback, with an
   OPTIONAL image layer underneath. Drop images at
-  `public/backgrounds/login-hero.jpg` (portrait hero for the login panel,
-  shown under a navy→teal legibility overlay) and
+  `public/backgrounds/login-hero.jpg` (hero for the login page's SIGN-IN
+  side, shown under a light veil plus a white radial pool behind the form
+  card so it stays readable; the navy brand/news panel is deliberately
+  image-free for headline readability) and
   `public/backgrounds/app-wash.jpg` (wide, subtle texture for the dashboard,
   shown under a strong pale-teal→gold veil so white panels stay readable) —
   a missing file fails silently and the gradients render alone. No code

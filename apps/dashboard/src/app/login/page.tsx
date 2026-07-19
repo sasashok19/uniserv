@@ -37,26 +37,12 @@ export default function LoginPage() {
 
   return (
     <main className="flex min-h-screen">
-      {/* Brand panel — hidden on small screens. Layered background: an
-          optional hero illustration (public/backgrounds/login-hero.jpg) under
-          a navy→teal overlay that keeps the text legible; if the image is
-          absent the overlay + glow blobs render as a colourful gradient on
-          their own (a missing CSS background-image fails silently). */}
-      <aside className="relative hidden w-2/5 flex-col justify-between overflow-hidden p-10 lg:flex">
-        <div
-          aria-hidden
-          className="absolute inset-0 bg-[#0D1B2A]"
-          style={{
-            backgroundImage:
-              "linear-gradient(165deg, rgba(13,27,42,0.94) 0%, rgba(13,27,42,0.82) 35%, rgba(2,128,144,0.72) 70%, rgba(2,195,154,0.55) 100%), url('/backgrounds/login-hero.jpg')",
-            backgroundSize: "cover",
-            backgroundPosition: "center",
-          }}
-        />
-        {/* Decorative glow — colour even without the image. */}
-        <div aria-hidden className="absolute -right-24 -top-24 h-80 w-80 rounded-full bg-[#02C39A]/25 blur-3xl" />
-        <div aria-hidden className="absolute -left-20 bottom-16 h-72 w-72 rounded-full bg-[#F4A261]/25 blur-3xl" />
-        <div aria-hidden className="absolute left-1/3 top-1/2 h-56 w-56 rounded-full bg-[#028090]/30 blur-3xl" />
+      {/* Brand panel — hidden on small screens. Deliberately IMAGE-FREE: a
+          calm navy gradient (plus two very faint glows) so the headlines and
+          announcement ticker stay highly readable. */}
+      <aside className="relative hidden w-2/5 flex-col justify-between overflow-hidden bg-gradient-to-b from-[#0D1B2A] via-[#0D1B2A] to-[#1B3A52] p-10 lg:flex">
+        <div aria-hidden className="absolute -right-28 -top-28 h-72 w-72 rounded-full bg-[#028090]/15 blur-3xl" />
+        <div aria-hidden className="absolute -left-24 bottom-10 h-64 w-64 rounded-full bg-[#F4A261]/10 blur-3xl" />
 
         <div className="relative">
           <h1 className="bg-gradient-to-r from-[#02C39A] to-[#E8F6F8] bg-clip-text text-4xl font-extrabold text-transparent drop-shadow">
@@ -72,9 +58,22 @@ export default function LoginPage() {
         </div>
       </aside>
 
-      {/* Sign-in panel — soft wash behind a white card, matching the app's panel style. */}
-      <section className="flex flex-1 flex-col justify-center bg-gradient-to-br from-[#E8F6F8] via-white to-[#FFF3E8] p-8">
-        <div className="mx-auto w-full max-w-sm rounded-xl border bg-white p-8 shadow-lg">
+      {/* Sign-in panel — the hero image lives HERE (public/backgrounds/
+          login-hero.jpg) under a light veil, with an extra white radial pool
+          behind the centred card so the form is always readable; if the image
+          is absent the veil + wash render as a soft gradient on their own. */}
+      <section
+        className="relative flex flex-1 flex-col justify-center overflow-hidden bg-gradient-to-br from-[#E8F6F8] via-white to-[#FFF3E8] p-8"
+        style={{
+          backgroundImage:
+            "radial-gradient(ellipse 46rem 34rem at center, rgba(255,255,255,0.88) 0%, rgba(255,255,255,0.55) 45%, rgba(255,255,255,0) 75%), " +
+            "linear-gradient(135deg, rgba(232,246,248,0.66) 0%, rgba(248,250,252,0.55) 50%, rgba(255,243,232,0.66) 100%), " +
+            "url('/backgrounds/login-hero.jpg')",
+          backgroundSize: "cover, cover, cover",
+          backgroundPosition: "center",
+        }}
+      >
+        <div className="mx-auto w-full max-w-sm rounded-xl border bg-white p-8 shadow-xl ring-1 ring-black/5">
           <h1 className="text-2xl font-bold lg:hidden">UniServe</h1>
           <h2 className="hidden text-xl font-semibold text-slate-800 lg:block">Welcome back</h2>
           <p className="mb-6 text-sm text-muted-foreground">Agent sign in</p>
