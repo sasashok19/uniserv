@@ -326,6 +326,16 @@ cd services/db-writer  && mvn quarkus:dev
 
 - `src/app/page.tsx` — landing page (agent sign-in / track-a-complaint
   links).
+- **Backgrounds** — the login brand panel and every `/dashboard` route
+  (via `src/app/dashboard/layout.tsx`) render layered, colourful backdrops:
+  a gradient/glow treatment that also acts as the fallback, with an
+  OPTIONAL image layer underneath. Drop images at
+  `public/backgrounds/login-hero.jpg` (portrait hero for the login panel,
+  shown under a navy→teal legibility overlay) and
+  `public/backgrounds/app-wash.jpg` (wide, subtle texture for the dashboard,
+  shown under a strong pale-teal→gold veil so white panels stay readable) —
+  a missing file fails silently and the gradients render alone. No code
+  change or restart needed when adding/swapping the images.
 - `src/app/login/page.tsx` — agent login, split layout (UI_REVAMP_v2 §A4):
   navy brand panel with tagline, the **BBC Tamil headlines widget**
   (`src/components/news/NewsWidget.tsx`, fed by the RSS-parsing `/api/news`

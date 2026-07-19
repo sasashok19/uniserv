@@ -37,23 +37,44 @@ export default function LoginPage() {
 
   return (
     <main className="flex min-h-screen">
-      {/* Brand panel — hidden on small screens. */}
-      <aside className="hidden w-2/5 flex-col justify-between bg-[#0D1B2A] p-10 lg:flex">
-        <div>
-          <h1 className="bg-gradient-to-r from-[#028090] to-[#02C39A] bg-clip-text text-3xl font-extrabold text-transparent">
+      {/* Brand panel — hidden on small screens. Layered background: an
+          optional hero illustration (public/backgrounds/login-hero.jpg) under
+          a navy→teal overlay that keeps the text legible; if the image is
+          absent the overlay + glow blobs render as a colourful gradient on
+          their own (a missing CSS background-image fails silently). */}
+      <aside className="relative hidden w-2/5 flex-col justify-between overflow-hidden p-10 lg:flex">
+        <div
+          aria-hidden
+          className="absolute inset-0 bg-[#0D1B2A]"
+          style={{
+            backgroundImage:
+              "linear-gradient(165deg, rgba(13,27,42,0.94) 0%, rgba(13,27,42,0.82) 35%, rgba(2,128,144,0.72) 70%, rgba(2,195,154,0.55) 100%), url('/backgrounds/login-hero.jpg')",
+            backgroundSize: "cover",
+            backgroundPosition: "center",
+          }}
+        />
+        {/* Decorative glow — colour even without the image. */}
+        <div aria-hidden className="absolute -right-24 -top-24 h-80 w-80 rounded-full bg-[#02C39A]/25 blur-3xl" />
+        <div aria-hidden className="absolute -left-20 bottom-16 h-72 w-72 rounded-full bg-[#F4A261]/25 blur-3xl" />
+        <div aria-hidden className="absolute left-1/3 top-1/2 h-56 w-56 rounded-full bg-[#028090]/30 blur-3xl" />
+
+        <div className="relative">
+          <h1 className="bg-gradient-to-r from-[#02C39A] to-[#E8F6F8] bg-clip-text text-4xl font-extrabold text-transparent drop-shadow">
             UniServe
           </h1>
-          <p className="mt-2 text-sm text-white/70">The complaint that gets heard.</p>
+          <p className="mt-2 text-sm text-white/80">The complaint that gets heard.</p>
         </div>
-        <div className="my-8 flex-1 overflow-hidden py-8">
+        <div className="relative my-8 flex-1 overflow-hidden py-8">
           <NewsWidget />
         </div>
-        <AnnouncementTicker />
+        <div className="relative">
+          <AnnouncementTicker />
+        </div>
       </aside>
 
-      {/* Sign-in panel. */}
-      <section className="flex flex-1 flex-col justify-center bg-white p-8">
-        <div className="mx-auto w-full max-w-sm">
+      {/* Sign-in panel — soft wash behind a white card, matching the app's panel style. */}
+      <section className="flex flex-1 flex-col justify-center bg-gradient-to-br from-[#E8F6F8] via-white to-[#FFF3E8] p-8">
+        <div className="mx-auto w-full max-w-sm rounded-xl border bg-white p-8 shadow-lg">
           <h1 className="text-2xl font-bold lg:hidden">UniServe</h1>
           <h2 className="hidden text-xl font-semibold text-slate-800 lg:block">Welcome back</h2>
           <p className="mb-6 text-sm text-muted-foreground">Agent sign in</p>

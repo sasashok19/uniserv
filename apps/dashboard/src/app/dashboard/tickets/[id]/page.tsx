@@ -206,7 +206,7 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
   }
 
   return (
-    <main className="mx-auto max-w-7xl bg-slate-50 p-6">
+    <main className="mx-auto max-w-7xl p-6">
       <Link href="/dashboard" className="text-sm text-muted-foreground hover:underline">
         ← Back to ticket queue
       </Link>
