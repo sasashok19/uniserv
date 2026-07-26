@@ -2,9 +2,19 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { CheckCircle2, Loader2, XCircle } from "lucide-react";
+import { CheckCircle2, Loader2, MessageCircle, XCircle } from "lucide-react";
 
-import { priorityBadgeClass, statusBadgeClass } from "@/lib/badges";
+import { BASE as BADGE_BASE, priorityBadgeStyle, statusBadgeStyle } from "@/lib/badges";
+
+/** Left-border accent per author type — lets a reviewer scanning a thread tell
+ * AI-drafted vs. citizen-written vs. agent-written content apart at a glance
+ * (matters for audit/QA in a government context). */
+const AUTHOR_BORDER: Record<string, string> = {
+  ai: "border-l-4 border-l-brand-teal",
+  agent: "border-l-4 border-l-slate-300",
+  system: "border-l-4 border-l-slate-300",
+  user: "border-l-4 border-l-blue-300",
+};
 
 type Note = { authorType: string; authorLabel: string; content: string; createdAt: string };
 type Message = { direction: string; authorType: string; content: string; createdAt: string };
@@ -73,7 +83,7 @@ const STATUS_LABEL = (s: string) => s.replace(/_/g, " ");
 function InfoField({ label, value }: { label: string; value: string | null }) {
   return (
     <div>
-      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className="text-xs text-slate-600">{label}</span>
       <div className="text-sm">{value || "—"}</div>
     </div>
   );
@@ -131,7 +141,7 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
     await load();
   }
 
-  if (loading) return <p className="p-6 text-sm text-muted-foreground">Loading…</p>;
+  if (loading) return <p className="p-6 text-sm text-slate-500">Loading…</p>;
   if (!ticket) return <p className="p-6 text-sm">Ticket not found.</p>;
 
   const nextStatuses = NEXT_STATUSES[ticket.status] ?? [];
@@ -207,13 +217,15 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
 
   return (
     <main className="mx-auto max-w-7xl p-6">
-      <Link href="/dashboard" className="text-sm text-muted-foreground hover:underline">
+      <Link href="/dashboard" className="text-sm text-slate-500 hover:text-brand-teal hover:underline">
         ← Back to ticket queue
       </Link>
 
       <div className="mt-3 mb-6 flex items-center justify-between">
-        <h1 className="text-xl font-bold text-indigo-700">{ticket.ticketNumber}</h1>
-        <span className={statusBadgeClass(ticket.status)}>{STATUS_LABEL(ticket.status)}</span>
+        <h1 className="text-xl font-bold text-brand-teal">{ticket.ticketNumber}</h1>
+        <span className={BADGE_BASE} style={statusBadgeStyle(ticket.status)}>
+          {STATUS_LABEL(ticket.status)}
+        </span>
       </div>
 
       {statusMsg && <p className="mb-4 rounded border bg-white p-2 text-sm shadow-sm">{statusMsg}</p>}
@@ -222,17 +234,17 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
         {/* LEFT: conversation (top) + audit trail (bottom), equal share, own scrollbars. */}
         <div className="space-y-6">
           <section className="rounded-lg border bg-white p-4 shadow-sm">
-            <h2 className="mb-2 text-sm font-semibold text-slate-700">Conversation</h2>
+            <h2 className="mb-2 text-base font-semibold text-slate-800">Conversation</h2>
             {ticket.messages.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No messages yet.</p>
+              <p className="text-sm text-slate-500">No messages yet.</p>
             ) : (
               <ul className="max-h-[38vh] space-y-2 overflow-y-auto pr-1">
                 {ticket.messages.map((m, i) => (
                   <li
                     key={i}
-                    className={`rounded-lg border p-3 text-sm ${m.direction === "outbound" ? "bg-indigo-50" : "bg-slate-50"}`}
+                    className={`rounded-lg border bg-slate-50 p-3 text-sm ${AUTHOR_BORDER[m.authorType] ?? "border-l-4 border-l-slate-300"}`}
                   >
-                    <div className="mb-1 text-xs text-muted-foreground">
+                    <div className="mb-1 text-xs text-slate-600">
                       {m.direction === "outbound" ? "Sent" : "Received"} · {m.authorType} · {m.createdAt}
                     </div>
                     {m.content}
@@ -244,14 +256,14 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
 
           {/* Audit trail — newest first. */}
           <section className="rounded-lg border bg-white p-4 shadow-sm">
-            <h2 className="mb-2 text-sm font-semibold text-slate-700">Audit trail</h2>
+            <h2 className="mb-2 text-base font-semibold text-slate-800">Audit trail</h2>
             {events.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No audit events recorded.</p>
+              <p className="text-sm text-slate-500">No audit events recorded.</p>
             ) : (
               <ul className="max-h-[38vh] space-y-1 overflow-y-auto pr-1">
                 {[...events].reverse().map((e, i) => (
                   <li key={i} className="flex items-baseline gap-2 border-b py-1.5 text-sm last:border-b-0">
-                    <span className="whitespace-nowrap text-xs text-muted-foreground">{e.createdAt}</span>
+                    <span className="whitespace-nowrap text-xs text-slate-600">{e.createdAt}</span>
                     <span className="min-w-0 flex-1 text-slate-700">{describeEvent(e)}</span>
                   </li>
                 ))}
@@ -263,7 +275,7 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
         {/* RIGHT: everything the agent acts on. */}
         <div className="space-y-6">
           <div className="rounded-lg border bg-white p-4 shadow-sm">
-            <h3 className="mb-3 text-sm font-semibold text-slate-700">Citizen details</h3>
+            <h3 className="mb-3 text-base font-semibold text-slate-800">Citizen details</h3>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <InfoField label="Name" value={ticket.citizenName} />
               <InfoField label="Email" value={ticket.citizenEmail} />
@@ -273,10 +285,12 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
             <div className="mt-4 grid grid-cols-2 gap-3 border-t pt-4 sm:grid-cols-4">
               <InfoField label="Category" value={ticket.category} />
               <div>
-                <span className="text-xs text-muted-foreground">Priority</span>
+                <span className="text-xs text-slate-600">Priority</span>
                 <div>
                   {ticket.priorityLabel ? (
-                    <span className={priorityBadgeClass(ticket.priorityLabel)}>{ticket.priorityLabel}</span>
+                    <span className={BADGE_BASE} style={priorityBadgeStyle(ticket.priorityLabel)}>
+                      {ticket.priorityLabel}
+                    </span>
                   ) : (
                     "—"
                   )}
@@ -284,10 +298,10 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
               </div>
               <InfoField label="Channel" value={ticket.channelOrigin} />
               <div>
-                <span className="text-xs text-muted-foreground">Assigned to</span>
+                <span className="text-xs text-slate-600">Assigned to</span>
                 {ticket.canAssign ? (
                   <select
-                    className="mt-0.5 w-full rounded border p-1 text-sm"
+                    className="mt-0.5 w-full rounded border p-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-teal"
                     value={ticket.assignedTo ?? ""}
                     disabled={assigning}
                     onChange={(e) => assign(e.target.value)}
@@ -310,30 +324,45 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
               placeholder), click a transition — the note rides along. */}
           {nextStatuses.length > 0 && (
             <div className="rounded-lg border bg-white p-4 shadow-sm">
-              <h3 className="mb-2 text-sm font-semibold text-slate-700">Status &amp; internal note</h3>
+              <h3 className="mb-2 text-base font-semibold text-slate-800">Status &amp; internal note</h3>
               <textarea
-                className="mb-2 w-full rounded border p-2 text-sm placeholder:text-slate-400"
+                className="mb-1 w-full rounded border p-2 text-sm placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-teal"
                 placeholder="Add internal note (visible to your team only; some transitions require min 20 characters)"
                 value={noteText}
                 onChange={(e) => setNoteText(e.target.value)}
                 rows={3}
               />
+              {nextStatuses.some((s) => MANDATORY_NOTE_TRANSITIONS.has(`${ticket.status}->${s}`)) && (
+                <p className={`mb-2 text-xs ${noteText.trim().length < 20 ? "text-amber-600" : "text-emerald-600"}`}>
+                  {noteText.trim().length}/20 characters — required for some transitions below
+                </p>
+              )}
               <div className="flex flex-wrap items-center gap-2">
-                {nextStatuses.map((s) => (
-                  <button
-                    key={s}
-                    onClick={() => transition(s)}
-                    disabled={transitioning !== null}
-                    className="inline-flex items-center gap-1.5 rounded bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
-                  >
-                    {transitioning === s && <Loader2 className="h-4 w-4 animate-spin" />}
-                    Move to {STATUS_LABEL(s)}
-                  </button>
-                ))}
+                {nextStatuses.map((s) => {
+                  const needsNote = MANDATORY_NOTE_TRANSITIONS.has(`${ticket.status}->${s}`);
+                  const blocked = needsNote && noteText.trim().length < 20;
+                  return (
+                    <button
+                      key={s}
+                      onClick={() => transition(s)}
+                      disabled={transitioning !== null || blocked}
+                      title={blocked ? "Add a note of at least 20 characters first" : undefined}
+                      className="inline-flex items-center gap-1.5 rounded bg-brand-teal px-3 py-2 text-sm font-medium text-white transition-transform hover:bg-brand-tealDark active:scale-[0.97] disabled:opacity-50"
+                    >
+                      {transitioning === s && <Loader2 className="h-4 w-4 animate-spin" />}
+                      Move to {STATUS_LABEL(s)}
+                      {needsNote && (
+                        <span className="ml-1 rounded-full bg-white/20 px-1.5 py-0.5 text-[10px] uppercase">
+                          Note required
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
                 <button
                   onClick={saveNoteOnly}
                   disabled={savingNote || !noteText.trim()}
-                  className="ml-auto text-xs text-indigo-600 hover:underline disabled:opacity-40"
+                  className="ml-auto text-xs text-brand-teal hover:underline disabled:opacity-40"
                   title="Save the note without changing status"
                 >
                   {savingNote ? "Saving…" : "Save note only"}
@@ -342,14 +371,20 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
             </div>
           )}
 
-          {/* Follow-up to the citizen, with explicit delivery feedback. */}
-          <section className="rounded-lg border bg-white p-4 shadow-sm">
-            <h2 className="mb-2 text-sm font-semibold text-slate-700">
+          {/* Follow-up to the citizen, with explicit delivery feedback. Teal
+              accent + tag distinguish this citizen-facing box from the
+              internal-only note box above — one gets emailed out, one never
+              leaves the team. */}
+          <section className="rounded-lg border border-l-4 border-l-brand-teal bg-white p-4 shadow-sm">
+            <h2 className="mb-2 flex items-center gap-2 text-base font-semibold text-slate-800">
               Ask a follow-up / update the customer
+              <span className="inline-flex items-center gap-1 rounded-full bg-brand-tealTint px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-brand-tealDark">
+                <MessageCircle className="h-3 w-3" aria-hidden /> Citizen will see this
+              </span>
             </h2>
             <form onSubmit={sendReply} className="space-y-2">
               <textarea
-                className="w-full rounded border p-2 text-sm placeholder:text-slate-400"
+                className="w-full rounded border p-2 text-sm placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-teal"
                 placeholder={
                   ticket.channelOrigin === "email"
                     ? "Ask the citizen a question or share an update — this is emailed to them"
@@ -366,7 +401,7 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
               <div className="flex items-center gap-3">
                 <button
                   disabled={sendState === "sending" || !replyText.trim()}
-                  className="inline-flex items-center gap-1.5 rounded bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 rounded bg-brand-teal px-4 py-2 text-sm font-medium text-white transition-transform hover:bg-brand-tealDark active:scale-[0.97] disabled:opacity-50"
                 >
                   {sendState === "sending" && <Loader2 className="h-4 w-4 animate-spin" />}
                   {sendState === "sending" ? "Sending…" : "Send"}
@@ -383,7 +418,7 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
                 )}
               </div>
               {ticket.status === "in_progress" && (
-                <p className="text-xs text-muted-foreground">
+                <p className="text-xs text-slate-600">
                   Tip: after asking a question, move the ticket to &quot;pending customer&quot; above so the
                   queue shows you are waiting on the citizen.
                 </p>
@@ -391,16 +426,18 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
             </form>
           </section>
 
-          {/* Note history — reference material, mirrors the conversation panel. */}
+          {/* Note history — reference material, mirrors the conversation panel.
+              Kept visually neutral/slate (no teal) to reinforce "internal only,
+              stays inside the team" in contrast with the citizen-facing box above. */}
           <section className="rounded-lg border bg-white p-4 shadow-sm">
-            <h2 className="mb-2 text-sm font-semibold text-slate-700">Internal notes</h2>
+            <h2 className="mb-2 text-base font-semibold text-slate-800">Internal notes</h2>
             {ticket.notes.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No notes yet.</p>
+              <p className="text-sm text-slate-500">No notes yet.</p>
             ) : (
               <ul className="max-h-[30vh] space-y-2 overflow-y-auto pr-1">
                 {ticket.notes.map((n, i) => (
-                  <li key={i} className="rounded-lg border bg-slate-50 p-3 text-sm">
-                    <div className="mb-1 text-xs text-muted-foreground">
+                  <li key={i} className={`rounded-lg border bg-slate-50 p-3 text-sm ${AUTHOR_BORDER[n.authorType] ?? "border-l-4 border-l-slate-300"}`}>
+                    <div className="mb-1 text-xs text-slate-600">
                       {n.authorLabel} · {n.createdAt}
                     </div>
                     {n.content}

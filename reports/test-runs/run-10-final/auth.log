@@ -1,0 +1,11 @@
+
+Running 6 tests using 1 worker
+
+  ok 1 [chromium] › e2e\auth.spec.ts:4:7 › Authentication › admin can log in and lands on dashboard (7.6s)
+  ok 2 [chromium] › e2e\auth.spec.ts:13:7 › Authentication › lead can log in and lands on dashboard (6.8s)
+  ok 3 [chromium] › e2e\auth.spec.ts:19:7 › Authentication › agent can log in and lands on dashboard (5.3s)
+  ok 4 [chromium] › e2e\auth.spec.ts:25:7 › Authentication › wrong password shows an inline error and does not navigate (3.2s)
+  ok 5 [chromium] › e2e\auth.spec.ts:34:7 › Authentication › FEED-10/A11Y-1: wrong password reddens input borders and inputs keep a visible focus ring (2.6s)
+  ok 6 [chromium] › e2e\auth.spec.ts:46:7 › Authentication › logout clears the session and redirects to login (9.2s)
+
+  6 passed (36.8s)

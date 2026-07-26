@@ -1,0 +1,8 @@
+
+Running 3 tests using 1 worker
+
+  ok 1 [chromium] › e2e\citizen-status.spec.ts:4:7 › Citizen status page (public, no auth) › loads without any authentication cookie (4.4s)
+  ok 2 [chromium] › e2e\citizen-status.spec.ts:10:7 › Citizen status page (public, no auth) › ROLE-11: shows UniServe branding even for an unknown reference (2.0s)
+  ok 3 [chromium] › e2e\citizen-status.spec.ts:16:7 › Citizen status page (public, no auth) › unknown reference shows a clear not-found message, not a crash (1.7s)
+
+  3 passed (9.8s)

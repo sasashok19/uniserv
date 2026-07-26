@@ -26,7 +26,21 @@ export default function Sidebar({
   role: string;
   onSelect: (key: NavKey) => void;
 }) {
-  const [collapsed, setCollapsed] = useState(false);
+  // Persisted in localStorage (a durable preference, not per-visit state) so
+  // it survives the full route change to/from ticket detail, which unmounts
+  // and remounts this component.
+  const [collapsed, setCollapsedState] = useState(() => {
+    if (typeof localStorage === "undefined") return false;
+    return localStorage.getItem("uniserve.sidebarCollapsed") === "true";
+  });
+  function setCollapsed(next: boolean) {
+    setCollapsedState(next);
+    try {
+      localStorage.setItem("uniserve.sidebarCollapsed", String(next));
+    } catch {
+      // ignore storage failures (e.g. private mode quota)
+    }
+  }
   const items = NAV.filter((n) => !n.adminOnly || role === "admin");
 
   return (
@@ -58,8 +72,8 @@ export default function Sidebar({
           })}
         </nav>
         <button
-          onClick={() => setCollapsed((v) => !v)}
-          className="m-2 flex items-center justify-center rounded-md border py-2 text-slate-400 hover:bg-slate-100"
+          onClick={() => setCollapsed(!collapsed)}
+          className="m-2 flex items-center justify-center rounded-md border py-2 text-slate-400 hover:bg-slate-100 active:scale-[0.97] transition-transform"
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
         >
           {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}

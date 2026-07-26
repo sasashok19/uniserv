@@ -52,8 +52,8 @@ export default function PriorityRulesPanel() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-semibold text-slate-700">Priority Rules</h3>
-          <p className="text-xs text-muted-foreground">
+          <h3 className="text-base font-semibold text-slate-800">Priority Rules</h3>
+          <p className="text-xs text-slate-600">
             Describe how the assistant should score ticket priority. Leaving the default text keeps
             today&apos;s behavior.
           </p>
@@ -61,13 +61,13 @@ export default function PriorityRulesPanel() {
         <button
           onClick={save}
           disabled={saving}
-          className="rounded bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+          className="rounded bg-brand-teal px-3 py-2 text-sm font-medium text-white hover:bg-brand-tealDark active:scale-[0.97] transition-transform disabled:opacity-50"
         >
           {saving ? "Saving…" : "Save changes"}
         </button>
       </div>
 
-      {message && <p className="rounded-lg bg-indigo-50 p-2 text-sm text-indigo-700">{message}</p>}
+      {message && <p className="rounded-lg bg-brand-tealTint p-2 text-sm text-brand-tealDark">{message}</p>}
       {serverError && <p className="rounded-lg bg-red-50 p-2 text-sm text-red-700">{serverError}</p>}
 
       <textarea
@@ -78,10 +78,10 @@ export default function PriorityRulesPanel() {
           setRubric(e.target.value);
         }}
         rows={18}
-        className="w-full rounded-lg border bg-white p-3 font-mono text-sm shadow-sm focus:border-indigo-400 focus:outline-none"
+        className="w-full rounded-lg border bg-white p-3 font-mono text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-teal"
       />
 
-      <p className="text-xs text-muted-foreground">
+      <p className="text-xs text-slate-600">
         The rubric is applied only when an AI model is configured; otherwise the built-in
         deterministic engine is used. Clearing the text restores the default logic.
       </p>

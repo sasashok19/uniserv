@@ -1,0 +1,16 @@
+
+Running 11 tests using 1 worker
+
+  ok  1 [chromium] › e2e\ticket-queue.spec.ts:8:7 › Ticket Queue › ROLE-3: defaults to priority-first sort, not newest-first (7.7s)
+  ok  2 [chromium] › e2e\ticket-queue.spec.ts:18:7 › Ticket Queue › scope toggle switches between Confirmed and Needs identity, resets to page 1 (4.9s)
+  ok  3 [chromium] › e2e\ticket-queue.spec.ts:26:7 › Ticket Queue › column headers are sortable and toggle direction on repeat click (5.0s)
+  ok  4 [chromium] › e2e\ticket-queue.spec.ts:34:7 › Ticket Queue › A11Y-4/A11Y-5: table headers have scope=col and the sorted column reports aria-sort (4.8s)
+  ok  5 [chromium] › e2e\ticket-queue.spec.ts:44:7 › Ticket Queue › pagination: page size selector changes rows and resets to page 1 (4.6s)
+  ok  6 [chromium] › e2e\ticket-queue.spec.ts:50:7 › Ticket Queue › manual refresh button works and updates the Refreshing state (4.6s)
+  ok  7 [chromium] › e2e\ticket-queue.spec.ts:59:7 › Ticket Queue › PERF-4: shows a 'Last updated' caption after the initial load (4.0s)
+  ok  8 [chromium] › e2e\ticket-queue.spec.ts:63:7 › Ticket Queue › VIS-5: priority dot renders in the ticket number cell (4.0s)
+  ok  9 [chromium] › e2e\ticket-queue.spec.ts:68:7 › Ticket Queue › VIS-7: channel column renders a Mail or MessageCircle icon (4.1s)
+  ok 10 [chromium] › e2e\ticket-queue.spec.ts:74:7 › Ticket Queue › VIS-2: primary buttons use the brand teal, not Tailwind indigo (5.7s)
+  ok 11 [chromium] › e2e\ticket-queue.spec.ts:79:7 › Ticket Queue › FEED-4: Needs-identity empty/populated state is scope-aware in its message (7.0s)
+
+  11 passed (1.0m)

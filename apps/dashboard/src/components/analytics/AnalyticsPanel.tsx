@@ -139,7 +139,7 @@ export default function AnalyticsPanel({ canViewAll }: { canViewAll: boolean }) 
       {/* Filter bar */}
       <div className="flex flex-wrap items-end gap-3 rounded-lg border bg-white p-3 shadow-sm">
         <div>
-          <label className="block text-xs text-muted-foreground">Time frame</label>
+          <label className="block text-xs text-slate-600">Time frame</label>
           <select
             className="rounded border p-2 text-sm"
             value={filters.period}
@@ -155,7 +155,7 @@ export default function AnalyticsPanel({ canViewAll }: { canViewAll: boolean }) 
 
         {canViewAll && (
           <div>
-            <label className="block text-xs text-muted-foreground">Agent</label>
+            <label className="block text-xs text-slate-600">Agent</label>
             <select
               className="rounded border p-2 text-sm"
               value={filters.agentId}
@@ -173,7 +173,7 @@ export default function AnalyticsPanel({ canViewAll }: { canViewAll: boolean }) 
 
         {canViewAll && (
           <div className="relative">
-            <label className="block text-xs text-muted-foreground">Customer</label>
+            <label className="block text-xs text-slate-600">Customer</label>
             <input
               className="w-48 rounded border p-2 text-sm"
               placeholder="Search name/email/phone"
@@ -189,7 +189,7 @@ export default function AnalyticsPanel({ canViewAll }: { canViewAll: boolean }) 
                 {customerOptions.map((c) => (
                   <li
                     key={c.id}
-                    className="cursor-pointer px-2 py-1 text-sm hover:bg-indigo-50"
+                    className="cursor-pointer px-2 py-1 text-sm hover:bg-brand-tealTint"
                     onClick={() => {
                       setFilters({ ...filters, identityId: c.id });
                       setCustomerLabel(c.name || c.email || c.phone || c.id);
@@ -203,7 +203,7 @@ export default function AnalyticsPanel({ canViewAll }: { canViewAll: boolean }) 
             )}
             {filters.identityId && (
               <button
-                className="ml-1 text-xs text-indigo-600 hover:underline"
+                className="ml-1 text-xs text-brand-teal hover:underline"
                 onClick={() => {
                   setFilters({ ...filters, identityId: "" });
                   setCustomerLabel("");
@@ -217,7 +217,7 @@ export default function AnalyticsPanel({ canViewAll }: { canViewAll: boolean }) 
         )}
 
         <div>
-          <label className="block text-xs text-muted-foreground">Priority</label>
+          <label className="block text-xs text-slate-600">Priority</label>
           <select
             className="rounded border p-2 text-sm"
             value={filters.priorityLabel}
@@ -233,7 +233,7 @@ export default function AnalyticsPanel({ canViewAll }: { canViewAll: boolean }) 
         </div>
 
         <div>
-          <label className="block text-xs text-muted-foreground">Category</label>
+          <label className="block text-xs text-slate-600">Category</label>
           <input
             className="w-36 rounded border p-2 text-sm"
             placeholder="e.g. billing"
@@ -297,8 +297,8 @@ export default function AnalyticsPanel({ canViewAll }: { canViewAll: boolean }) 
                 </ResponsiveContainer>
                 <div>
                   <p className="text-2xl font-bold text-green-600">{sla.slaMetPercent}%</p>
-                  <p className="text-xs text-muted-foreground">SLA met</p>
-                  <p className="mt-2 text-xs text-muted-foreground">
+                  <p className="text-xs text-slate-600">SLA met</p>
+                  <p className="mt-2 text-xs text-slate-600">
                     {sla.met} met · {sla.breached} breached
                   </p>
                 </div>

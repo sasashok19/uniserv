@@ -1,0 +1,9 @@
+
+Running 4 tests using 1 worker
+
+  ok 1 [chromium] › e2e\analytics.spec.ts:4:7 › Analytics › admin sees all 4 chart cards including Agent performance (7.1s)
+  ok 2 [chromium] › e2e\analytics.spec.ts:13:7 › Analytics › agent does NOT see Agent performance data (view-only restriction) (5.3s)
+  ok 3 [chromium] › e2e\analytics.spec.ts:19:7 › Analytics › time-frame filter change re-fetches data (4.4s)
+  ok 4 [chromium] › e2e\analytics.spec.ts:30:7 › Analytics › priority filter narrows results without erroring (4.8s)
+
+  4 passed (23.8s)

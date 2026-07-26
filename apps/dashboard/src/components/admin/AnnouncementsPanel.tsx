@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 
 import type { Announcement } from "@/components/announcements/AnnouncementBell";
@@ -38,35 +38,41 @@ export default function AnnouncementsPanel() {
   const inactive = items.filter((a) => !isLive(a));
 
   async function toggleActive(a: Announcement) {
-    await fetch(`/api/announcements/${a.id}`, {
+    const resp = await fetch(`/api/announcements/${a.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ isActive: a.is_active !== 1 }),
     });
-    setMessage(a.is_active === 1 ? "Announcement deactivated." : "Announcement reactivated.");
+    setMessage(
+      resp.ok
+        ? a.is_active === 1
+          ? "Announcement deactivated."
+          : "Announcement reactivated."
+        : "Failed to update announcement — please try again.",
+    );
     refresh();
   }
 
   async function remove(a: Announcement) {
     if (!window.confirm(`Delete announcement "${a.title}"? This cannot be undone.`)) return;
-    await fetch(`/api/announcements/${a.id}`, { method: "DELETE" });
-    setMessage("Announcement deleted.");
+    const resp = await fetch(`/api/announcements/${a.id}`, { method: "DELETE" });
+    setMessage(resp.ok ? "Announcement deleted." : "Failed to delete announcement — please try again.");
     refresh();
   }
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-slate-700">Announcements</h3>
+        <h3 className="text-base font-semibold text-slate-800">Announcements</h3>
         <button
           onClick={() => setEditing("new")}
-          className="rounded bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+          className="rounded bg-brand-teal px-3 py-2 text-sm font-medium text-white hover:bg-brand-tealDark active:scale-[0.97] transition-transform"
         >
           New announcement
         </button>
       </div>
 
-      {message && <p className="rounded-lg bg-indigo-50 p-2 text-sm text-indigo-700">{message}</p>}
+      {message && <p className="rounded-lg bg-brand-tealTint p-2 text-sm text-brand-tealDark">{message}</p>}
 
       {loading ? (
         <div className="space-y-2">
@@ -166,8 +172,25 @@ function EditModal({
   const [isActive, setIsActive] = useState(announcement ? announcement.is_active === 1 : true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const titleRef = useRef<HTMLInputElement>(null);
+  const triggerRef = useRef<HTMLElement | null>(null);
 
   const valid = title.trim().length >= 3 && body.trim().length >= 10;
+
+  useEffect(() => {
+    triggerRef.current = document.activeElement as HTMLElement;
+    titleRef.current?.focus();
+    return () => triggerRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !submitting) onClose();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [submitting]);
 
   async function save() {
     setSubmitting(true);
@@ -193,13 +216,19 @@ function EditModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-md space-y-3 rounded-lg bg-white p-5 shadow-xl">
-        <h4 className="text-sm font-semibold text-slate-700">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="announcement-modal-title"
+        className="w-full max-w-md space-y-3 rounded-lg bg-white p-5 shadow-xl"
+      >
+        <h4 id="announcement-modal-title" className="text-sm font-semibold text-slate-700">
           {announcement ? "Edit announcement" : "New announcement"}
         </h4>
         <div>
           <input
-            className="w-full rounded border p-2 text-sm"
+            ref={titleRef}
+            className="w-full rounded border p-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-teal"
             placeholder="Title (min 3 characters)"
             maxLength={80}
             value={title}
@@ -218,7 +247,7 @@ function EditModal({
           <p className="mt-1 text-right text-xs text-slate-400">{body.length}/500</p>
         </div>
         <div className="flex items-center gap-4">
-          <label className="flex-1 text-xs text-muted-foreground">
+          <label className="flex-1 text-xs text-slate-600">
             Expiry (optional)
             <input
               type="date"
@@ -242,7 +271,7 @@ function EditModal({
           <button
             onClick={save}
             disabled={!valid || submitting}
-            className="rounded bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+            className="rounded bg-brand-teal px-3 py-2 text-sm font-medium text-white hover:bg-brand-tealDark active:scale-[0.97] transition-transform disabled:opacity-50"
           >
             {submitting ? "Saving…" : "Save"}
           </button>

@@ -44,6 +44,20 @@ const config: Config = {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        // UniServe brand palette (mirrors src/lib/design-tokens.ts) — use these
+        // instead of Tailwind's default indigo/etc. for primary actions so the
+        // work surface matches the branded chrome (Topbar/Sidebar/login).
+        brand: {
+          navy: "#0D1B2A",
+          navyMid: "#1B3A52",
+          teal: "#028090",
+          tealDark: "#026670",
+          tealLight: "#02C39A",
+          tealTint: "#E8F6F8",
+          gold: "#F4A261",
+          coral: "#E07B54",
+          coralTint: "#FFF0EB",
+        },
       },
       borderRadius: {
         lg: "var(--radius)",

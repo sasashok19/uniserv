@@ -48,19 +48,19 @@ export default function TeamPanel() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-slate-700">Team</h3>
+        <h3 className="text-base font-semibold text-slate-800">Team</h3>
         <button
           onClick={() => {
             setShowAdd((v) => !v);
             setEditingId(null);
           }}
-          className="rounded bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+          className="rounded bg-brand-teal px-3 py-2 text-sm font-medium text-white hover:bg-brand-tealDark active:scale-[0.97] transition-transform"
         >
           {showAdd ? "Cancel" : "Add new"}
         </button>
       </div>
 
-      {message && <p className="rounded-lg bg-indigo-50 p-2 text-sm text-indigo-700">{message}</p>}
+      {message && <p className="rounded-lg bg-brand-tealTint p-2 text-sm text-brand-tealDark">{message}</p>}
 
       {showAdd && (
         <AddAgentForm
@@ -78,14 +78,14 @@ export default function TeamPanel() {
         <p className="text-sm text-muted-foreground">No team members yet.</p>
       ) : (
         <table className="w-full text-left text-sm">
-          <thead className="text-muted-foreground">
+          <thead className="text-slate-600">
             <tr>
-              <th className="p-2">Name</th>
-              <th className="p-2">Email</th>
-              <th className="p-2">Role</th>
-              <th className="p-2">Status</th>
-              <th className="p-2">Joined</th>
-              <th className="p-2"></th>
+              <th scope="col" className="p-2">Name</th>
+              <th scope="col" className="p-2">Email</th>
+              <th scope="col" className="p-2">Role</th>
+              <th scope="col" className="p-2">Status</th>
+              <th scope="col" className="p-2">Joined</th>
+              <th scope="col" className="p-2"><span className="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody>
@@ -168,33 +168,45 @@ function AddAgentForm({ onDone }: { onDone: (msg: string) => void }) {
     setServerError(data?.error?.message ?? "Failed to add team member.");
   }
 
+  function checkField(field: "name" | "email" | "password") {
+    setErrors((prev) => ({
+      ...prev,
+      [field]: fieldError(field, form[field], { requirePassword: field === "password" }),
+    }));
+  }
+
+  const INPUT = "w-full rounded border p-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-teal";
+
   return (
-    <form onSubmit={submit} className="max-w-sm space-y-3 rounded-lg border border-indigo-100 bg-indigo-50/40 p-4">
+    <form onSubmit={submit} className="max-w-sm space-y-3 rounded-lg border border-brand-tealTint bg-brand-tealTint/40 p-4">
       <div>
         <input
-          className="w-full rounded border p-2 text-sm"
+          className={INPUT}
           placeholder="Name"
           value={form.name}
           onChange={(e) => setForm({ ...form, name: e.target.value })}
+          onBlur={() => checkField("name")}
         />
         {errors.name && <p className="mt-1 text-xs text-red-600">{errors.name}</p>}
       </div>
       <div>
         <input
-          className="w-full rounded border p-2 text-sm"
+          className={INPUT}
           placeholder="Email"
           value={form.email}
           onChange={(e) => setForm({ ...form, email: e.target.value })}
+          onBlur={() => checkField("email")}
         />
         {errors.email && <p className="mt-1 text-xs text-red-600">{errors.email}</p>}
       </div>
       <div>
         <input
           type="password"
-          className="w-full rounded border p-2 text-sm"
+          className={INPUT}
           placeholder="Password (min 8 characters)"
           value={form.password}
           onChange={(e) => setForm({ ...form, password: e.target.value })}
+          onBlur={() => checkField("password")}
         />
         {errors.password && <p className="mt-1 text-xs text-red-600">{errors.password}</p>}
       </div>
@@ -212,7 +224,7 @@ function AddAgentForm({ onDone }: { onDone: (msg: string) => void }) {
       {serverError && <p className="text-xs text-red-600">{serverError}</p>}
       <button
         disabled={submitting}
-        className="rounded bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+        className="rounded bg-brand-teal px-3 py-2 text-sm font-medium text-white hover:bg-brand-tealDark active:scale-[0.97] transition-transform disabled:opacity-50"
       >
         {submitting ? "Adding…" : "Add team member"}
       </button>
@@ -280,7 +292,7 @@ function EditAgentForm({ agent, onDone }: { agent: Agent; onDone: (msg: string) 
     <form onSubmit={submit} className="max-w-sm space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-4">
       <h4 className="text-sm font-semibold text-slate-700">Edit {agent.name}</h4>
       <div>
-        <label className="text-xs text-muted-foreground">Name</label>
+        <label className="text-xs text-slate-600">Name</label>
         <input
           className="w-full rounded border p-2 text-sm"
           value={name}
@@ -289,11 +301,11 @@ function EditAgentForm({ agent, onDone }: { agent: Agent; onDone: (msg: string) 
         {errors.name && <p className="mt-1 text-xs text-red-600">{errors.name}</p>}
       </div>
       <div>
-        <label className="text-xs text-muted-foreground">Email (cannot be changed)</label>
+        <label className="text-xs text-slate-600">Email (cannot be changed)</label>
         <input className="w-full rounded border bg-slate-100 p-2 text-sm text-muted-foreground" value={agent.email} disabled />
       </div>
       <div>
-        <label className="text-xs text-muted-foreground">Role</label>
+        <label className="text-xs text-slate-600">Role</label>
         <select className="w-full rounded border p-2 text-sm" value={role} onChange={(e) => setRole(e.target.value as Agent["role"])}>
           {ROLES.map((r) => (
             <option key={r} value={r}>
@@ -329,7 +341,7 @@ function EditAgentForm({ agent, onDone }: { agent: Agent; onDone: (msg: string) 
       {serverError && <p className="text-xs text-red-600">{serverError}</p>}
       <button
         disabled={submitting}
-        className="rounded bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+        className="rounded bg-brand-teal px-3 py-2 text-sm font-medium text-white hover:bg-brand-tealDark active:scale-[0.97] transition-transform disabled:opacity-50"
       >
         {submitting ? "Saving…" : "Save changes"}
       </button>

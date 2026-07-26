@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 
@@ -38,7 +38,7 @@ export default function SystemPanel() {
     <div className="space-y-6">
       <section className="rounded-lg border bg-white p-4">
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-slate-700">Service Health</h3>
+          <h3 className="text-base font-semibold text-slate-800">Service Health</h3>
           <button
             onClick={checkHealth}
             className="flex items-center gap-1.5 rounded border px-3 py-1.5 text-xs hover:bg-muted/50"
@@ -94,8 +94,29 @@ function ResetModal({ onClose }: { onClose: () => void }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [done, setDone] = useState(false);
+  const passwordRef = useRef<HTMLInputElement>(null);
+  const triggerRef = useRef<HTMLElement | null>(null);
 
   const valid = password.length > 0 && confirmation === "RESET";
+
+  useEffect(() => {
+    triggerRef.current = document.activeElement as HTMLElement;
+    passwordRef.current?.focus();
+    return () => triggerRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    // Escape is still a standard, expected keyboard affordance while idle —
+    // distinct from the "no outside-click dismiss" intent, which exists only
+    // to prevent an accidental misclick during a destructive action. Gated on
+    // !submitting so it can't be dismissed mid-request.
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !submitting) onClose();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [submitting]);
 
   async function submit() {
     setSubmitting(true);
@@ -127,9 +148,16 @@ function ResetModal({ onClose }: { onClose: () => void }) {
 
   return (
     // Overlay click deliberately does NOT close — destructive modal (spec §D).
+    // Escape still works while idle (see the keydown effect above) — that's a
+    // standard keyboard affordance, not the same as an accidental outside click.
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="w-full max-w-md space-y-3 rounded-lg bg-white p-5 shadow-xl">
-        <h4 className="flex items-center gap-2 text-sm font-semibold text-red-600">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="reset-modal-title"
+        className="w-full max-w-md space-y-3 rounded-lg bg-white p-5 shadow-xl"
+      >
+        <h4 id="reset-modal-title" className="flex items-center gap-2 text-sm font-semibold text-red-600">
           <AlertTriangle className="h-4 w-4" /> Reset Database
         </h4>
         {done ? (
@@ -141,17 +169,18 @@ function ResetModal({ onClose }: { onClose: () => void }) {
             <p className="text-sm text-muted-foreground">
               This will permanently delete all data for this tenant. Your admin account will be preserved.
             </p>
-            <label className="block text-xs text-muted-foreground">
+            <label className="block text-xs text-slate-600">
               Enter your password:
               <input
+                ref={passwordRef}
                 type="password"
-                className="mt-1 w-full rounded border p-2 text-sm"
+                className="mt-1 w-full rounded border p-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-teal"
                 value={password}
                 disabled={submitting}
                 onChange={(e) => setPassword(e.target.value)}
               />
             </label>
-            <label className="block text-xs text-muted-foreground">
+            <label className="block text-xs text-slate-600">
               Type RESET to confirm:
               <input
                 className="mt-1 w-full rounded border p-2 text-sm"

@@ -79,7 +79,9 @@ export default function LoginPage() {
           <p className="mb-6 text-sm text-muted-foreground">Agent sign in</p>
           <form onSubmit={submit} className="space-y-3">
             <input
-              className="w-full rounded border p-2 text-sm focus:border-[#028090] focus:outline-none"
+              className={`w-full rounded border p-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#028090] focus-visible:ring-offset-1 ${
+                error ? "border-red-400" : "border-slate-300"
+              }`}
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
@@ -87,7 +89,9 @@ export default function LoginPage() {
               disabled={loading}
             />
             <input
-              className="w-full rounded border p-2 text-sm focus:border-[#028090] focus:outline-none"
+              className={`w-full rounded border p-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#028090] focus-visible:ring-offset-1 ${
+                error ? "border-red-400" : "border-slate-300"
+              }`}
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
@@ -98,7 +102,7 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full rounded bg-gradient-to-r from-[#028090] to-[#02C39A] p-2 text-sm font-semibold text-white disabled:opacity-50"
+              className="w-full rounded bg-gradient-to-r from-[#028090] to-[#02C39A] p-2 text-sm font-semibold text-white transition-transform active:scale-[0.97] disabled:opacity-50"
             >
               {loading ? "Signing in…" : "Sign in"}
             </button>

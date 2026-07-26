@@ -1,0 +1,12 @@
+
+Running 7 tests using 1 worker
+
+  ok 1 [chromium] › e2e\rbac.spec.ts:4:7 › RBAC — role-gated navigation and queue scoping › admin sees Analytics, Ticket Queue, and Administration in the sidebar (5.0s)
+  ok 2 [chromium] › e2e\rbac.spec.ts:11:7 › RBAC — role-gated navigation and queue scoping › NAV-1: admin's Administration nav item is present immediately on first paint (no pop-in) (4.4s)
+  ok 3 [chromium] › e2e\rbac.spec.ts:18:7 › RBAC — role-gated navigation and queue scoping › lead sees Analytics and Ticket Queue but NOT Administration (4.5s)
+  ok 4 [chromium] › e2e\rbac.spec.ts:25:7 › RBAC — role-gated navigation and queue scoping › agent sees Analytics and Ticket Queue but NOT Administration (4.3s)
+  ok 5 [chromium] › e2e\rbac.spec.ts:32:7 › RBAC — role-gated navigation and queue scoping › admin/lead see the Confirmed vs Needs-identity scope toggle; agent does not (4.5s)
+  ok 6 [chromium] › e2e\rbac.spec.ts:38:7 › RBAC — role-gated navigation and queue scoping › agent queue is scoped server-side to their own tickets (no scope toggle, assignedTo=me) (3.9s)
+  ok 7 [chromium] › e2e\rbac.spec.ts:49:7 › RBAC — role-gated navigation and queue scoping › direct navigation to /dashboard/tickets/[id] works for any authenticated role (7.0s)
+
+  7 passed (35.8s)

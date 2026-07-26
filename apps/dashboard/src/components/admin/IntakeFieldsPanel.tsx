@@ -208,34 +208,34 @@ export default function IntakeFieldsPanel() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-semibold text-slate-700">Intake Fields</h3>
-          <p className="text-xs text-muted-foreground">
+          <h3 className="text-base font-semibold text-slate-800">Intake Fields</h3>
+          <p className="text-xs text-slate-600">
             Choose which details the assistant collects on each channel and whether each is required.
           </p>
         </div>
         <div className="flex gap-2">
           <button
             onClick={() => setShowAdd((v) => !v)}
-            className="rounded border border-indigo-600 px-3 py-2 text-sm font-medium text-indigo-600 hover:bg-indigo-50"
+            className="rounded border border-brand-teal px-3 py-2 text-sm font-medium text-brand-teal hover:bg-brand-tealTint active:scale-[0.97] transition-transform"
           >
             {showAdd ? "Cancel" : "Add field"}
           </button>
           <button
             onClick={save}
             disabled={saving}
-            className="rounded bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+            className="rounded bg-brand-teal px-3 py-2 text-sm font-medium text-white hover:bg-brand-tealDark active:scale-[0.97] transition-transform disabled:opacity-50"
           >
             {saving ? "Saving…" : "Save changes"}
           </button>
         </div>
       </div>
 
-      {message && <p className="rounded-lg bg-indigo-50 p-2 text-sm text-indigo-700">{message}</p>}
+      {message && <p className="rounded-lg bg-brand-tealTint p-2 text-sm text-brand-tealDark">{message}</p>}
       {serverError && <p className="rounded-lg bg-red-50 p-2 text-sm text-red-700">{serverError}</p>}
 
       {showAdd && (
-        <div className="flex flex-wrap items-end gap-3 rounded-lg border border-indigo-100 bg-indigo-50/40 p-4">
-          <label className="text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-end gap-3 rounded-lg border border-brand-tealTint bg-brand-tealTint/40 p-4">
+          <label className="text-xs text-slate-600">
             Field label
             <input
               className="mt-1 block w-56 rounded border p-2 text-sm"
@@ -245,7 +245,7 @@ export default function IntakeFieldsPanel() {
               onChange={(e) => setNewLabel(e.target.value)}
             />
           </label>
-          <label className="text-xs text-muted-foreground">
+          <label className="text-xs text-slate-600">
             Validation
             <select
               className="mt-1 block rounded border p-2 text-sm"
@@ -257,7 +257,7 @@ export default function IntakeFieldsPanel() {
             </select>
           </label>
           {newValidation === "digits" && (
-            <label className="text-xs text-muted-foreground">
+            <label className="text-xs text-slate-600">
               Exact digits (optional)
               <input
                 type="number"
@@ -271,11 +271,11 @@ export default function IntakeFieldsPanel() {
           )}
           <button
             onClick={addField}
-            className="rounded bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+            className="rounded bg-brand-teal px-3 py-2 text-sm font-medium text-white hover:bg-brand-tealDark active:scale-[0.97] transition-transform"
           >
             Add
           </button>
-          <p className="w-full text-xs text-muted-foreground">
+          <p className="w-full text-xs text-slate-600">
             New fields cascade automatically: the assistant asks for them per this grid, extracts and
             validates replies, and shows the values on the ticket.
           </p>
@@ -286,9 +286,9 @@ export default function IntakeFieldsPanel() {
         <table className="w-full text-left text-sm">
           <thead className="bg-slate-50 text-muted-foreground">
             <tr>
-              <th className="p-2">Field</th>
+              <th scope="col" className="p-2">Field</th>
               {CHANNELS.map((c) => (
-                <th key={c.key} className="p-2">{c.label}</th>
+                <th key={c.key} scope="col" className="p-2">{c.label}</th>
               ))}
             </tr>
           </thead>
@@ -302,6 +302,7 @@ export default function IntakeFieldsPanel() {
                       <button
                         onClick={() => removeField(field.key)}
                         title="Remove this custom field"
+                        aria-label={`Remove ${field.label}`}
                         className="rounded px-1 text-xs text-red-500 hover:bg-red-50"
                       >
                         ✕
@@ -337,7 +338,7 @@ export default function IntakeFieldsPanel() {
         </table>
       </div>
 
-      <p className="text-xs text-muted-foreground">
+      <p className="text-xs text-slate-600">
         Each channel needs at least one mandatory identity field (Name, Mobile, or Email) so every
         ticket can be tied to a citizen. &ldquo;Mandatory even if anonymous&rdquo; is still required
         when the citizen declines to share their name.

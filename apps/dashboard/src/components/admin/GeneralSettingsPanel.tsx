@@ -70,21 +70,21 @@ export default function GeneralSettingsPanel() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-semibold text-slate-700">Settings</h3>
-          <p className="text-xs text-muted-foreground">
+          <h3 className="text-base font-semibold text-slate-800">Settings</h3>
+          <p className="text-xs text-slate-600">
             General assistant behavior for your tenant.
           </p>
         </div>
         <button
           onClick={save}
           disabled={saving}
-          className="rounded bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+          className="rounded bg-brand-teal px-3 py-2 text-sm font-medium text-white hover:bg-brand-tealDark active:scale-[0.97] transition-transform disabled:opacity-50"
         >
           {saving ? "Saving…" : "Save changes"}
         </button>
       </div>
 
-      {message && <p className="rounded-lg bg-indigo-50 p-2 text-sm text-indigo-700">{message}</p>}
+      {message && <p className="rounded-lg bg-brand-tealTint p-2 text-sm text-brand-tealDark">{message}</p>}
       {serverError && <p className="rounded-lg bg-red-50 p-2 text-sm text-red-700">{serverError}</p>}
       {validationError && (
         <p className="rounded-lg bg-red-50 p-2 text-sm text-red-700">{validationError}</p>
@@ -94,7 +94,7 @@ export default function GeneralSettingsPanel() {
         <label htmlFor="maxFollowupQuestions" className="block text-sm font-medium text-slate-700">
           Max follow-up questions
         </label>
-        <p className="mb-2 text-xs text-muted-foreground">
+        <p className="mb-2 text-xs text-slate-600">
           How many clarifying questions the assistant may ask during intake (0-5).
         </p>
         <input
@@ -118,7 +118,7 @@ export default function GeneralSettingsPanel() {
         <label htmlFor="newsFeedUrl" className="block text-sm font-medium text-slate-700">
           Login-page news feed (RSS URL)
         </label>
-        <p className="mb-2 text-xs text-muted-foreground">
+        <p className="mb-2 text-xs text-slate-600">
           RSS 2.0 feed shown as headlines on the login page. Leave blank for the default (BBC Tamil).
         </p>
         <input

@@ -1,0 +1,116 @@
+
+Running 53 tests using 1 worker
+
+  ok  1 [chromium] › e2e\admin-panels.spec.ts:5:7 › Administration — Intake Fields › loads the field matrix and saves without error (4.1s)
+  x   2 [chromium] › e2e\admin-panels.spec.ts:14:7 › Administration — Intake Fields › A11Y-2: custom-field remove button (if any custom fields exist) has an aria-label (157ms)
+  x   3 [chromium] › e2e\admin-panels.spec.ts:26:7 › Administration — Priority Rules › loads the rubric textarea pre-filled and saves (0ms)
+  -   4 [chromium] › e2e\admin-panels.spec.ts:36:7 › Administration — Priority Rules › A11Y-1: rubric textarea has a visible focus ring class
+  -   5 [chromium] › e2e\admin-panels.spec.ts:45:7 › Administration — Settings › max follow-up questions saves within 0-5
+  -   6 [chromium] › e2e\admin-panels.spec.ts:55:7 › Administration — Settings › rejects an out-of-range value client-side
+  -   7 [chromium] › e2e\admin-panels.spec.ts:67:7 › Administration — Announcements › creates a new announcement end-to-end
+  -   8 [chromium] › e2e\admin-panels.spec.ts:80:7 › Administration — Announcements › A11Y-8: the create/edit modal closes on Escape and returns focus to the trigger
+  -   9 [chromium] › e2e\admin-panels.spec.ts:92:7 › Administration — Announcements › FEED-2: a failed deactivate/delete shows a failure message, never a false-positive success
+  -  10 [chromium] › e2e\admin-panels.spec.ts:115:7 › Administration — System (health only, no destructive reset) › service health panel shows all 3 backend services
+  -  11 [chromium] › e2e\admin-panels.spec.ts:124:7 › Administration — System (health only, no destructive reset) › A11Y-8: Reset Database modal supports Escape-to-close while idle, and rejects a wrong password without wiping data
+  x  12 [chromium] › e2e\admin-team.spec.ts:10:7 › Administration — Team › FEED-3: name field validates on blur, before submit (0ms)
+  -  13 [chromium] › e2e\admin-team.spec.ts:18:7 › Administration — Team › adds a new agent end-to-end and it appears in the table
+  -  14 [chromium] › e2e\admin-team.spec.ts:30:7 › Administration — Team › editing an agent's name and toggling active status persists
+  -  15 [chromium] › e2e\admin-team.spec.ts:46:7 › Administration — Team › A11Y-4: Team table headers have scope=col and an accessible action column label
+  x  16 [chromium] › e2e\analytics.spec.ts:5:7 › Analytics › admin sees all 4 chart cards including Agent performance (0ms)
+  -  17 [chromium] › e2e\analytics.spec.ts:14:7 › Analytics › agent does NOT see Agent performance data (view-only restriction)
+  -  18 [chromium] › e2e\analytics.spec.ts:20:7 › Analytics › time-frame filter change re-fetches data
+  -  19 [chromium] › e2e\analytics.spec.ts:31:7 › Analytics › priority filter narrows results without erroring
+  x  20 [chromium] › e2e\auth.spec.ts:5:7 › Authentication › admin can log in and lands on dashboard (0ms)
+  -  21 [chromium] › e2e\auth.spec.ts:14:7 › Authentication › lead can log in and lands on dashboard
+  -  22 [chromium] › e2e\auth.spec.ts:20:7 › Authentication › agent can log in and lands on dashboard
+  -  23 [chromium] › e2e\auth.spec.ts:26:7 › Authentication › wrong password shows an inline error and does not navigate
+  -  24 [chromium] › e2e\auth.spec.ts:35:7 › Authentication › FEED-10/A11Y-1: wrong password reddens input borders and inputs keep a visible focus ring
+  -  25 [chromium] › e2e\auth.spec.ts:47:7 › Authentication › logout clears the session and redirects to login
+  x  26 [chromium] › e2e\citizen-status.spec.ts:4:7 › Citizen status page (public, no auth) › loads without any authentication cookie (0ms)
+  -  27 [chromium] › e2e\citizen-status.spec.ts:12:7 › Citizen status page (public, no auth) › ROLE-11: shows UniServe branding even for an unknown reference
+  -  28 [chromium] › e2e\citizen-status.spec.ts:21:7 › Citizen status page (public, no auth) › unknown reference shows a clear not-found message, not a crash
+  x  29 [chromium] › e2e\rbac.spec.ts:5:7 › RBAC — role-gated navigation and queue scoping › admin sees Analytics, Ticket Queue, and Administration in the sidebar (0ms)
+  -  30 [chromium] › e2e\rbac.spec.ts:12:7 › RBAC — role-gated navigation and queue scoping › NAV-1: admin's Administration nav item is present immediately on first paint (no pop-in)
+  -  31 [chromium] › e2e\rbac.spec.ts:19:7 › RBAC — role-gated navigation and queue scoping › lead sees Analytics and Ticket Queue but NOT Administration
+  -  32 [chromium] › e2e\rbac.spec.ts:26:7 › RBAC — role-gated navigation and queue scoping › agent sees Analytics and Ticket Queue but NOT Administration
+  -  33 [chromium] › e2e\rbac.spec.ts:33:7 › RBAC — role-gated navigation and queue scoping › admin/lead see the Confirmed vs Needs-identity scope toggle; agent does not
+  -  34 [chromium] › e2e\rbac.spec.ts:39:7 › RBAC — role-gated navigation and queue scoping › agent queue is scoped server-side to their own tickets (no scope toggle, assignedTo=me)
+  -  35 [chromium] › e2e\rbac.spec.ts:50:7 › RBAC — role-gated navigation and queue scoping › direct navigation to /dashboard/tickets/[id] works for any authenticated role
+  x  36 [chromium] › e2e\ticket-detail.spec.ts:5:7 › Ticket Detail › shows citizen details, status badge, and a back-to-queue link (0ms)
+  -  37 [chromium] › e2e\ticket-detail.spec.ts:15:7 › Ticket Detail › FEED-7/ROLE-7: a transition requiring a mandatory note is badged and disabled before 20 characters are typed
+  -  38 [chromium] › e2e\ticket-detail.spec.ts:36:7 › Ticket Detail › full lifecycle: open -> assigned -> in_progress -> resolved with mandatory note
+  -  39 [chromium] › e2e\ticket-detail.spec.ts:66:7 › Ticket Detail › FEED-8/ROLE-8: the citizen-facing follow-up box is visually tagged distinct from internal notes
+  -  40 [chromium] › e2e\ticket-detail.spec.ts:77:7 › Ticket Detail › adding an internal note appears in the Internal notes list
+  -  41 [chromium] › e2e\ticket-detail.spec.ts:90:7 › Ticket Detail › sending a follow-up shows the sent/failed delivery state, never silent
+  -  42 [chromium] › e2e\ticket-detail.spec.ts:104:7 › Ticket Detail › audit trail lists at least the ticket-created event
+  x  43 [chromium] › e2e\ticket-queue.spec.ts:9:7 › Ticket Queue › ROLE-3: defaults to priority-first sort, not newest-first (0ms)
+  -  44 [chromium] › e2e\ticket-queue.spec.ts:19:7 › Ticket Queue › scope toggle switches between Confirmed and Needs identity, resets to page 1
+  -  45 [chromium] › e2e\ticket-queue.spec.ts:27:7 › Ticket Queue › column headers are sortable and toggle direction on repeat click
+  -  46 [chromium] › e2e\ticket-queue.spec.ts:35:7 › Ticket Queue › A11Y-4/A11Y-5: table headers have scope=col and the sorted column reports aria-sort
+  -  47 [chromium] › e2e\ticket-queue.spec.ts:45:7 › Ticket Queue › pagination: page size selector changes rows and resets to page 1
+  -  48 [chromium] › e2e\ticket-queue.spec.ts:51:7 › Ticket Queue › manual refresh button works and updates the Refreshing state
+  -  49 [chromium] › e2e\ticket-queue.spec.ts:60:7 › Ticket Queue › PERF-4: shows a 'Last updated' caption after the initial load
+  -  50 [chromium] › e2e\ticket-queue.spec.ts:64:7 › Ticket Queue › VIS-5: priority dot renders in the ticket number cell
+  -  51 [chromium] › e2e\ticket-queue.spec.ts:69:7 › Ticket Queue › VIS-7: channel column renders a Mail or MessageCircle icon
+  -  52 [chromium] › e2e\ticket-queue.spec.ts:75:7 › Ticket Queue › VIS-2: primary buttons use the brand teal, not Tailwind indigo
+  -  53 [chromium] › e2e\ticket-queue.spec.ts:80:7 › Ticket Queue › FEED-4: Needs-identity empty/populated state is scope-aware in its message
+
+
+  1) [chromium] › e2e\admin-panels.spec.ts:14:7 › Administration — Intake Fields › A11Y-2: custom-field remove button (if any custom fields exist) has an aria-label 
+
+    Error: browserContext.newPage: Target crashed 
+
+    Error Context: test-results\admin-panels-Administratio-ed733-lds-exist-has-an-aria-label-chromium\error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results\admin-panels-Administratio-ed733-lds-exist-has-an-aria-label-chromium\trace.zip
+    Usage:
+
+        npx playwright show-trace test-results\admin-panels-Administratio-ed733-lds-exist-has-an-aria-label-chromium\trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2) [chromium] › e2e\admin-panels.spec.ts:26:7 › Administration — Priority Rules › loads the rubric textarea pre-filled and saves 
+
+    Error: worker process exited unexpectedly (code=3221225794, signal=null)
+
+  3) [chromium] › e2e\admin-team.spec.ts:10:7 › Administration — Team › FEED-3: name field validates on blur, before submit 
+
+    Error: worker process exited unexpectedly (code=3221225794, signal=null)
+
+  4) [chromium] › e2e\analytics.spec.ts:5:7 › Analytics › admin sees all 4 chart cards including Agent performance 
+
+    Error: worker process exited unexpectedly (code=3221225794, signal=null)
+
+  5) [chromium] › e2e\auth.spec.ts:5:7 › Authentication › admin can log in and lands on dashboard ──
+
+    Error: worker process exited unexpectedly (code=3221225794, signal=null)
+
+  6) [chromium] › e2e\citizen-status.spec.ts:4:7 › Citizen status page (public, no auth) › loads without any authentication cookie 
+
+    Error: worker process exited unexpectedly (code=3221225794, signal=null)
+
+  7) [chromium] › e2e\rbac.spec.ts:5:7 › RBAC — role-gated navigation and queue scoping › admin sees Analytics, Ticket Queue, and Administration in the sidebar 
+
+    Error: worker process exited unexpectedly (code=3221225794, signal=null)
+
+  8) [chromium] › e2e\ticket-detail.spec.ts:5:7 › Ticket Detail › shows citizen details, status badge, and a back-to-queue link 
+
+    Error: worker process exited unexpectedly (code=3221225794, signal=null)
+
+  9) [chromium] › e2e\ticket-queue.spec.ts:9:7 › Ticket Queue › ROLE-3: defaults to priority-first sort, not newest-first 
+
+    Error: worker process exited unexpectedly (code=3221225794, signal=null)
+
+  9 failed
+    [chromium] › e2e\admin-panels.spec.ts:14:7 › Administration — Intake Fields › A11Y-2: custom-field remove button (if any custom fields exist) has an aria-label 
+    [chromium] › e2e\admin-panels.spec.ts:26:7 › Administration — Priority Rules › loads the rubric textarea pre-filled and saves 
+    [chromium] › e2e\admin-team.spec.ts:10:7 › Administration — Team › FEED-3: name field validates on blur, before submit 
+    [chromium] › e2e\analytics.spec.ts:5:7 › Analytics › admin sees all 4 chart cards including Agent performance 
+    [chromium] › e2e\auth.spec.ts:5:7 › Authentication › admin can log in and lands on dashboard ───
+    [chromium] › e2e\citizen-status.spec.ts:4:7 › Citizen status page (public, no auth) › loads without any authentication cookie 
+    [chromium] › e2e\rbac.spec.ts:5:7 › RBAC — role-gated navigation and queue scoping › admin sees Analytics, Ticket Queue, and Administration in the sidebar 
+    [chromium] › e2e\ticket-detail.spec.ts:5:7 › Ticket Detail › shows citizen details, status badge, and a back-to-queue link 
+    [chromium] › e2e\ticket-queue.spec.ts:9:7 › Ticket Queue › ROLE-3: defaults to priority-first sort, not newest-first 
+  43 did not run
+  1 passed (6.0s)

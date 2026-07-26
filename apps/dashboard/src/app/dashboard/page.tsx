@@ -13,7 +13,9 @@ import SystemPanel from "@/components/admin/SystemPanel";
 import AnnouncementBanner from "@/components/announcements/AnnouncementBanner";
 import Topbar from "@/components/layout/Topbar";
 import Sidebar, { type NavKey } from "@/components/layout/Sidebar";
-import { identityBadgeClass, priorityBadgeClass, statusBadgeClass } from "@/lib/badges";
+import { BASE as BADGE_BASE, identityBadgeStyle, priorityBadgeStyle, statusBadgeStyle } from "@/lib/badges";
+import { tokens } from "@/lib/design-tokens";
+import { Inbox, Mail, MessageCircle } from "lucide-react";
 
 type Ticket = {
   id: string;
@@ -44,12 +46,12 @@ function readCookie(name: string): string {
  * simply drives the same union the old top tab bar did.
  */
 export default function DashboardPage() {
-  const [role, setRole] = useState("");
+  // Read synchronously (not in a useEffect) so an admin's first paint already
+  // has the correct role — cookies are available client-side without waiting
+  // for an effect, and deferring this caused the Administration nav item (and
+  // AnalyticsPanel/TicketQueue's role-gated behaviour) to flash in a beat late.
+  const [role] = useState(() => (typeof document !== "undefined" ? readCookie("role") : ""));
   const [tab, setTab] = useState<NavKey>("queue");
-
-  useEffect(() => {
-    setRole(readCookie("role"));
-  }, []);
 
   return (
     // Background comes from dashboard/layout.tsx (gradient wash + optional image).
@@ -78,7 +80,11 @@ const QUEUE_DEFAULTS = {
   scope: "confirmed" as QueueScope,
   page: 1,
   pageSize: 30,
-  sortBy: "createdAt",
+  // Priority-first by default (docs/12_AGENT_DASHBOARD.md: "Priority score
+  // descending... oldest high-priority first") — previously defaulted to
+  // createdAt desc, which surfaced newest tickets regardless of urgency.
+  // "priorityLabel" is already whitelisted server-side (TicketService.SORT_COLUMNS).
+  sortBy: "priorityLabel",
   sortDir: "desc" as SortDir,
 };
 
@@ -225,6 +231,13 @@ function TicketQueue({ role }: { role: string }) {
     { key: "needs", label: "Needs identity" },
   ];
 
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  useEffect(() => {
+    if (!loading && !refreshing) setLastUpdated(new Date());
+  }, [loading, refreshing, tickets]);
+
+  const CHANNEL_ICON: Record<string, typeof Mail> = { email: Mail, whatsapp: MessageCircle };
+
   return (
     <div className="space-y-4">
       {showToggle && (
@@ -235,7 +248,7 @@ function TicketQueue({ role }: { role: string }) {
               onClick={() => changeScope(s.key)}
               className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
                 scope === s.key
-                  ? "bg-indigo-600 font-semibold text-white"
+                  ? "bg-brand-teal font-semibold text-white"
                   : "text-slate-600 hover:bg-slate-100"
               }`}
             >
@@ -252,11 +265,11 @@ function TicketQueue({ role }: { role: string }) {
             {total} {total === 1 ? "ticket" : "tickets"}
           </span>
           <label className="flex items-center gap-1">
-            <span className="text-muted-foreground">Per page</span>
+            <span className="text-slate-600">Per page</span>
             <select
               value={pageSize}
               onChange={(e) => changePageSize(Number(e.target.value))}
-              className="rounded border bg-white px-2 py-1 text-sm focus:border-indigo-400 focus:outline-none"
+              className="rounded border bg-white px-2 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-teal"
             >
               {PAGE_SIZES.map((n) => (
                 <option key={n} value={n}>
@@ -265,20 +278,25 @@ function TicketQueue({ role }: { role: string }) {
               ))}
             </select>
           </label>
+          {lastUpdated && (
+            <span className="text-xs text-slate-500">
+              Last updated {lastUpdated.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-2 text-sm">
           <button
             onClick={() => load(true)}
             disabled={refreshing}
-            className="rounded border px-3 py-1 text-slate-600 hover:bg-slate-100 disabled:opacity-50"
+            className="rounded border px-3 py-1 text-slate-600 hover:bg-slate-100 disabled:opacity-50 active:scale-[0.97]"
           >
             {refreshing ? "Refreshing…" : "Refresh"}
           </button>
           <button
             onClick={() => setPage((p) => Math.max(1, p - 1))}
             disabled={page <= 1}
-            className="rounded border px-3 py-1 text-slate-600 hover:bg-slate-100 disabled:opacity-50"
+            className="rounded border px-3 py-1 text-slate-600 hover:bg-slate-100 disabled:opacity-50 active:scale-[0.97]"
           >
             Prev
           </button>
@@ -288,7 +306,7 @@ function TicketQueue({ role }: { role: string }) {
           <button
             onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
             disabled={page >= totalPages}
-            className="rounded border px-3 py-1 text-slate-600 hover:bg-slate-100 disabled:opacity-50"
+            className="rounded border px-3 py-1 text-slate-600 hover:bg-slate-100 disabled:opacity-50 active:scale-[0.97]"
           >
             Next
           </button>
@@ -296,16 +314,55 @@ function TicketQueue({ role }: { role: string }) {
       </div>
 
       {loading ? (
-        <p className="text-sm text-muted-foreground">Loading…</p>
+        <div className="overflow-x-auto rounded-lg border bg-white shadow-sm">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-slate-50 text-slate-600">
+              <tr>
+                {QUEUE_COLUMNS.map((col) => (
+                  <th key={col.label} scope="col" className="whitespace-nowrap p-2 font-medium">
+                    {col.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {Array.from({ length: 8 }).map((_, i) => (
+                <tr key={i} className="border-t">
+                  {QUEUE_COLUMNS.map((col) => (
+                    <td key={col.label} className="p-2">
+                      <div className="h-4 w-full animate-pulse rounded bg-slate-100" />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       ) : tickets.length === 0 ? (
-        <p className="text-sm">No tickets.</p>
+        <p className="flex items-center gap-2 rounded-lg border bg-white p-4 text-sm text-slate-600 shadow-sm">
+          <Inbox className="h-4 w-4 text-slate-400" aria-hidden />
+          No tickets match &ldquo;{scope === "confirmed" ? "Confirmed" : "Needs identity"}&rdquo; for this view.
+        </p>
       ) : (
         <div className="overflow-x-auto rounded-lg border bg-white shadow-sm">
           <table className="w-full text-left text-sm">
-            <thead className="bg-slate-50 text-muted-foreground">
+            <thead className="bg-slate-50 text-slate-600">
               <tr>
                 {QUEUE_COLUMNS.map((col) => (
-                  <th key={col.label} className="whitespace-nowrap p-2">
+                  <th
+                    key={col.label}
+                    scope="col"
+                    className="whitespace-nowrap p-2"
+                    aria-sort={
+                      col.sortKey
+                        ? sortBy === col.sortKey
+                          ? sortDir === "asc"
+                            ? "ascending"
+                            : "descending"
+                          : "none"
+                        : undefined
+                    }
+                  >
                     {col.sortKey ? (
                       <button
                         onClick={() => toggleSort(col.sortKey as string)}
@@ -324,43 +381,68 @@ function TicketQueue({ role }: { role: string }) {
               </tr>
             </thead>
             <tbody>
-              {tickets.map((t) => (
-                <tr key={t.id} className="border-t hover:bg-indigo-50/40">
-                  <td className="whitespace-nowrap p-2 font-medium">
-                    <Link href={`/dashboard/tickets/${t.id}`} className="text-indigo-700 hover:underline">
-                      {t.ticket_number}
-                    </Link>
-                  </td>
-                  <td className="p-2">
-                    <span className={statusBadgeClass(t.status)}>{t.status.replace("_", " ")}</span>
-                  </td>
-                  <td className="p-2">
-                    {t.priority_label ? (
-                      <span className={priorityBadgeClass(t.priority_label)}>{t.priority_label}</span>
-                    ) : (
-                      "—"
-                    )}
-                  </td>
-                  <td className="p-2">{t.category ?? "—"}</td>
-                  <td className="p-2 capitalize">{t.channel_origin}</td>
-                  <td className="p-2">
-                    {t.identity_status ? (
-                      <span className={identityBadgeClass(t.identity_status)}>{t.identity_status}</span>
-                    ) : (
-                      "—"
-                    )}
-                  </td>
-                  <td className="whitespace-nowrap p-2">{t.citizen_name ?? "—"}</td>
-                  <td className="whitespace-nowrap p-2">{t.citizen_email ?? "—"}</td>
-                  <td className="whitespace-nowrap p-2">{t.citizen_phone ?? "—"}</td>
-                  <td className="whitespace-nowrap p-2">{t.created_at ?? "—"}</td>
-                  <td className="p-2">
-                    {t.assigned_to_name ?? (
-                      <span className="text-muted-foreground">Unassigned</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {tickets.map((t, i) => {
+                const ChannelIcon = CHANNEL_ICON[t.channel_origin];
+                const channelToken = (tokens.channel as Record<string, { color: string }>)[t.channel_origin];
+                return (
+                  <tr
+                    key={t.id}
+                    className={`border-t transition-[background-color,transform,box-shadow] duration-150 hover:-translate-y-px hover:bg-brand-tealTint/50 hover:shadow-sm ${
+                      t.priority_label === "critical" ? "bg-red-50/60" : i % 2 === 1 ? "bg-slate-50/60" : "bg-white"
+                    }`}
+                  >
+                    <td className="whitespace-nowrap p-2 font-medium">
+                      <span
+                        className="mr-1.5 inline-block h-2 w-2 shrink-0 rounded-full align-middle"
+                        style={{ backgroundColor: (tokens.priority as Record<string, { dot: string }>)[t.priority_label ?? ""]?.dot ?? "#94a3b8" }}
+                        aria-hidden
+                      />
+                      <Link href={`/dashboard/tickets/${t.id}`} className="text-brand-teal hover:underline">
+                        {t.ticket_number}
+                      </Link>
+                    </td>
+                    <td className="p-2">
+                      <span className={BADGE_BASE} style={statusBadgeStyle(t.status)}>
+                        {t.status.replace("_", " ")}
+                      </span>
+                    </td>
+                    <td className="p-2">
+                      {t.priority_label ? (
+                        <span className={BADGE_BASE} style={priorityBadgeStyle(t.priority_label)}>
+                          {t.priority_label}
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td className="p-2">{t.category ?? "—"}</td>
+                    <td className="p-2">
+                      <span className="inline-flex items-center gap-1.5 capitalize">
+                        {ChannelIcon && (
+                          <ChannelIcon className="h-3.5 w-3.5" style={{ color: channelToken?.color }} aria-hidden />
+                        )}
+                        {t.channel_origin}
+                      </span>
+                    </td>
+                    <td className="p-2">
+                      {t.identity_status ? (
+                        <span className={BADGE_BASE} style={identityBadgeStyle(t.identity_status)}>
+                          {t.identity_status}
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td className="whitespace-nowrap p-2">{t.citizen_name ?? "—"}</td>
+                    <td className="whitespace-nowrap p-2">{t.citizen_email ?? "—"}</td>
+                    <td className="whitespace-nowrap p-2">{t.citizen_phone ?? "—"}</td>
+                    <td className="whitespace-nowrap p-2">{t.created_at ?? "—"}</td>
+                    <td className="p-2">
+                      {t.assigned_to_name ?? <span className="text-slate-500">Unassigned</span>}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -369,11 +451,29 @@ function TicketQueue({ role }: { role: string }) {
   );
 }
 
+type AdminSubTab = "team" | "intake" | "priority" | "settings" | "announcements" | "system";
+const ADMIN_SUBTAB_KEY = "uniserve.adminSubTab";
+
 function Administration() {
-  const [subTab, setSubTab] = useState<
-    "team" | "intake" | "priority" | "settings" | "announcements" | "system"
-  >("team");
-  const subTabs: { key: typeof subTab; label: string }[] = [
+  // Persisted in sessionStorage (not lifted to a parent) so it survives this
+  // component unmounting when the admin switches to Analytics/Queue and back.
+  const [subTab, setSubTab] = useState<AdminSubTab>(() => {
+    if (typeof sessionStorage === "undefined") return "team";
+    const saved = sessionStorage.getItem(ADMIN_SUBTAB_KEY);
+    const valid: AdminSubTab[] = ["team", "intake", "priority", "settings", "announcements", "system"];
+    return (valid as string[]).includes(saved ?? "") ? (saved as AdminSubTab) : "team";
+  });
+
+  function selectSubTab(key: AdminSubTab) {
+    setSubTab(key);
+    try {
+      sessionStorage.setItem(ADMIN_SUBTAB_KEY, key);
+    } catch {
+      // ignore storage failures (e.g. private mode quota)
+    }
+  }
+
+  const subTabs: { key: AdminSubTab; label: string }[] = [
     { key: "team", label: "Team" },
     { key: "intake", label: "Intake Fields" },
     { key: "priority", label: "Priority Rules" },
@@ -388,9 +488,9 @@ function Administration() {
         {subTabs.map((t) => (
           <button
             key={t.key}
-            onClick={() => setSubTab(t.key)}
-            className={`px-3 py-2 text-sm ${
-              subTab === t.key ? "border-b-2 border-indigo-600 font-semibold text-indigo-700" : "text-muted-foreground"
+            onClick={() => selectSubTab(t.key)}
+            className={`px-3 py-2 text-sm transition-colors ${
+              subTab === t.key ? "border-b-2 border-brand-teal font-semibold text-brand-teal" : "text-slate-500 hover:text-slate-700"
             }`}
           >
             {t.label}

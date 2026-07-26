@@ -1,0 +1,12 @@
+
+Running 7 tests using 1 worker
+
+  ok 1 [chromium] › e2e\ticket-detail.spec.ts:4:7 › Ticket Detail › shows citizen details, status badge, and a back-to-queue link (12.1s)
+  ok 2 [chromium] › e2e\ticket-detail.spec.ts:14:7 › Ticket Detail › FEED-7/ROLE-7: a transition requiring a mandatory note is badged and disabled before 20 characters are typed (6.8s)
+  ok 3 [chromium] › e2e\ticket-detail.spec.ts:35:7 › Ticket Detail › full lifecycle: open -> assigned -> in_progress -> resolved with mandatory note (8.8s)
+  ok 4 [chromium] › e2e\ticket-detail.spec.ts:86:7 › Ticket Detail › FEED-8/ROLE-8: the citizen-facing follow-up box is visually tagged distinct from internal notes (7.1s)
+  ok 5 [chromium] › e2e\ticket-detail.spec.ts:97:7 › Ticket Detail › adding an internal note appears in the Internal notes list (7.7s)
+  ok 6 [chromium] › e2e\ticket-detail.spec.ts:110:7 › Ticket Detail › sending a follow-up shows the sent/failed delivery state, never silent (12.3s)
+  ok 7 [chromium] › e2e\ticket-detail.spec.ts:124:7 › Ticket Detail › audit trail lists at least the ticket-created event (8.9s)
+
+  7 passed (1.1m)

@@ -102,7 +102,7 @@ export default function AnnouncementBell() {
               {items.slice(0, 3).map((a) => (
                 <li key={a.id} className="border-b px-3 py-2 last:border-b-0">
                   <p className="text-sm font-medium text-slate-800">{a.title}</p>
-                  <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{a.body}</p>
+                  <p className="mt-0.5 line-clamp-2 text-xs text-slate-600">{a.body}</p>
                   <p className="mt-1 text-[10px] uppercase tracking-wide text-slate-400">{a.created_at}</p>
                 </li>
               ))}

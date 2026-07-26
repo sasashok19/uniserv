@@ -1,0 +1,9 @@
+
+Running 4 tests using 1 worker
+
+  ok 1 [chromium] › e2e\admin-team.spec.ts:9:7 › Administration — Team › FEED-3: name field validates on blur, before submit (4.2s)
+  ok 2 [chromium] › e2e\admin-team.spec.ts:17:7 › Administration — Team › adds a new agent end-to-end and it appears in the table (5.3s)
+  ok 3 [chromium] › e2e\admin-team.spec.ts:29:7 › Administration — Team › editing an agent's name and toggling active status persists (5.0s)
+  ok 4 [chromium] › e2e\admin-team.spec.ts:48:7 › Administration — Team › A11Y-4: Team table headers have scope=col and an accessible action column label (5.0s)
+
+  4 passed (21.7s)
