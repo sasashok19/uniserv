@@ -73,6 +73,16 @@ posts to `https://api.resend.com/emails` with a Bearer `RESEND_API_KEY`,
 setting `In-Reply-To`/`References` as custom headers the same way the SMTP
 path does, so reply-threading (see above) behaves identically either way.
 
+**Sandbox limitation (no verified domain):** with `RESEND_FROM_ADDRESS`
+still on `onboarding@resend.dev` (the default), Resend rejects sends to any
+recipient other than the address that signed up for the Resend account
+(403 `validation_error`) — this is Resend's own anti-abuse restriction, not
+a UniServe bug. In this state, real outbound replies only succeed when the
+citizen's email happens to be that same signup address; every other
+recipient dead-letters after 3 retries. Verifying a domain at
+resend.com/domains and sending from an address on it removes this
+restriction entirely.
+
 ---
 
 ## Environment Variables
