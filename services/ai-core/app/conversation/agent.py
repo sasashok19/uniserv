@@ -172,6 +172,7 @@ class ConversationAgent:
                 catalog=catalog)
             logger.info("identity gate: requesting identity traceId=%s threadId=%s missing=%s",
                         req.traceId, thread_key, missing)
+            await self._persist_inbound(req, req.rawText)
             await self._send_reply(req, thread_key, message, is_identity_request=True)
             await self._save_state(state_key, {
                 "identity_status": "pending",
@@ -211,6 +212,13 @@ class ConversationAgent:
             questions_asked = 1
             logger.info("info gathering: vague complaint, asking follow-up traceId=%s threadId=%s",
                         req.traceId, thread_key)
+            # Not complaint-ready this turn, so create_ticket_from_complaint
+            # (which would otherwise persist this text) never runs — persist
+            # it here instead, or the citizen's message is lost from
+            # Conversation entirely (this is the common case for a
+            # follow-up reply on an already-open ticket, e.g. one asking for
+            # more detail or just answering the follow-up question above).
+            await self._persist_inbound(req, req.rawText)
             await self._send_reply(req, thread_key, FOLLOWUP_QUESTION)
             complaint_ready = False
         else:
@@ -342,16 +350,27 @@ class ConversationAgent:
         additional_instructions = self._render_additional_instructions(
             req, state, field_configs, max_followups, catalog)
 
+        submitted_this_turn = False
+
         async def execute_tool(name: str, args: dict) -> dict:
+            nonlocal submitted_this_turn
             if name == "confirm_identity":
                 return await self._tool_confirm_identity(req, state, args)
             if name == "submit_complaint":
+                submitted_this_turn = True
                 return await self._tool_submit_complaint(req, thread_key, state, args)
             return {"error": f"unknown tool '{name}'"}
 
         reply_text = await self._openai.run_turn(
             self._tenant_id, state_key, user_message, execute_tool, additional_instructions,
         )
+
+        if not submitted_this_turn:
+            # submit_complaint (which create_ticket_from_complaint persists
+            # from) wasn't called this turn — a plain identity exchange or
+            # conversational reply, including a follow-up on an
+            # already-resolved ticket, otherwise never lands in Conversation.
+            await self._persist_inbound(req, req.rawText)
 
         if not state["complaint_ready"]:
             state["questions_asked"] += 1
@@ -556,9 +575,54 @@ class ConversationAgent:
             return f"ticket:{req.ticketId}"
         return ConversationAgent._thread_key(req)
 
+    async def _persist_inbound(self, req: TestEventRequest, content: Optional[str]) -> None:
+        """Record the citizen's raw message on the ticket's Conversation
+        timeline. Only the turn that actually publishes complaint.ready
+        skips this — create_ticket_from_complaint (services/ai-core/app/tickets/service.py)
+        persists that one instead, using its richer intake-augmented content
+        — every other turn (identity exchange, follow-up question, or a
+        conversational reply on an already-resolved ticket) would otherwise
+        never appear anywhere. Best-effort: a persistence failure must not
+        block the conversation turn or the reply the citizen is waiting on.
+        """
+        if not req.ticketId or not (content or "").strip():
+            return
+        try:
+            await self._db.add_message(req.ticketId, {
+                "tenantId": req.tenantId,
+                "channel": req.channel,
+                "direction": "inbound",
+                "authorType": "user",
+                "content": content,
+            }, trace_id=req.traceId)
+        except Exception:  # noqa: BLE001 - Conversation logging is best-effort
+            logger.warning("failed to persist inbound message traceId=%s ticketId=%s",
+                            req.traceId, req.ticketId)
+
+    async def _persist_outbound_ai_reply(self, req: TestEventRequest, text: str) -> None:
+        """Record the AI's own reply on the ticket's Conversation timeline —
+        previously this was only ever emailed out (see app/notifications/sender.py)
+        and never written anywhere the dashboard could show it. Best-effort,
+        same reasoning as `_persist_inbound`."""
+        if not req.ticketId or not (text or "").strip():
+            return
+        try:
+            await self._db.add_message(req.ticketId, {
+                "tenantId": req.tenantId,
+                "channel": req.channel,
+                "direction": "outbound",
+                "authorType": "ai",
+                "content": text,
+                "isAiGenerated": 1,
+            }, trace_id=req.traceId)
+        except Exception:  # noqa: BLE001 - Conversation logging is best-effort
+            logger.warning("failed to persist outbound AI reply traceId=%s ticketId=%s",
+                            req.traceId, req.ticketId)
+
     async def _send_reply(
         self, req: TestEventRequest, thread_key: str, text: str, is_identity_request: bool = False,
     ) -> None:
+        await self._persist_outbound_ai_reply(req, text)
         origin_message_id = None
         if req.ticketId:
             try:

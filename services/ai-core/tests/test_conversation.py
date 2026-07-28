@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app.conversation.agent import (
+    FOLLOWUP_QUESTION,
     ChannelIdentityIn,
     ConversationAgent,
     TestEventRequest,
@@ -543,3 +544,186 @@ def test_tool_confirm_identity_anonymous_does_not_leak_native_email():
     assert resolve_req.declaredAnonymous is True
     assert resolve_req.confirmedEmail is None
     assert resolve_req.confirmedPhone is None
+
+
+# ---------------------------------------------------------------------------
+# Conversation persistence — a citizen's reply on an already-open ticket
+# (e.g. one moved to pending_customer) and the AI's own reply must both
+# appear in the ticket's Conversation timeline, not just whichever turn
+# happens to publish complaint.ready. Regression coverage for the reported
+# bug: neither showed up when the reply was judged "vague"/conversational.
+# ---------------------------------------------------------------------------
+
+def test_persist_inbound_noop_without_ticket_id():
+    """Direct/test-endpoint calls with no ticket stub have nothing to persist to."""
+    agent = ConversationAgent("t1")
+    req = _req(rawText="hello")
+    with patch.object(agent._db, "add_message", new=AsyncMock()) as add_message:
+        _run(agent._persist_inbound(req, req.rawText))
+    add_message.assert_not_awaited()
+
+
+def test_persist_inbound_noop_for_blank_content():
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="tkt-blank")
+    with patch.object(agent._db, "add_message", new=AsyncMock()) as add_message:
+        _run(agent._persist_inbound(req, "   "))
+    add_message.assert_not_awaited()
+
+
+def test_persist_inbound_swallows_db_errors():
+    """Best-effort: Conversation logging must never break the conversation turn."""
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="tkt-err")
+    with patch.object(agent._db, "add_message", new=AsyncMock(side_effect=RuntimeError("db-writer down"))):
+        _run(agent._persist_inbound(req, "hello"))  # must not raise
+
+
+def test_rule_based_identity_gate_persists_inbound_and_ai_reply():
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="tkt-1", rawText="My meter is broken, please help")
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+         patch.object(agent, "_publisher") as publisher, \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
+         patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "get_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent, "_save_state", new=AsyncMock()), \
+         patch.object(agent._db, "add_message", new=AsyncMock(return_value={})) as add_message:
+        publisher.publish = AsyncMock(return_value="1-0")
+        result = _run(agent.process(req))
+
+    assert result["identityRequestSent"] is True
+    calls = add_message.await_args_list
+    assert len(calls) == 2
+    assert calls[0].args == ("tkt-1", {
+        "tenantId": "t1", "channel": "email", "direction": "inbound",
+        "authorType": "user", "content": req.rawText,
+    })
+    assert calls[1].args[0] == "tkt-1"
+    assert calls[1].args[1]["direction"] == "outbound"
+    assert calls[1].args[1]["authorType"] == "ai"
+    assert calls[1].args[1]["isAiGenerated"] == 1
+
+
+def test_rule_based_vague_followup_on_open_ticket_persists_inbound_and_ai_reply():
+    """Reproduces the reported bug: a short follow-up reply on an
+    already-open ticket is judged vague, so it never publishes
+    complaint.ready — previously that meant neither the citizen's message
+    nor the AI's follow-up question ever reached Conversation."""
+    agent = ConversationAgent("t1")
+    req = _req(
+        ticketId="tkt-2", ticketNumber="TKT-00002",
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
+        rawText="Still broken",
+    )
+    known = {"master_id": "m-5", "name": "Ravi Kumar", "email": "ravi@example.com", "phone": "+919876543210"}
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+         patch.object(agent, "_publisher") as publisher, \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=known)), \
+         patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "get_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent, "_save_state", new=AsyncMock()), \
+         patch.object(agent._db, "add_message", new=AsyncMock(return_value={})) as add_message, \
+         patch("app.conversation.agent.IdentityResolver") as resolver_cls:
+        publisher.publish = AsyncMock(return_value="1-0")
+        resolver_cls.return_value.resolve = AsyncMock(return_value={"masterId": "m-5", "identityStatus": "confirmed"})
+        result = _run(agent.process(req))
+
+    assert result["complaintReady"] is False
+    calls = add_message.await_args_list
+    assert len(calls) == 2
+    inbound = next(c for c in calls if c.args[1]["direction"] == "inbound")
+    assert inbound.args[0] == "tkt-2"
+    assert inbound.args[1]["content"] == "Still broken"
+    outbound = next(c for c in calls if c.args[1]["direction"] == "outbound")
+    assert outbound.args[1]["authorType"] == "ai"
+    assert outbound.args[1]["content"] == FOLLOWUP_QUESTION
+
+
+def test_rule_based_complaint_ready_does_not_double_persist_inbound():
+    """When a turn IS complaint-ready, create_ticket_from_complaint (a
+    separate event consumer, not exercised here) is the one that persists
+    the message — the agent itself must not also persist it, or the
+    citizen's message would appear twice in Conversation."""
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="tkt-3", rawText="My meter is faulty again this week")
+    known = {"master_id": "m-7", "name": "Jane Doe", "phone": "9876543210"}
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+         patch.object(agent, "_publisher") as publisher, \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
+         patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent, "_save_state", new=AsyncMock()), \
+         patch.object(agent._db, "find_by_email", new=AsyncMock(return_value=known)), \
+         patch.object(agent._db, "add_message", new=AsyncMock(return_value={})) as add_message:
+        publisher.publish = AsyncMock(return_value="1-0")
+        result = _run(agent.process(req))
+
+    assert result["complaintReady"] is True
+    add_message.assert_not_awaited()
+
+
+def test_assistant_path_persists_inbound_and_ai_reply_when_no_tool_called():
+    """A follow-up reply on an already-resolved ticket where the assistant
+    just replies conversationally (no submit_complaint call) — the other
+    half of the reported bug, on the Assistants-API path."""
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="tkt-4", ticketNumber="TKT-00004", rawText="It's still not fixed")
+
+    async def fake_run_turn(tenant_id, state_key, user_message, execute_tool, additional_instructions):
+        return "Sorry to hear that — an agent will follow up shortly."
+
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=True), \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value={
+             "identity_status": "confirmed", "master_id": "m-1", "extracted_fields": {"complaint_summary": "x"},
+             "questions_asked": 0, "complaint_ready": True,
+         })), \
+         patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "get_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent, "_save_state", new=AsyncMock()), \
+         patch.object(agent._openai, "run_turn", new=AsyncMock(side_effect=fake_run_turn)), \
+         patch.object(agent._db, "add_message", new=AsyncMock(return_value={})) as add_message, \
+         patch.object(agent, "_publisher") as publisher:
+        publisher.publish = AsyncMock(return_value="1-0")
+        _run(agent.process(req))
+
+    calls = add_message.await_args_list
+    assert len(calls) == 2
+    inbound = next(c for c in calls if c.args[1]["direction"] == "inbound")
+    assert inbound.args[0] == "tkt-4"
+    assert inbound.args[1]["content"] == "It's still not fixed"
+    outbound = next(c for c in calls if c.args[1]["direction"] == "outbound")
+    assert outbound.args[1]["authorType"] == "ai"
+    assert "follow up shortly" in outbound.args[1]["content"]
+
+
+def test_assistant_path_skips_inbound_persist_when_submit_complaint_called():
+    """The complementary case: when the assistant DOES call submit_complaint
+    this turn, create_ticket_from_complaint persists the inbound message —
+    the agent must not persist it a second time."""
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="tkt-5", rawText="My bill is 3x higher and I never got an explanation")
+
+    async def fake_run_turn(tenant_id, state_key, user_message, execute_tool, additional_instructions):
+        await execute_tool("submit_complaint", {"complaint_summary": "billing issue", "category_hint": "billing"})
+        return "Thanks, we've logged your complaint."
+
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=True), \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
+         patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "get_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent, "_save_state", new=AsyncMock()), \
+         patch.object(agent._openai, "run_turn", new=AsyncMock(side_effect=fake_run_turn)), \
+         patch.object(agent._db, "add_message", new=AsyncMock(return_value={})) as add_message, \
+         patch.object(agent, "_publisher") as publisher:
+        publisher.publish = AsyncMock(return_value="1-0")
+        _run(agent.process(req))
+
+    calls = add_message.await_args_list
+    assert len(calls) == 1  # only the outbound AI reply — inbound left to create_ticket_from_complaint
+    assert calls[0].args[1]["direction"] == "outbound"
+    assert calls[0].args[1]["authorType"] == "ai"
