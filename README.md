@@ -1024,7 +1024,9 @@ copy to `.env`/`.env.local` and fill in real values. **Never commit either.**
 `APP_ENV`, `TENANT_ID`, `LOG_LEVEL`, `GATEWAY_HTTP_PORT`/`QUARKUS_HTTP_PORT`,
 `GATEWAY_VALKEY_URL`, `AI_CORE_URL`, `DB_WRITER_URL`,
 `DB_WRITER_INTERNAL_API_KEY` (shared pod-to-pod secret — must match
-db-writer's and ai-core's own copy), `GATEWAY_MAIL_FROM`.
+db-writer's and ai-core's own copy), `GATEWAY_MAIL_FROM`, `DASHBOARD_ORIGIN`
+(CORS allow-origin for the Vercel-hosted dashboard; comma-separate multiple
+origins, defaults to `http://localhost:3000`).
 Email adapter: `EMAIL_SMTP_MOCK`, `EMAIL_SMTP_HOST`, `EMAIL_SMTP_PORT`,
 `EMAIL_SMTP_USER`, `EMAIL_SMTP_PASSWORD`, `EMAIL_FROM_ADDRESS`,
 `EMAIL_IMAP_HOST`, `EMAIL_IMAP_PORT`, `EMAIL_IMAP_MAILBOX`,

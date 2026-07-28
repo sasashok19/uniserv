@@ -214,6 +214,31 @@ public class PiiEncryptionService {
 
 # Feature 16 — Deployment
 
+> **Superseded for the actual live deployment.** The GKE Autopilot plan below
+> was the original design but was not what got deployed. The real stack
+> (chosen for $0 cost) is **Render** (api-gateway + ai-core, see
+> `render.yaml` at repo root), **Railway** (db-writer, needs a persistent
+> volume — Render's free tier filesystem is ephemeral), **Upstash**
+> (Valkey/Redis, native TCP+TLS protocol, not its REST API), and **Vercel**
+> (dashboard). Gotchas learned running this stack:
+> - Render service **names must match exactly** between the dashboard and
+>   `render.yaml`'s `fromService` blocks — renaming a service in the Render
+>   UI without updating the blueprint breaks the `fromService` hostport
+>   lookup silently (the aggregate `/api/v1/health` reports the downstream
+>   service "unhealthy" even though it's actually fine, since api-gateway is
+>   probing a URL that no longer resolves).
+> - Render free-tier services cold-start after ~15 min idle; a request to a
+>   sleeping service can exceed api-gateway's 3s health-probe timeout even
+>   when the target service is otherwise healthy.
+> - The dashboard (Vercel) calling api-gateway (Render) is cross-origin —
+>   api-gateway needs `DASHBOARD_ORIGIN` (see `render.yaml` and
+>   `quarkus.http.cors.*` in `application.properties`) set to the dashboard's
+>   Vercel URL, and the dashboard needs `NEXT_PUBLIC_API_GATEWAY_URL` set to
+>   api-gateway's Render URL.
+>
+> The rest of this section (Kubernetes manifests, GKE setup) is kept for
+> reference but is not the deployment path in use.
+
 ## Phase Scope
 - **Phase 1:** Docker images + Kubernetes manifests + GKE Autopilot
 - **Phase 2:** No structural changes (same infra, more pods)

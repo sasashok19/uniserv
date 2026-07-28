@@ -1,0 +1,174 @@
+# ============================================================
+# UniServe :: Render Blueprint — api-gateway + ai-core
+# Deploy: connect this repo in the Render dashboard as a Blueprint, or
+#   `render blueprint launch` from repo root (Render CLI).
+# db-writer (Railway) and valkey (Upstash) are configured separately —
+# this file only covers the two services Render hosts.
+# ============================================================
+
+services:
+  # ---------------------------------------------------------------
+  # api-gateway (Quarkus / Java 21)
+  # ---------------------------------------------------------------
+  - type: web
+    name: uniserve-api-gateway
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: services/api-gateway/Dockerfile
+    dockerContext: services/api-gateway
+    healthCheckPath: /q/health/ready
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: TENANT_ID
+        value: t1
+      - key: LOG_LEVEL
+        value: INFO
+      # Render routes to this port; must match what Quarkus actually binds to.
+      - key: PORT
+        value: "8080"
+      - key: QUARKUS_HTTP_PORT
+        value: "8080"
+
+      # Upstash (Redis-compatible) — use the TCP+TLS connection string
+      # (rediss://...), NOT the REST URL. Set manually from your Upstash console.
+      - key: GATEWAY_VALKEY_URL
+        sync: false
+
+      # ai-core — same-account Render services can reach each other over
+      # Render's private network; fromService resolves this automatically
+      # PROVIDED the name below matches the service's actual name in the
+      # Render dashboard. If you rename the service there, update this too —
+      # a drift here silently breaks the aggregate /api/v1/health check
+      # (gateway reports aiCore "unhealthy" even though ai-core itself is
+      # fine) since fromService then can't resolve a hostport.
+      - key: AI_CORE_URL
+        fromService:
+          type: web
+          name: uniserv-ai-core
+          property: hostport
+
+      # Dashboard (Vercel) origin, for CORS on api-gateway — Vercel isn't a
+      # Render service so this can't be a fromService reference; set it
+      # manually once the dashboard's Vercel URL is known (or its custom
+      # domain). Comma-separate multiple origins (e.g. preview + prod URLs).
+      - key: DASHBOARD_ORIGIN
+        sync: false
+      # db-writer (Railway) — its public URL from the Railway dashboard.
+      - key: DB_WRITER_URL
+        sync: false
+      # Must be identical to DB_WRITER_INTERNAL_API_KEY set on Railway's
+      # db-writer service — this is a shared secret, not auto-generated here.
+      - key: DB_WRITER_INTERNAL_API_KEY
+        sync: false
+
+      # JWT auth (Feature 11) — Render can generate this for you.
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRY_ACCESS
+        value: 15m
+      - key: JWT_EXPIRY_REFRESH
+        value: 7d
+
+      # WhatsApp adapter (Feature 02b) — optional, fill in when ready.
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: WHATSAPP_APP_SECRET
+        sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+
+      # Never seed dev/demo data in production.
+      - key: DEV_SEED_ENABLED
+        value: "false"
+
+      # Email (Feature 02a) — mock until real SMTP/IMAP creds are set, so a
+      # half-configured deploy doesn't silently try to send real mail.
+      - key: EMAIL_SMTP_MOCK
+        value: "true"
+      - key: EMAIL_SMTP_HOST
+        value: smtp.gmail.com
+      - key: EMAIL_SMTP_PORT
+        value: "587"
+      - key: EMAIL_SMTP_USER
+        sync: false
+      - key: EMAIL_SMTP_PASSWORD
+        sync: false
+      - key: EMAIL_FROM_ADDRESS
+        sync: false
+      - key: GATEWAY_MAIL_FROM
+        value: noreply@uniserve.local
+      - key: EMAIL_IMAP_HOST
+        value: imap.gmail.com
+      - key: EMAIL_IMAP_PORT
+        value: "993"
+      - key: EMAIL_IMAP_MAILBOX
+        value: INBOX
+      - key: EMAIL_IMAP_POLL_INTERVAL
+        value: 60s
+      - key: EMAIL_IMAP_USER
+        sync: false
+      - key: EMAIL_IMAP_PASSWORD
+        sync: false
+
+  # ---------------------------------------------------------------
+  # ai-core (Python 3.11 / FastAPI)
+  # ---------------------------------------------------------------
+  - type: web
+    name: uniserv-ai-core
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: services/ai-core/Dockerfile
+    dockerContext: services/ai-core
+    healthCheckPath: /q/health/ready
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: TENANT_ID
+        value: t1
+      - key: LOG_LEVEL
+        value: INFO
+      - key: PORT
+        value: "8001"
+      - key: AI_CORE_PORT
+        value: "8001"
+
+      # Upstash — same TCP+TLS (rediss://) URL as api-gateway's above.
+      - key: VALKEY_URL
+        sync: false
+      - key: EVENT_BUS_MAX_RETRIES
+        value: "3"
+      - key: EVENT_BUS_RETRY_DELAY_MS
+        value: "1000"
+      - key: EVENT_BUS_CONSUMER_GROUP
+        value: uniserve
+
+      # db-writer (Railway) — same value as api-gateway's DB_WRITER_URL.
+      - key: DB_WRITER_URL
+        sync: false
+      # Must match db-writer's (Railway) and api-gateway's value above.
+      - key: DB_WRITER_INTERNAL_API_KEY
+        sync: false
+
+      - key: API_GATEWAY_URL
+        fromService:
+          type: web
+          name: uniserve-api-gateway
+          property: hostport
+
+      # Conversation / LLM (Feature 06)
+      - key: DEFAULT_LLM_PROVIDER
+        value: openai
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_ASSISTANT_ID
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+
+      - key: PII_SCRUBBER_ENABLED
+        value: "true"
