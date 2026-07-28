@@ -1069,7 +1069,12 @@ real SMTP/Resend send is slower than the old mock path),
 ### dashboard
 `APP_ENV`, `NEXT_PUBLIC_TENANT_ID`, `NEXT_PUBLIC_API_GATEWAY_URL`
 (browser-facing), `API_GATEWAY_INTERNAL_URL` (server-side/Docker-mode
-container-name URL), `NEWS_RSS_URL` (optional — RSS 2.0 feed for the login
+container-name URL), `DB_WRITER_URL`, `AI_CORE_URL` (both default to
+`http://localhost:8090`/`:8001` — used only by Administration → System's
+service-health probe, which checks these two directly rather than through
+the gateway proxy; set to db-writer's/ai-core's real deployed URLs in
+production or that panel shows every service "Unreachable"),
+`NEWS_RSS_URL` (optional — RSS 2.0 feed for the login
 page's headlines widget; defaults to BBC Tamil, no API key; the widget hides
 itself if the feed is unreachable). No NextAuth — auth is a custom cookie set
 by `app/api/auth/login/route.ts`, which proxies straight to api-gateway.
