@@ -13,13 +13,14 @@ RUN mvn package -DskipTests -q
 # ---- run stage ----
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
-# Persistent location for the SQLite WAL database (mount a volume here); owned by the
-# non-root runtime user so it stays writable after USER 1001 below.
-RUN mkdir -p /data && chown -R 1001:1001 /data
+# Persistent location for the SQLite WAL database (mount a volume here).
+# Runs as root: a platform-mounted volume (e.g. Railway) arrives with its own
+# ownership at container start, overriding any chown baked into the image
+# layer here, so a non-root user can end up unable to write to it.
+RUN mkdir -p /data
 COPY --from=build /app/target/quarkus-app ./quarkus-app
 
 EXPOSE 8090
 ENV QUARKUS_HTTP_HOST=0.0.0.0
 ENV DB_WRITER_DB_PATH=/data/uniserve.db
-USER 1001
 CMD ["java", "-jar", "./quarkus-app/quarkus-run.jar"]
