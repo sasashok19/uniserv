@@ -85,10 +85,28 @@ services:
       - key: DEV_SEED_ENABLED
         value: "false"
 
-      # Email (Feature 02a) — mock until real SMTP/IMAP creds are set, so a
-      # half-configured deploy doesn't silently try to send real mail.
+      # Email (Feature 02a) outbound provider — "resend" (HTTPS API) by
+      # default here because Render's free tier blocks outbound SMTP ports
+      # 25/465/587 entirely (since 2025-09-26); direct Gmail SMTP just times
+      # out. Flip to "smtp" if you move to a paid Render plan (which lifts
+      # the 465/587 block) and want to go back to sending via Gmail directly.
+      - key: EMAIL_PROVIDER
+        value: resend
+      # Get this from resend.com's dashboard (free tier: 3,000/mo, 100/day).
+      - key: RESEND_API_KEY
+        sync: false
+      # onboarding@resend.dev needs no domain verification — fine for a demo.
+      # Verify your own domain in Resend's dashboard and set this to a real
+      # address once you want mail to look like it's from you, not Resend.
+      - key: RESEND_FROM_ADDRESS
+        value: onboarding@resend.dev
+
+      # SMTP fallback config — only used when EMAIL_PROVIDER=smtp above.
+      # sync: false (not a literal "true") so a manual override here survives
+      # blueprint syncs, since which mode you want depends on your Render
+      # plan, not something the blueprint should force one way.
       - key: EMAIL_SMTP_MOCK
-        value: "true"
+        sync: false
       - key: EMAIL_SMTP_HOST
         value: smtp.gmail.com
       - key: EMAIL_SMTP_PORT
@@ -159,6 +177,10 @@ services:
           type: web
           name: uniserve-api-gateway
           property: hostport
+      # A real SMTP/Resend send (api-gateway's /test-send) is slower than the
+      # old mock path — bump if this still times out.
+      - key: EMAIL_SEND_TIMEOUT_SECONDS
+        value: "30"
 
       # Conversation / LLM (Feature 06)
       - key: DEFAULT_LLM_PROVIDER

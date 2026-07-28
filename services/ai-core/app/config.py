@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     # Used to actually deliver ai.reply.send events (identity requests,
     # follow-up questions) — see app/notifications/sender.py.
     api_gateway_url: str = "http://localhost:8080"
+    # api-gateway's /test-send does a synchronous real SMTP send (Gmail
+    # STARTTLS handshake included) once EMAIL_SMTP_MOCK=false — 10s wasn't
+    # enough for that round trip over Render's free-tier network and caused
+    # spurious httpx.ReadTimeout failures once real sending was turned on.
+    email_send_timeout_seconds: int = 30
 
     # Identity resolver (Feature 03)
     identity_merge_confidence_threshold: float = 0.85

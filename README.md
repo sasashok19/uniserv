@@ -1027,6 +1027,11 @@ copy to `.env`/`.env.local` and fill in real values. **Never commit either.**
 db-writer's and ai-core's own copy), `GATEWAY_MAIL_FROM`, `DASHBOARD_ORIGIN`
 (CORS allow-origin for the Vercel-hosted dashboard; comma-separate multiple
 origins, defaults to `http://localhost:3000`).
+`EMAIL_PROVIDER` (`smtp` default, or `resend` — Render's free tier blocks
+outbound SMTP ports 25/465/587 entirely, so real Gmail SMTP send only works
+locally or on a paid Render plan; `resend` sends over HTTPS instead),
+`RESEND_API_KEY`, `RESEND_FROM_ADDRESS` (defaults to `onboarding@resend.dev`,
+which needs no domain verification).
 Email adapter: `EMAIL_SMTP_MOCK`, `EMAIL_SMTP_HOST`, `EMAIL_SMTP_PORT`,
 `EMAIL_SMTP_USER`, `EMAIL_SMTP_PASSWORD`, `EMAIL_FROM_ADDRESS`,
 `EMAIL_IMAP_HOST`, `EMAIL_IMAP_PORT`, `EMAIL_IMAP_MAILBOX`,
@@ -1053,6 +1058,8 @@ hardcodes max 1000 / 2-min TTL.)
 `EVENT_BUS_MAX_RETRIES`, `EVENT_BUS_RETRY_DELAY_MS`,
 `EVENT_BUS_CONSUMER_GROUP`, `DB_WRITER_URL`, `DB_WRITER_INTERNAL_API_KEY`,
 `API_GATEWAY_URL` (delivers `ai.reply.send` via api-gateway's email endpoint),
+`EMAIL_SEND_TIMEOUT_SECONDS` (default 30 — httpx timeout for that call; a
+real SMTP/Resend send is slower than the old mock path),
 `IDENTITY_MERGE_CONFIDENCE_THRESHOLD`, `IDENTITY_PENDING_TIMEOUT_HOURS`,
 `IDENTITY_ANON_REF_PREFIX`, `DEFAULT_REGION`, `CONVERSATION_STATE_TTL_HOURS`,
 `AI_MAX_FOLLOWUP_QUESTIONS`, `DEFAULT_LLM_PROVIDER`, `ANTHROPIC_API_KEY`,

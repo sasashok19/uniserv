@@ -49,6 +49,16 @@ public class EmailAdapter {
     @Inject
     Mailer mailer;
 
+    @Inject
+    ResendEmailClient resendClient;
+
+    // "smtp" (default, direct Gmail SMTP via the Quarkus mailer) or "resend"
+    // (HTTPS API — required on Render's free tier, which blocks outbound SMTP
+    // ports 25/465/587 entirely as of 2025-09-26). Flip back to "smtp" if/when
+    // a paid Render plan lifts that block and direct SMTP is preferred again.
+    @ConfigProperty(name = "email.provider", defaultValue = "smtp")
+    String emailProvider;
+
     // Optional<String>: SmallRye treats an empty value as absent, so "unconfigured"
     // (dev default) becomes Optional.empty() instead of failing String conversion.
     @ConfigProperty(name = "email.imap.host")
@@ -153,15 +163,19 @@ public class EmailAdapter {
         return new PollResult(processed, errors);
     }
 
-    /** Send an outbound reply over SMTP. Returns true when no exception is thrown. */
+    /** Send an outbound reply via the configured provider (SMTP or Resend).
+     * Returns true when no exception is thrown. */
     public boolean sendReply(String toAddress, String subject, String body, String inReplyToMessageId) {
+        if ("resend".equalsIgnoreCase(emailProvider)) {
+            return resendClient.send(toAddress, subject, body, inReplyToMessageId);
+        }
         Mail mail = Mail.withText(toAddress, subject, body);
         if (!isBlank(inReplyToMessageId)) {
             mail.addHeader("In-Reply-To", inReplyToMessageId);
             mail.addHeader("References", inReplyToMessageId);
         }
         mailer.send(mail);
-        LOG.infof("Email reply sent to=%s subject=%s", toAddress, subject);
+        LOG.infof("Email reply sent via SMTP to=%s subject=%s", toAddress, subject);
         return true;
     }
 

@@ -66,7 +66,7 @@ async def send_email(
         headers["X-Trace-Id"] = trace_id
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=settings.email_send_timeout_seconds) as client:
             resp = await client.post(url, headers=headers, json={
                 "to": to_address, "subject": subject, "body": body,
                 "inReplyToMessageId": in_reply_to,

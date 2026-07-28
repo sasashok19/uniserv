@@ -6,10 +6,12 @@
 
 ## What This Module Does
 Polls a configured mailbox via IMAP. Normalises each email to the
-canonical `ChannelMessageReceived` event. Sends outbound replies via SMTP.
+canonical `ChannelMessageReceived` event. Sends outbound replies via SMTP or,
+when `EMAIL_PROVIDER=resend`, via Resend's HTTPS API — see "Outbound provider"
+below for why the switch exists.
 
 ## Boundaries
-**Owns:** IMAP polling, email parsing, SMTP outbound.
+**Owns:** IMAP polling, email parsing, outbound send (SMTP or Resend).
 **Does not own:** Identity resolution, AI, ticket logic.
 
 ---
@@ -37,9 +39,10 @@ public class EmailAdapter {
         // 5. Mark as seen
     }
 
-    public void sendReply(String toAddress, String subject,
-                          String body, String inReplyToMessageId) {
-        // SMTP send
+    public boolean sendReply(String toAddress, String subject,
+                             String body, String inReplyToMessageId) {
+        // EMAIL_PROVIDER=resend -> ResendEmailClient (HTTPS)
+        // EMAIL_PROVIDER=smtp (default) -> Quarkus mailer (SMTP)
     }
 }
 ```
@@ -47,6 +50,28 @@ public class EmailAdapter {
 ## Thread Detection
 Use `In-Reply-To` and `References` headers → `threadId`.
 No threading headers → `threadId = null` (new conversation).
+
+---
+
+## Outbound provider: SMTP vs Resend
+
+Render's free-tier web services block **all** outbound traffic to SMTP ports
+25/465/587 (Render's own policy change, 2025-09-26) — direct Gmail SMTP from
+api-gateway on Render just hangs until `ConnectTimeoutException` at 60s, no
+matter the timeout or port tried. `EMAIL_PROVIDER` switches between:
+
+- `smtp` (default) — the Quarkus mailer, direct Gmail SMTP. Works fine
+  locally and on a paid Render plan (which lifts the 465/587 block; port 25
+  stays blocked everywhere since Render runs on AWS EC2 and AWS blocks 25
+  network-wide).
+- `resend` — `ResendEmailClient` sends over Resend's HTTPS API instead
+  (port 443 is never blocked). Required on Render's free tier for real
+  outbound email to work at all.
+
+`ResendEmailClient` (`services/api-gateway/.../adapters/email/ResendEmailClient.java`)
+posts to `https://api.resend.com/emails` with a Bearer `RESEND_API_KEY`,
+setting `In-Reply-To`/`References` as custom headers the same way the SMTP
+path does, so reply-threading (see above) behaves identically either way.
 
 ---
 
@@ -59,6 +84,13 @@ EMAIL_IMAP_USER=complaints@example.com
 EMAIL_IMAP_PASSWORD=...
 EMAIL_IMAP_MAILBOX=INBOX
 EMAIL_IMAP_POLL_INTERVAL=60s
+
+# Outbound provider switch — see "Outbound provider: SMTP vs Resend" above.
+EMAIL_PROVIDER=smtp
+RESEND_API_KEY=
+RESEND_FROM_ADDRESS=onboarding@resend.dev
+
+# Used when EMAIL_PROVIDER=smtp
 EMAIL_SMTP_HOST=smtp.example.com
 EMAIL_SMTP_PORT=587
 EMAIL_SMTP_USER=complaints@example.com
@@ -113,6 +145,7 @@ HTTP/1.1 200 OK
 - HTML email → strips tags, extracts plain text
 - Reply email → `threadId` matches parent
 - SMTP send → no exception thrown
+- `EMAIL_PROVIDER=resend` → `ResendEmailClient` used instead, same `{sent:<bool>}` contract
 
 ---
 
@@ -123,6 +156,7 @@ HTTP/1.1 200 OK
 - **IMAP polling revived (Make.com webhook removed):** `EmailWebhookResource`/`EmailWebhookSecretValidator` and `EMAIL_WEBHOOK_SECRET` are gone — `POST /api/v1/webhooks/email` now 404s. `EmailAdapter.scheduledPoll()`/`pollOnce()` connect via IMAP, parse each unseen message to `ChannelMessageReceived`, validate via `EventValidator`, publish on success (or count as an error on validation failure), and flag the message `SEEN`. `email.imap.user`/`password` default to the SMTP credential (`EMAIL_IMAP_USER:${EMAIL_SMTP_USER:}`) via `application.properties` nested-default syntax, so one Gmail App Password drives both directions with no extra config in the common case.
 - **Inbound `Message-ID` is now captured end-to-end.** `EmailAdapter.parseMessage`/`extractMessageId` reads the inbound email's own `Message-ID` header and puts it on `ChannelMessageReceived.messageId` (a new field, with a backward-compatible constructor overload for older callers). Downstream it's persisted as `tickets.origin_message_id` (db-writer, migration `V7__ticket_origin_message_id.sql`), set once when the ticket stub is created.
 - **Outbound replies thread into the original chain (RFC 5322).** `EmailAdapter.sendReply(...)` already accepted an `inReplyToMessageId` param (sets `In-Reply-To` + `References`), but every caller hard-coded `null`, so acks/updates/status-changes arrived as disconnected new emails. Now `EmailAdapterResource` (`/test-send`), `TicketsResource.reply()`, `TicketNotifier.sendStatusUpdateEmail()`, and ai-core's `app/notifications/sender.py` all forward the stored `origin_message_id`, so every reply lands in the same email chain the citizen started. See the README's *Subject-line ticket threading & dedup* section.
+- **Resend added as an alternate outbound provider (Render free-tier SMTP block).** Real Gmail SMTP sends from Render's free tier fail with `ConnectTimeoutException` after 60s — Render blocks outbound ports 25/465/587 on free web services entirely (as of 2025-09-26; a paid plan lifts the 465/587 block, 25 stays blocked everywhere since Render runs on AWS EC2 and AWS blocks 25 network-wide). `EmailAdapter.sendReply` now branches on `EMAIL_PROVIDER`: `smtp` (default, unchanged Quarkus-mailer path) or `resend` (`ResendEmailClient`, HTTPS to `api.resend.com`, port 443 is never blocked). Same `In-Reply-To`/`References` threading either way. ai-core's own timeout for calling api-gateway's `/test-send` (`services/ai-core/app/notifications/sender.py`) is now `EMAIL_SEND_TIMEOUT_SECONDS` (default 30s, was a hardcoded 10s) since a real SMTP/API round trip is slower than the mock path.
 - **Thread-key collapse fix (ai-core side).** Complementary to threading: `ConversationAgent._thread_key()` no longer falls back to `email:<address>` (shared by every email from that sender, which collapsed unrelated new complaints onto old tickets) — it now uses `email:<message-id>` when there's no real `In-Reply-To`. WhatsApp's per-phone thread key is unchanged. Regression-tested in `services/ai-core/tests/test_thread_key.py`.
 - **Outbound SMTP is real, not mock, by default** (Phase 1, config-only — `EmailAdapter.sendReply()`/`test-send` are unchanged Java code). `quarkus.mailer.mock` defaults to `${EMAIL_SMTP_MOCK:false}`. Verified working against Gmail SMTP (`smtp.gmail.com:587`, STARTTLS) using an account App Password (requires 2-Step Verification). One easy-to-miss requirement: `quarkus.mailer.auth-methods=PLAIN LOGIN` **must** be set explicitly — Gmail advertises XOAUTH2 first, and without this the mailer tries XOAUTH2 (no token available) instead of the App Password and every send fails. `EMAIL_FROM_ADDRESS` should match `EMAIL_SMTP_USER` (or a verified Gmail alias) or Gmail may reject/bounce the send.
 - **Auto-generated mail is dropped at ingestion (`EmailAdapter.isAutoGenerated`).** Bounces, out-of-office replies, and no-reply notification streams are detected via RFC 3834 `Auto-Submitted`, `X-Autoreply`/`X-Autorespond`/`X-Failed-Recipients`, `Precedence: bulk|junk|auto_reply`, DSN `multipart/report` content-types, null `Return-Path`, mailer-daemon/postmaster/*noreply* senders, and bounce/OOO subject patterns — marked SEEN and skipped (logged) before parsing, so they never become `channel.message.received` events. ai-core keeps a sender/subject safety net in `app/events/dispatcher.py` (`is_auto_generated_email`), and `app/notifications/sender.py` refuses to send to RFC 2606 reserved domains (`example.com` etc. — dev seed data), which closes the seed→bounce→ticket feedback loop that once filed a Gmail DSN as a confirmed complaint from mailer-daemon. Detection errs permissive: on any parsing doubt the mail goes through (a lost complaint is worse than a junk ticket). Unit-tested in `EmailAdapterParseTest` and ai-core's `tests/test_auto_response.py`.
