@@ -46,6 +46,10 @@ public final class WhatsAppParser {
         String rawText = extractText(message, type);
         List<String> media = extractMedia(message, type);
         String inReplyTo = message.path("context").path("id").asText(null);
+        // This message's own wamid (Feature 15 parity with email's Message-ID) —
+        // persisted as the ticket's origin_message_id so an outbound reply can set
+        // Graph API's context.message_id and render as a quoted reply-to.
+        String messageId = message.path("id").asText(null);
 
         String nowIso = Instant.now().toString();
         String sentAt = toIso(message.path("timestamp").asText(null), nowIso);
@@ -64,7 +68,9 @@ public final class WhatsAppParser {
                 inReplyTo,
                 sentAt,
                 nowIso,
-                UUID.randomUUID().toString());
+                UUID.randomUUID().toString(),
+                null,               // subject (no subject concept on WhatsApp)
+                messageId);
     }
 
     private static String extractText(JsonNode message, String type) {

@@ -47,7 +47,7 @@ public class TicketAutoCloseScheduler {
             if (o instanceof Map<?, ?> raw) {
                 @SuppressWarnings("unchecked")
                 Map<String, Object> ticket = (Map<String, Object>) raw;
-                notifier.sendStatusUpdateEmail(ticket, "closed", note);
+                notifier.sendStatusUpdate(ticket, "closed", note);
             }
         }
     }

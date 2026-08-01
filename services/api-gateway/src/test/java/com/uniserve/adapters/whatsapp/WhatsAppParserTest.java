@@ -48,6 +48,8 @@ class WhatsAppParserTest {
         assertTrue(event.channelIdentity().verified(), "WhatsApp identity is always verified");
         assertEquals("My electricity bill is double this month", event.rawText());
         assertEquals(ChannelMessageReceived.TYPE, event.type());
+        assertEquals("wamid.test001", event.messageId(),
+                "the inbound message's own wamid must be captured for outbound reply-context threading");
     }
 
     @Test
@@ -82,6 +84,25 @@ class WhatsAppParserTest {
                 """;
         ChannelMessageReceived event = WhatsAppParser.parse(mapper.readTree(payload), "default").get(0);
         assertEquals(List.of("media-123"), event.rawMediaUrls());
+    }
+
+    @Test
+    void distinguishesOwnMessageIdFromParentContextId() throws Exception {
+        String payload = """
+                {
+                  "entry": [{ "changes": [{ "value": { "messages": [{
+                    "from": "919800000002",
+                    "id": "wamid.thisone",
+                    "timestamp": "1719475500",
+                    "type": "text",
+                    "text": { "body": "Quoting your last message" },
+                    "context": { "id": "wamid.parent" }
+                  }]}}]}]
+                }
+                """;
+        ChannelMessageReceived event = WhatsAppParser.parse(mapper.readTree(payload), "default").get(0);
+        assertEquals("wamid.thisone", event.messageId());
+        assertEquals("wamid.parent", event.inReplyTo());
     }
 
     @Test

@@ -5,8 +5,17 @@ turned them into a real message back to the citizen.
 
 Email is delivered via api-gateway's existing `EmailAdapter.sendReply`
 (reused through its `/test-send` endpoint rather than duplicating SMTP
-config here). WhatsApp has no outbound-send capability in this codebase yet
-(Meta Business API outbound is Phase 2) — those are logged, not delivered.
+config here). WhatsApp is delivered via api-gateway's `WhatsAppAdapter.sendReply`
+(Meta Graph API, through its `/send` endpoint) the same way — this service
+never talks to Meta or an SMTP server directly, only to api-gateway.
+
+Note (Meta's 24-hour customer service window): a WhatsApp free-form text
+message can only be sent within 24h of the citizen's last inbound message;
+outside that window the send fails (Graph API error), since sending a
+pre-approved template message instead is not implemented. Identity requests
+and follow-ups happen inside an active conversation so this rarely bites,
+but a resolve/close status update days later could land outside the window
+— see docs/02b_ADAPTER_WHATSAPP.md.
 """
 
 import logging
@@ -83,6 +92,40 @@ async def send_email(
         raise
 
 
+async def send_whatsapp(
+    to_phone: str, body: str, trace_id: Optional[str] = None,
+    context_message_id: Optional[str] = None,
+) -> dict:
+    """Deliver a WhatsApp text message via api-gateway's `WhatsAppAdapter.sendReply`
+    (reused through its `/send` endpoint rather than talking to Meta's Graph API
+    directly from this service).
+
+    `context_message_id` — the citizen's inbound wamid (Feature 15 parity with
+    email's `in_reply_to`), when known — makes the reply render as a quoted
+    reply-to in WhatsApp instead of a fresh, disconnected message.
+    """
+    url = f"{settings.api_gateway_url.rstrip('/')}/api/v1/internal/adapters/whatsapp/send"
+    headers = {"Content-Type": "application/json"}
+    if trace_id:
+        headers["X-Trace-Id"] = trace_id
+
+    try:
+        async with httpx.AsyncClient(timeout=settings.whatsapp_send_timeout_seconds) as client:
+            resp = await client.post(url, headers=headers, json={
+                "to": to_phone, "body": body, "contextMessageId": context_message_id,
+            })
+        resp.raise_for_status()
+        sent = bool(resp.json().get("sent"))
+        if sent:
+            logger.info("whatsapp delivered: traceId=%s to=%s", trace_id, to_phone)
+        else:
+            logger.warning("whatsapp send reported false: traceId=%s to=%s", trace_id, to_phone)
+        return {"delivered": sent}
+    except Exception as exc:  # noqa: BLE001 - report and let the caller decide on retry/DLQ
+        logger.error("whatsapp delivery failed: traceId=%s to=%s error=%s", trace_id, to_phone, exc)
+        raise
+
+
 async def deliver_reply(payload: dict, trace_id: Optional[str] = None) -> dict:
     channel = payload.get("channel")
     to_address = payload.get("channelIdentityValue")
@@ -91,25 +134,34 @@ async def deliver_reply(payload: dict, trace_id: Optional[str] = None) -> dict:
     ticket_number = payload.get("ticketNumber")
     origin_message_id = payload.get("originMessageId")
 
-    if channel != "email":
-        logger.info(
-            "ai.reply.send recorded but not delivered: traceId=%s channel=%s "
-            "(no outbound send wired for this channel yet)",
-            trace_id, channel,
-        )
-        return {"delivered": False, "reason": f"no outbound send wired for channel '{channel}'"}
-
     if not to_address:
         logger.warning("ai.reply.send has no channelIdentityValue to reply to: traceId=%s", trace_id)
         return {"delivered": False, "reason": "no destination address"}
 
-    base_subject = IDENTITY_REQUEST_SUBJECT if is_identity_request else DEFAULT_SUBJECT
-    subject = _subject_with_ticket(base_subject, ticket_number)
-    body = message_text + (DO_NOT_REMOVE_NOTE if ticket_number else "")
-    return await send_email(to_address, subject, body, trace_id, in_reply_to=origin_message_id)
+    if channel == "email":
+        base_subject = IDENTITY_REQUEST_SUBJECT if is_identity_request else DEFAULT_SUBJECT
+        subject = _subject_with_ticket(base_subject, ticket_number)
+        body = message_text + (DO_NOT_REMOVE_NOTE if ticket_number else "")
+        return await send_email(to_address, subject, body, trace_id, in_reply_to=origin_message_id)
+
+    if channel == "whatsapp":
+        # No subject/DO_NOT_REMOVE_NOTE: WhatsApp doesn't have a subject line
+        # and dedup/threading there is by phone identity, not a preserved
+        # ticket-number tag (see docs/09... subject-line threading is email-only).
+        return await send_whatsapp(to_address, message_text, trace_id, context_message_id=origin_message_id)
+
+    logger.info(
+        "ai.reply.send recorded but not delivered: traceId=%s channel=%s "
+        "(no outbound send wired for this channel yet)",
+        trace_id, channel,
+    )
+    return {"delivered": False, "reason": f"no outbound send wired for channel '{channel}'"}
 
 
-def _format_ticket_ack_body(ticket_number: str, category: Optional[str], status: str, is_duplicate: bool) -> str:
+def _format_ticket_ack_body(
+    ticket_number: str, category: Optional[str], status: str, is_duplicate: bool,
+    channel: str,
+) -> str:
     lines = [
         "Thank you — your complaint has been recorded." if not is_duplicate
         else "Thank you — we've added your message to your existing complaint.",
@@ -118,13 +170,17 @@ def _format_ticket_ack_body(ticket_number: str, category: Optional[str], status:
         f"Category: {category or 'Uncategorized'}",
         f"Status: {status or 'open'}",
         "",
-        "We'll email you again whenever there's an update, and once this ticket "
+        "We'll notify you again whenever there's an update, and once this ticket "
         "is resolved or closed.",
     ]
-    return "\n".join(lines) + DO_NOT_REMOVE_NOTE
+    body = "\n".join(lines)
+    # DO_NOT_REMOVE_NOTE is about preserving the ticket number in an email
+    # SUBJECT line — WhatsApp has no subject, and dedup there is by phone
+    # identity instead, so the note would be actively misleading.
+    return body + DO_NOT_REMOVE_NOTE if channel == "email" else body
 
 
-async def send_ticket_ack_email(
+async def send_ticket_ack(
     channel: str,
     to_address: Optional[str],
     ticket_number: Optional[str],
@@ -137,11 +193,6 @@ async def send_ticket_ack_email(
     """Structured acknowledgment sent once a citizen's message becomes a
     tracked ticket (new or appended to an existing one) — carries the ticket
     ID so they have a reference for any follow-up (Feature 06 x 14)."""
-    if channel != "email":
-        logger.info("ticket ack recorded but not delivered: traceId=%s channel=%s ticketNumber=%s",
-                     trace_id, channel, ticket_number)
-        return {"delivered": False, "reason": f"no outbound send wired for channel '{channel}'"}
-
     if not to_address:
         logger.warning("ticket ack has no destination address: traceId=%s ticketNumber=%s", trace_id, ticket_number)
         return {"delivered": False, "reason": "no destination address"}
@@ -150,6 +201,15 @@ async def send_ticket_ack_email(
         logger.warning("ticket ack has no ticket number: traceId=%s", trace_id)
         return {"delivered": False, "reason": "no ticket number"}
 
-    subject = TICKET_ACK_SUBJECT_TEMPLATE.format(ticket_number=ticket_number)
-    body = _format_ticket_ack_body(ticket_number, category, status, is_duplicate)
-    return await send_email(to_address, subject, body, trace_id, in_reply_to=origin_message_id)
+    body = _format_ticket_ack_body(ticket_number, category, status, is_duplicate, channel)
+
+    if channel == "email":
+        subject = TICKET_ACK_SUBJECT_TEMPLATE.format(ticket_number=ticket_number)
+        return await send_email(to_address, subject, body, trace_id, in_reply_to=origin_message_id)
+
+    if channel == "whatsapp":
+        return await send_whatsapp(to_address, body, trace_id, context_message_id=origin_message_id)
+
+    logger.info("ticket ack recorded but not delivered: traceId=%s channel=%s ticketNumber=%s",
+                 trace_id, channel, ticket_number)
+    return {"delivered": False, "reason": f"no outbound send wired for channel '{channel}'"}

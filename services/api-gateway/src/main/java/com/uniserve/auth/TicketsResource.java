@@ -1,6 +1,7 @@
 package com.uniserve.auth;
 
 import com.uniserve.adapters.email.EmailAdapter;
+import com.uniserve.adapters.whatsapp.WhatsAppAdapter;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
@@ -39,6 +40,9 @@ public class TicketsResource {
 
     @Inject
     EmailAdapter emailAdapter;
+
+    @Inject
+    WhatsAppAdapter whatsAppAdapter;
 
     @Inject
     TicketNotifier notifier;
@@ -291,10 +295,10 @@ public class TicketsResource {
 
     /**
      * Send an update to the citizen (Feature 12/14): records an outbound
-     * {@code ticket_messages} entry, and — for email-origin tickets — actually
-     * sends it via {@link EmailAdapter#sendReply}. Other channels record the
-     * message but have no outbound send wired yet (WhatsApp Business outbound
-     * send is Phase 2).
+     * {@code ticket_messages} entry, and — for email- or WhatsApp-origin
+     * tickets — actually sends it via {@link EmailAdapter#sendReply} or
+     * {@link WhatsAppAdapter#sendReply}. Other (Phase 2) channels record the
+     * message but have no outbound send wired.
      */
     @POST
     @Path("/{id}/reply")
@@ -328,30 +332,44 @@ public class TicketsResource {
             return Response.status(recorded.status()).entity(recorded.body()).build();
         }
 
-        boolean emailSent = false;
-        String emailError = null;
-        if ("email".equals(channel) && identityId != null) {
+        boolean sent = false;
+        String sendError = null;
+        if (("email".equals(channel) || "whatsapp".equals(channel)) && identityId != null) {
             DbWriterClient.ApiResult identity = db.call("GET", "/api/v1/db/identities/" + identityId, null);
-            String toAddress = identity.status() < 400 ? str(identity.body(), "email") : null;
-            if (toAddress != null && !toAddress.isBlank()) {
-                try {
-                    emailSent = emailAdapter.sendReply(
-                            toAddress, "Update on your complaint " + ticketNumber, content, originMessageId);
-                } catch (Exception e) {
-                    emailError = e.getMessage();
-                    LOG.errorf(e, "Failed to send reply email for ticket %s", id);
+            if ("email".equals(channel)) {
+                String toAddress = identity.status() < 400 ? str(identity.body(), "email") : null;
+                if (toAddress != null && !toAddress.isBlank()) {
+                    try {
+                        sent = emailAdapter.sendReply(
+                                toAddress, "Update on your complaint " + ticketNumber, content, originMessageId);
+                    } catch (Exception e) {
+                        sendError = e.getMessage();
+                        LOG.errorf(e, "Failed to send reply email for ticket %s", id);
+                    }
+                } else {
+                    sendError = "No email address on file for this ticket's identity";
                 }
             } else {
-                emailError = "No email address on file for this ticket's identity";
+                String toPhone = identity.status() < 400 ? str(identity.body(), "phone") : null;
+                if (toPhone != null && !toPhone.isBlank()) {
+                    try {
+                        sent = whatsAppAdapter.sendReply(toPhone, content, originMessageId);
+                    } catch (Exception e) {
+                        sendError = e.getMessage();
+                        LOG.errorf(e, "Failed to send WhatsApp reply for ticket %s", id);
+                    }
+                } else {
+                    sendError = "No phone number on file for this ticket's identity";
+                }
             }
         }
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("recorded", true);
         response.put("channel", channel);
-        response.put("emailSent", emailSent);
-        if (emailError != null) {
-            response.put("emailError", emailError);
+        response.put("sent", sent);
+        if (sendError != null) {
+            response.put("sendError", sendError);
         }
         return Response.ok(response).build();
     }
@@ -385,7 +403,7 @@ public class TicketsResource {
         // transitions the citizen actually cares about — resolved/closed —
         // not on every intermediate status change or standalone note.
         if (result.status() < 400 && ("resolved".equals(toStatus) || "closed".equals(toStatus))) {
-            notifier.sendStatusUpdateEmail(ticket, toStatus, noteContent);
+            notifier.sendStatusUpdate(ticket, toStatus, noteContent);
         }
         return Response.status(result.status()).entity(result.body()).build();
     }

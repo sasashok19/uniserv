@@ -6,12 +6,18 @@
 
 ## What This Module Does
 Receives inbound WhatsApp messages via Meta webhook. Normalises to canonical
-event. Sends outbound replies via Graph API. Identity is pre-confirmed
-(phone number always available from Meta).
+event. Sends outbound replies via Graph API (`WhatsAppAdapter`, called from
+ai-core's `app/notifications/sender.py` and from api-gateway's own
+`TicketNotifier`/`TicketsResource` for status updates and agent replies —
+the same pattern as the email adapter). Identity is pre-confirmed (phone
+number always available from Meta).
 
 ## Boundaries
-**Owns:** Webhook endpoint, HMAC validation, message parsing, outbound send.
-**Does not own:** Identity resolution, AI, ticket logic.
+**Owns:** Webhook endpoint, HMAC validation, message parsing, outbound send
+(`WhatsAppAdapter` + `WhatsAppAdapterResource`).
+**Does not own:** Identity resolution, AI, ticket logic, pre-approved
+template message management (see "24-hour customer service window" below —
+not implemented).
 
 ---
 
@@ -56,6 +62,50 @@ public class WhatsAppWebhookResource {
 | audio | → rawMediaUrls, flag for STT (Phase 2) |
 | interactive button reply | → extract button title as rawText |
 
+This message's own wamid (`message.id`) is captured into `messageId`
+(Feature 15 parity with email's `Message-ID`) — persisted as the ticket's
+`origin_message_id` so an outbound reply can set Graph API's
+`context.message_id` and render as a quoted reply-to in WhatsApp.
+
+---
+
+## Outbound Send
+
+`WhatsAppAdapter.sendReply(toPhone, body, contextMessageId)` — called from
+api-gateway's own citizen-notification code (`TicketNotifier`,
+`TicketsResource`) and, for ai-core's `ai.reply.send` deliveries, via the
+internal HTTP endpoint below (mirrors the email adapter's `/test-send`
+pattern rather than ai-core talking to Meta directly).
+
+```
+POST /api/v1/internal/adapters/whatsapp/send
+Content-Type: application/json
+
+{ "to": "+919876543210", "body": "Your ticket TKT-00042 is now resolved.",
+  "contextMessageId": "wamid.HBgL...=" }
+
+### Expected
+HTTP/1.1 200 OK
+{ "sent": true }
+```
+
+Calls Meta's Graph API: `POST {WHATSAPP_GRAPH_API_BASE_URL}/{WHATSAPP_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages`
+with `{"messaging_product": "whatsapp", "to": "<digits, no leading +>", "type": "text", "text": {"body": ...}, "context": {"message_id": ...}}`,
+`Authorization: Bearer {WHATSAPP_ACCESS_TOKEN}`. A non-2xx Graph API response
+throws, which the caller (`TicketNotifier` — best-effort, logged; ai-core's
+`sender.py` — reported to whoever triggered the send) treats the same as an
+email send failure.
+
+**24-hour customer service window (not worked around).** Meta only allows a
+free-form text message within 24h of the citizen's last inbound message;
+outside that window a pre-approved *template* message is required instead,
+and this adapter doesn't implement template messages — the Graph API call
+just fails. Identity requests/follow-ups happen inside an active
+conversation so this rarely bites, but a resolve/close status update sent
+days after the citizen went quiet could land outside the window and
+silently fail (logged, not surfaced to the agent for the auto-close path;
+surfaced as `sendError` in the dashboard for the manual reply path).
+
 ---
 
 ## Environment Variables
@@ -63,9 +113,14 @@ public class WhatsAppWebhookResource {
 ```env
 WHATSAPP_VERIFY_TOKEN=...
 WHATSAPP_APP_SECRET=...          # for HMAC validation
-WHATSAPP_ACCESS_TOKEN=...        # per-tenant, stored in DB
-WHATSAPP_PHONE_NUMBER_ID=...     # per-tenant, stored in DB
+WHATSAPP_ACCESS_TOKEN=...        # Graph API bearer token (System User token recommended)
+WHATSAPP_PHONE_NUMBER_ID=...     # Meta's numeric phone_number_id (not the phone number itself)
+WHATSAPP_API_VERSION=v21.0       # optional, defaults to v21.0 — bump if Meta retires it
 ```
+
+`WHATSAPP_ACCESS_TOKEN`/`WHATSAPP_PHONE_NUMBER_ID` are env-only in Phase 1
+(not per-tenant DB config — this repo is single-tenant-per-deployment in
+practice; per-tenant storage would be a Phase 2 multi-tenancy extension).
 
 ---
 
@@ -128,6 +183,14 @@ HTTP/1.1 200 OK
 - Phone normalised to E.164 (`+91...`)
 - `verified = true` always for WhatsApp
 - 200 returned within 100ms (async processing)
+- Outbound: payload shape (messaging_product/to/type/text/context), leading
+  `+` stripped from `to`, `context.message_id` set only when a
+  `contextMessageId` is given, 4xx Graph API responses throw with the
+  status+body preserved (`WhatsAppAdapterTest`, against a local stub HTTP
+  server — no live Meta account needed to test this)
+- Best-effort semantics: a failed WhatsApp send never blocks the ticket
+  transition/reply-record write that triggered it (`TicketNotifierTest`,
+  `TicketsResourceReplyTest`)
 
 ---
 
@@ -135,3 +198,5 @@ HTTP/1.1 200 OK
 - Dev HMAC bypass token `sha256=test_bypass_in_dev` is accepted **only** when `APP_ENV=development`; otherwise real HMAC-SHA256 over the raw body is required.
 - `events/latest` returns the reconstructed envelope + channel payload; `threadId` is `null` in Phase 1.
 - Webhook/inspector endpoints are unauthenticated in Phase 1.
+- Outbound send is unauthenticated too (`/api/v1/internal/adapters/whatsapp/send`, PHASE_1 — see 11_MULTI_TENANCY), same as the email adapter's `/test-send`.
+- No pre-approved template message support — see "24-hour customer service window" above.

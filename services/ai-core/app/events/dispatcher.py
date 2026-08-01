@@ -16,7 +16,7 @@ from app.conversation.agent import ChannelIdentityIn, ConversationAgent, TestEve
 from app.events import streams
 from app.events.consumer import BaseConsumer
 from app.identity.db_client import DbWriterClient
-from app.notifications.sender import deliver_reply, send_ticket_ack_email
+from app.notifications.sender import deliver_reply, send_ticket_ack
 from app.tickets.intake import ensure_ticket_stub
 from app.tickets.service import create_ticket_from_complaint
 
@@ -133,7 +133,7 @@ async def _handle_complaint_ready(tenant_id: str, event: dict) -> None:
     logger.info("complaint.ready processed traceId=%s result=%s", trace_id, result)
 
     try:
-        await send_ticket_ack_email(
+        await send_ticket_ack(
             channel=payload.get("channel"),
             to_address=payload.get("channelIdentityValue"),
             ticket_number=result.get("ticketNumber"),

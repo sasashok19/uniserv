@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     # enough for that round trip over Render's free-tier network and caused
     # spurious httpx.ReadTimeout failures once real sending was turned on.
     email_send_timeout_seconds: int = 30
+    # WhatsApp's Graph API call has no SMTP-style handshake, so a much shorter
+    # timeout than email's is enough.
+    whatsapp_send_timeout_seconds: int = 15
 
     # Identity resolver (Feature 03)
     identity_merge_confidence_threshold: float = 0.85

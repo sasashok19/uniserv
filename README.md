@@ -15,6 +15,7 @@ resolution workflow and full audit trail.
 
 ## Contents
 
+- [Live deployment](#live-deployment)
 - [Architecture](#architecture)
 - [Repository layout](#repository-layout)
 - [Ports](#ports)
@@ -35,6 +36,26 @@ resolution workflow and full audit trail.
 - [Feature docs index](#feature-docs-index)
 - [Phase roadmap](#phase-roadmap)
 - [Security notes](#security-notes)
+
+---
+
+## Live deployment
+
+Deployed via each provider's GitHub integration (auto-deploys on push to
+`main`) across the 4-provider $0-cost stack — see
+[Environment variables](#environment-variables) for the per-service config
+each one needs.
+
+| Service    | Provider | URL                                             |
+|------------|----------|--------------------------------------------------|
+| Dashboard  | Vercel   | https://uniserv-delta.vercel.app/                |
+| api-gateway| Render   | https://uniserve-api-gateway.onrender.com         |
+| ai-core    | Render   | https://uniserv-ai-core.onrender.com              |
+| db-writer  | Railway  | https://uniserv-production.up.railway.app         |
+| valkey/Redis | Upstash | (no public URL — accessed via internal `rediss://` connection string) |
+
+Render's free web services cold-start after ~15 min idle, so the first
+request to api-gateway/ai-core after inactivity can be slow.
 
 ---
 
@@ -278,19 +299,22 @@ cd services/db-writer  && mvn quarkus:dev
   See [Configurable per-channel intake fields](#configurable-per-channel-intake-fields).
 - `app/notifications/sender.py` — consumes `ai.reply.send` (a third
   background consumer): actually delivers the conversation agent's replies
-  (identity requests, follow-ups) via api-gateway's email send endpoint.
-  This event used to be published with nothing consuming it — the citizen
-  never received the identity-request email, so no reply was possible and no
-  ticket could ever form. WhatsApp-origin replies are recorded as
-  undeliverable (no outbound WhatsApp send in this codebase — Phase 2). The
+  (identity requests, follow-ups) via api-gateway's email or WhatsApp send
+  endpoint, by channel. This event used to be published with nothing
+  consuming it — the citizen never received the identity-request message,
+  so no reply was possible and no ticket could ever form. The
   identity-request message also tells the citizen their ticket will be
   auto-closed after 14 days without a reply (see
   [Queue separation & ticket lifecycle](#queue-separation--ticket-lifecycle)
-  below). The same module's `send_ticket_ack_email` sends a structured
+  below). The same module's `send_ticket_ack` sends a structured
   acknowledgment — carrying the ticket ID/number, category, and status — as
   soon as a ticket is created or a message is appended to an existing one
   (called from `dispatcher.py`'s `complaint.ready` handler, right after
-  `create_ticket_from_complaint` succeeds).
+  `create_ticket_from_complaint` succeeds). WhatsApp sends are subject to
+  Meta's 24-hour customer service window (see
+  [docs/02b_ADAPTER_WHATSAPP.md](docs/02b_ADAPTER_WHATSAPP.md)) — a
+  pre-approved template message fallback outside that window is not
+  implemented, so a send attempted outside it fails.
 - `app/tickets/intake.py` — `ensure_ticket_stub`/`update_ticket_identity`:
   called from `dispatcher.py` the instant a `channel.message.received` event
   arrives, before the conversation agent even runs, so a ticket exists (and
@@ -429,11 +453,12 @@ cd services/db-writer  && mvn quarkus:dev
   Service/Customer ID is populated by ai-core going forward
   (`create_ticket_from_complaint`); tickets from before that column existed
   fall back to a regex parse of the first message's text
-  (`TicketsResource.detail()`). Sending an update on an email-origin ticket
-  calls `POST /api/v1/tickets/{id}/reply`, which records the outbound
-  message and actually emails the citizen via `EmailAdapter.sendReply`
-  (WhatsApp-origin tickets record the message but have no outbound send
-  wired yet — Phase 2). "Assigned to" is an editable select (lead/admin
+  (`TicketsResource.detail()`). Sending an update calls
+  `POST /api/v1/tickets/{id}/reply`, which records the outbound message and
+  — for email- or WhatsApp-origin tickets — actually sends it via
+  `EmailAdapter.sendReply`/`WhatsAppAdapter.sendReply` (response fields
+  `sent`/`sendError`; other, Phase-2 channels just record the message with
+  no outbound send). "Assigned to" is an editable select (lead/admin
   only, `PATCH /api/v1/tickets/{id}/assign`) resolved to the agent's name
   via `TicketsResource.agentDirectory()`; agents see the name read-only.
   The Ticket Queue table shows the same resolved name in its own
@@ -579,36 +604,45 @@ identity + complaint-gathering flow completed.
 
 ## Citizen-facing notifications
 
-Every citizen-facing email is structured (ticket ID/number, category,
-status) and delivered through api-gateway's `EmailAdapter.sendReply` —
-WhatsApp has no outbound send yet (Phase 2), so these are logged as
-"not delivered" rather than sent for that channel.
+Every citizen-facing notification is structured (ticket ID/number,
+category, status) and delivered through api-gateway's
+`EmailAdapter.sendReply` (email-origin tickets) or
+`WhatsAppAdapter.sendReply` (WhatsApp-origin tickets, Meta Graph API) — any
+other, Phase-2 channel is logged as "not delivered" rather than sent.
+WhatsApp sends are also subject to Meta's 24-hour customer service window
+(no pre-approved template message fallback is implemented — see
+[docs/02b_ADAPTER_WHATSAPP.md](docs/02b_ADAPTER_WHATSAPP.md)).
 
 - **Identity request.** Sent when the identity gate can't resolve who's
   writing in; now explicitly states the request will be auto-closed after
   14 days without a reply (`IDENTITY_REQUEST_MESSAGE`,
-  `app/conversation/agent.py`).
+  `app/conversation/agent.py`). WhatsApp is normally exempt from this in
+  practice — its identity is pre-confirmed by Meta (see
+  [Channel identity rules](docs/02f_ADAPTER_CONTRACT.md)) — but the send
+  path itself is channel-agnostic.
 - **Ticket acknowledgment.** Sent once a ticket is created *or* a message
   is appended to an existing one — carries the ticket ID/number, category,
-  and status (`send_ticket_ack_email`, `app/notifications/sender.py`,
+  and status (`send_ticket_ack`, `app/notifications/sender.py`,
   called from `dispatcher.py`'s `complaint.ready` handler). Best-effort: a
   failed send never rolls back the ticket write.
 - **Status update on resolve/close.** Sent only when a ticket transitions
   *to* `resolved` or `closed` — not on other transitions, and not for a
   standalone "add note" action — including the mandatory transition note's
-  content (`TicketNotifier.sendStatusUpdateEmail`, api-gateway, shared by
+  content (`TicketNotifier.sendStatusUpdate`, api-gateway, shared by
   `TicketsResource`'s manual transition endpoint and
   `TicketAutoCloseScheduler`'s automatic 14-day close).
 
-All three require an email address on file (either the ticket's
-`channel_origin=email` with a resolved `identity_id`, or — for the
-identity-request message — the raw address the citizen wrote in from) and
-silently no-op otherwise (e.g. a WhatsApp-origin ticket, or a ticket that
-never got far enough to have an identity record at all). Every subject
-that carries a ticket number also gets `[Ticket TKT-XXXXX]` appended, and
-the body a "please don't remove the ticket number from the subject" note
+All three require an email address or phone number on file matching the
+ticket's origin channel (either the ticket's `identity_id` resolving to an
+`email`/`phone` on the identity record, or — for the identity-request
+message — the raw address/number the citizen wrote in from) and silently
+no-op otherwise (e.g. a ticket that never got far enough to have an
+identity record at all, or a Phase-2 channel). Every email subject that
+carries a ticket number also gets `[Ticket TKT-XXXXX]` appended, and the
+body a "please don't remove the ticket number from the subject" note
 (`DO_NOT_REMOVE_NOTE`, `app/notifications/sender.py`) — see below for why
-that matters.
+that matters. WhatsApp has no subject line and doesn't dedup by it (see
+below), so that note is intentionally omitted from WhatsApp sends.
 
 ## Subject-line ticket threading & dedup
 
@@ -923,6 +957,8 @@ own tickets and `/agents` performance are lead/admin only via
 **Internal / dev / adapter test endpoints**
 - `POST /api/v1/internal/adapters/email/poll` — manual IMAP poll
 - `POST /api/v1/internal/adapters/email/test-send` — send a test outbound email
+- `POST /api/v1/internal/adapters/whatsapp/send` — send an outbound WhatsApp
+  message via Meta Graph API (called by ai-core's `sender.py`)
 - `GET /api/v1/internal/events/latest?stream=` — inspect the last published event on a stream
 - `POST /api/v1/internal/validate-event` — validate a payload against the adapter contract
 - `POST /api/v1/internal/notifications/test`
@@ -1039,7 +1075,9 @@ Email adapter: `EMAIL_SMTP_MOCK`, `EMAIL_SMTP_HOST`, `EMAIL_SMTP_PORT`,
 user/password default to the SMTP credential if unset — one Gmail App
 Password covers both directions).
 WhatsApp adapter: `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET`,
-`WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`.
+`WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_API_VERSION`
+(default `v21.0` — bump if Meta retires that version; `WHATSAPP_GRAPH_API_BASE_URL`
+also exists but is a test-only seam, not meant to be set in `.env`).
 Other: `DEV_SEED_ENABLED`, `JWT_SECRET`, `JWT_EXPIRY_ACCESS`, `JWT_EXPIRY_REFRESH`,
 `TICKET_AUTO_CLOSE_INTERVAL` (default `1h` — how often the 14-day
 unconfirmed-ticket auto-closer sweeps; see
@@ -1057,9 +1095,12 @@ hardcodes max 1000 / 2-min TTL.)
 `APP_ENV`, `TENANT_ID`, `LOG_LEVEL`, `AI_CORE_PORT`, `VALKEY_URL`,
 `EVENT_BUS_MAX_RETRIES`, `EVENT_BUS_RETRY_DELAY_MS`,
 `EVENT_BUS_CONSUMER_GROUP`, `DB_WRITER_URL`, `DB_WRITER_INTERNAL_API_KEY`,
-`API_GATEWAY_URL` (delivers `ai.reply.send` via api-gateway's email endpoint),
+`API_GATEWAY_URL` (delivers `ai.reply.send` via api-gateway's email or
+WhatsApp send endpoint, by channel),
 `EMAIL_SEND_TIMEOUT_SECONDS` (default 30 — httpx timeout for that call; a
 real SMTP/Resend send is slower than the old mock path),
+`WHATSAPP_SEND_TIMEOUT_SECONDS` (default 15 — Graph API has no SMTP-style
+handshake, so a shorter timeout than email's is enough),
 `IDENTITY_MERGE_CONFIDENCE_THRESHOLD`, `IDENTITY_PENDING_TIMEOUT_HOURS`,
 `IDENTITY_ANON_REF_PREFIX`, `DEFAULT_REGION`, `CONVERSATION_STATE_TTL_HOURS`,
 `AI_MAX_FOLLOWUP_QUESTIONS`, `DEFAULT_LLM_PROVIDER`, `ANTHROPIC_API_KEY`,
@@ -1184,11 +1225,12 @@ where the actual code deviated from (or corrected) the original spec:
 
 ## Phase roadmap
 
-**Phase 1 (built):** Email + WhatsApp channels; identity gate; basic PII
-scrubbing; classification; priority scoring; SQLite WAL via db-writer; full
-agent dashboard (functional-minimal UI); outbound email notifications;
-dev mock seed data; JWT auth + RBAC; transaction tracing & log-level
-control (this doc's [Logging](#logging-log-levels--transaction-tracing) section).
+**Phase 1 (built):** Email + WhatsApp channels (both inbound *and* outbound
+— Meta Graph API send); identity gate; basic PII scrubbing; classification;
+priority scoring; SQLite WAL via db-writer; full agent dashboard
+(functional-minimal UI); outbound email + WhatsApp notifications; dev mock
+seed data; JWT auth + RBAC; transaction tracing & log-level control (this
+doc's [Logging](#logging-log-levels--transaction-tracing) section).
 
 **Not yet wired despite existing code:** the rule-based (no-LLM) identity
 gate recognises "anonymous" or a labeled reply to its structured intake
@@ -1196,9 +1238,11 @@ question (Service/Customer ID, Mobile, Name, Area Pin Code — see
 [Services → ai-core](#services)), but nothing beyond that single-message
 label matching — no real NLU, so e.g. an unlabeled value gets missed (the
 OpenAI Assistants path handles free text correctly via tool-calling); IMAP
-IDLE (real-time push) — polling only; outbound WhatsApp send (Meta Business
-API) — `ai.reply.send` is delivered for email only, WhatsApp replies are
-recorded as undeliverable.
+IDLE (real-time push) — polling only; WhatsApp pre-approved template
+messages — outbound WhatsApp only supports free-form text, which Meta
+restricts to within 24h of the citizen's last inbound message (see
+[docs/02b_ADAPTER_WHATSAPP.md](docs/02b_ADAPTER_WHATSAPP.md)); a send
+attempted outside that window simply fails.
 
 **Phase 2 (planned, not built):** Twitter/IVR/WebChat channels; field-level
 AES-256-GCM encryption for PII columns (`PiiEncryptionService`, KMS/Vault key

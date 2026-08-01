@@ -176,13 +176,14 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
       if (!resp.ok) {
         setSendState("failed");
         setSendResult(data?.error?.message ?? "Failed to send — please try again.");
-      } else if (ticket.channelOrigin === "email") {
-        if (data.emailSent) {
+      } else if (ticket.channelOrigin === "email" || ticket.channelOrigin === "whatsapp") {
+        const via = ticket.channelOrigin === "email" ? "emailed" : "messaged on WhatsApp";
+        if (data.sent) {
           setSendState("sent");
-          setSendResult("Sent — the citizen has been emailed.");
+          setSendResult(`Sent — the citizen has been ${via}.`);
         } else {
           setSendState("failed");
-          setSendResult(`Recorded on the ticket, but the email FAILED: ${data.emailError ?? "unknown reason"}.`);
+          setSendResult(`Recorded on the ticket, but the send FAILED: ${data.sendError ?? "unknown reason"}.`);
         }
       } else {
         setSendState("sent");

@@ -71,7 +71,7 @@ services:
       - key: JWT_EXPIRY_REFRESH
         value: 7d
 
-      # WhatsApp adapter (Feature 02b) — optional, fill in when ready.
+      # WhatsApp adapter (Feature 02b, inbound + outbound) — optional, fill in when ready.
       - key: WHATSAPP_VERIFY_TOKEN
         sync: false
       - key: WHATSAPP_APP_SECRET
@@ -80,6 +80,9 @@ services:
         sync: false
       - key: WHATSAPP_PHONE_NUMBER_ID
         sync: false
+      # Meta deprecates Graph API versions over time; bump if v21.0 is retired.
+      - key: WHATSAPP_API_VERSION
+        value: v21.0
 
       # Never seed dev/demo data in production.
       - key: DEV_SEED_ENABLED
@@ -181,6 +184,9 @@ services:
       # old mock path — bump if this still times out.
       - key: EMAIL_SEND_TIMEOUT_SECONDS
         value: "30"
+      # WhatsApp's Graph API call has no SMTP-style handshake, so this can be shorter.
+      - key: WHATSAPP_SEND_TIMEOUT_SECONDS
+        value: "15"
 
       # Conversation / LLM (Feature 06)
       - key: DEFAULT_LLM_PROVIDER
