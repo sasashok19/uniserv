@@ -272,10 +272,19 @@ cd services/db-writer  && mvn quarkus:dev
   a returning citizen is reused rather than re-requested. It remembers the
   original complaint text across that back-and-forth (saved to Valkey
   conversation state) so the ticket's initial message is the actual
-  complaint, not the intake reply. The OpenAI Assistants path gets a
-  best-effort hint about the mandatory fields injected into its per-turn
-  instructions, but cannot enforce the config as strictly as the rule-based
-  path (its system prompt isn't regenerated per tenant — a known limitation).
+  complaint, not the intake reply. The OpenAI Assistants path enforces the
+  same mandatory-fields config in code, not just as a prompt hint — its
+  system prompt/tool schema isn't regenerated per tenant, so it can't ask
+  intelligently the way the rule-based path does, but
+  `_update_intake_and_get_missing` runs the SAME extractor/validator every
+  turn (merging across turns, so an earlier-satisfied field is never
+  re-asked) and `_tool_confirm_identity`/`_tool_submit_complaint` are gated
+  on the result: a verified channel (e.g. WhatsApp) still resolves identity
+  immediately, but the ticket isn't surfaced as identity-confirmed (moving
+  it into the dashboard's Confirmed queue) and `submit_complaint` is refused
+  until the tenant's mandatory fields for that channel are actually present
+  — fixing a real bug where a bare WhatsApp message with no name/email
+  reached a fully "Confirmed" ticket despite both being mandatory.
   **Conversation memory (Valkey state + the OpenAI thread) is keyed by the
   ticket** (`_conv_key` → `ticket:<id>`), not the per-message email thread key,
   so a citizen's identity reply — which threads off *our* outbound email and so

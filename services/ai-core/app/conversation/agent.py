@@ -320,6 +320,47 @@ class ConversationAgent:
     # OpenAI Assistants API path
     # ------------------------------------------------------------------
 
+    async def _update_intake_and_get_missing(
+        self, req: TestEventRequest, state: dict, field_configs: list[dict], catalog: dict,
+    ) -> list[str]:
+        """Merge this turn's message into the tenant's configured mandatory
+        intake fields and return what's still missing (Feature 15/16 — the
+        assistant-path equivalent of the rule-based path's gate at the top of
+        ``_process_rule_based``).
+
+        The Assistant's own tool schema has no way to express a tenant's
+        configured mandatory fields (``confirm_identity`` only carries
+        identity type/value; ``submit_complaint`` only carries the complaint
+        summary/category) — previously this gate existed ONLY as a per-turn
+        instruction *hint* to the model (see ``_render_additional_instructions``),
+        and that hint itself disappeared the instant a verified channel (e.g.
+        WhatsApp) auto-confirmed identity, before the model had ever asked for
+        Name/Email. That let a bare "Meter not working" WhatsApp message reach
+        a fully-confirmed ticket with none of the tenant's mandatory fields.
+
+        This runs the SAME extractor/validator the rule-based path uses,
+        merging across turns (a field satisfied on an earlier turn is never
+        re-asked), so the result here is enforced in code by
+        ``_tool_confirm_identity``/``_tool_submit_complaint`` — independent of
+        whatever tool the model chooses to call.
+        """
+        if _ANONYMOUS_REPLY_RE.search(req.rawText or ""):
+            state["declared_anonymous"] = True
+        declared_anonymous = bool(state.get("declared_anonymous", False))
+
+        known = None if declared_anonymous else await self._find_known_identity(req)
+        extracted = extract_configured_fields(
+            req.rawText, req.channel, req.channelIdentity.value, req.channelIdentity.verified,
+            field_configs, known=known, catalog=catalog,
+        )
+        intake = state.setdefault("intake", {})
+        for key, entry in extracted.items():
+            existing = intake.get(key)
+            already_satisfied = bool(existing) and existing.get("value") is not None and existing.get("valid", True)
+            if not already_satisfied:
+                intake[key] = entry
+        return missing_fields(intake, field_configs, declared_anonymous, catalog=catalog)
+
     async def _process_via_assistant(self, req: TestEventRequest) -> dict:
         thread_key = self._thread_key(req)
         # Memory + the OpenAI thread are keyed by the stable ticket, not the
@@ -345,18 +386,39 @@ class ConversationAgent:
         catalog = catalog_for_tenant(tenant_config)
         field_configs = fields_for_channel(tenant_config, req.channel, catalog=catalog)
         max_followups = _effective_max_followups(tenant_config)
+        missing = await self._update_intake_and_get_missing(req, state, field_configs, catalog)
 
         user_message = self._render_user_message(req)
         additional_instructions = self._render_additional_instructions(
-            req, state, field_configs, max_followups, catalog)
+            req, state, field_configs, max_followups, catalog, missing)
 
         submitted_this_turn = False
 
         async def execute_tool(name: str, args: dict) -> dict:
-            nonlocal submitted_this_turn
+            nonlocal submitted_this_turn, missing
             if name == "confirm_identity":
-                return await self._tool_confirm_identity(req, state, args)
+                result = await self._tool_confirm_identity(req, state, args, field_configs, catalog)
+                # declaredAnonymous may have just been set true by this call,
+                # which changes which fields are mandatory (mandatoryIfAnonymous)
+                # — refresh so a submit_complaint call later in this SAME turn
+                # is gated against the citizen's actual anonymity choice.
+                missing = result.get("missingFields", missing)
+                return result
             if name == "submit_complaint":
+                if missing:
+                    logger.info(
+                        "submit_complaint refused: mandatory intake fields still missing "
+                        "traceId=%s threadId=%s missing=%s",
+                        req.traceId, thread_key, missing,
+                    )
+                    return {
+                        "error": "intake_incomplete",
+                        "missingFields": missing,
+                        "message": (
+                            "This tenant still requires: " + ", ".join(missing)
+                            + ". Ask the citizen for these before calling submit_complaint again."
+                        ),
+                    }
                 submitted_this_turn = True
                 return await self._tool_submit_complaint(req, thread_key, state, args)
             return {"error": f"unknown tool '{name}'"}
@@ -386,8 +448,13 @@ class ConversationAgent:
             "extractedFields": state["extracted_fields"],
         }
 
-    async def _tool_confirm_identity(self, req: TestEventRequest, state: dict, args: dict) -> dict:
+    async def _tool_confirm_identity(
+        self, req: TestEventRequest, state: dict, args: dict,
+        field_configs: list[dict], catalog: dict,
+    ) -> dict:
         declared_anonymous = bool(args.get("declaredAnonymous", False))
+        if declared_anonymous:
+            state["declared_anonymous"] = True
         identity_type = args.get("identityType") or req.channelIdentity.type
         identity_value = args.get("identityValue") or req.channelIdentity.value
         # Only trust "verified" when the model is confirming the channel's own native
@@ -429,12 +496,24 @@ class ConversationAgent:
         resolver = IdentityResolver(self._db, self._publisher)
         result = await resolver.resolve(resolve_req)
 
-        state["identity_status"] = result.get("identityStatus", state["identity_status"])
+        missing = missing_fields(
+            state.get("intake", {}), field_configs, bool(state.get("declared_anonymous", False)), catalog=catalog,
+        )
+        resolved_status = result.get("identityStatus", state["identity_status"])
+        # Feature 15/16: a verified channel (e.g. WhatsApp) resolves identity
+        # trivially, but that's a different question from "is this ticket
+        # ready to leave the intake gate" — don't surface identity_status as
+        # confirmed/anonymous (which is what moves a ticket into the
+        # dashboard's Confirmed queue, see TicketsResource/dashboard scope
+        # filter) until the tenant's mandatory intake fields are ALSO
+        # satisfied, mirroring the rule-based path's ordering (gate before
+        # resolve).
+        state["identity_status"] = "pending" if missing else resolved_status
         state["master_id"] = result.get("masterId", state.get("master_id"))
         if req.ticketId:
             await update_ticket_identity(
                 self._db, req.ticketId, state["master_id"], state["identity_status"], trace_id=req.traceId)
-        return result
+        return {**result, "identityStatus": state["identity_status"], "missingFields": missing}
 
     async def _tool_submit_complaint(self, req: TestEventRequest, thread_key: str, state: dict, args: dict) -> dict:
         extracted = {
@@ -472,7 +551,7 @@ class ConversationAgent:
     @staticmethod
     def _render_additional_instructions(
         req: TestEventRequest, state: dict, field_configs: list[dict], max_followups: int,
-        catalog: Optional[dict] = None,
+        catalog: Optional[dict] = None, missing: Optional[list[str]] = None,
     ) -> str:
         # max_followups is the tenant-effective budget (Feature 04) threaded in
         # by the caller — generalSettings.maxFollowupQuestions when valid, else
@@ -503,12 +582,16 @@ class ConversationAgent:
         # configured intake fields reach it. Be DIRECTIVE, not a passive hint —
         # the base instructions ("ask for an email or phone number") otherwise
         # win and the model ignores the tenant's field list entirely.
-        if not state.get("complaint_ready") and state.get("identity_status") != "confirmed":
+        #
+        # `missing` (computed server-side by _update_intake_and_get_missing,
+        # merged across turns) is what's actually enforced by
+        # _tool_confirm_identity/_tool_submit_complaint — this is no longer
+        # just a hint the model can ignore. Gating on `missing` directly
+        # (rather than identity_status != "confirmed") matters because a
+        # verified channel (WhatsApp) confirms identity trivially, before any
+        # tenant-mandatory Name/Email has ever been collected.
+        if not state.get("complaint_ready") and missing:
             spec_by_key = catalog if catalog is not None else catalog_for_tenant(None)
-            mandatory = [
-                spec_by_key[fc["key"]]["label"] for fc in field_configs
-                if fc.get("mandatory") and not is_native_field(fc["key"], req.channel, req.channelIdentity.verified)
-            ]
             optional = [
                 spec_by_key[fc["key"]]["label"] for fc in field_configs
                 if not fc.get("mandatory") and not is_native_field(fc["key"], req.channel, req.channelIdentity.verified)
@@ -518,14 +601,15 @@ class ConversationAgent:
                     f"The citizen's email address is already known from the channel ({req.channelIdentity.value}) — "
                     "NEVER ask for their email; treat it as provided."
                 )
-            if mandatory:
-                parts.append(
-                    "This tenant REQUIRES these details before the complaint can be confirmed: "
-                    + ", ".join(mandatory)
-                    + ". Ask for ALL of them (that the citizen hasn't already given) in ONE message"
-                    + (", optionally also offering: " + ", ".join(optional) if optional else "")
-                    + ". Do not ask for anything not in this list."
-                )
+            parts.append(
+                "This tenant still REQUIRES these details before the complaint can be confirmed: "
+                + ", ".join(missing)
+                + ". Ask for ALL of them (that the citizen hasn't already given) in ONE message"
+                + (", optionally also offering: " + ", ".join(optional) if optional else "")
+                + ". Still call confirm_identity immediately as instructed above, but calling "
+                "submit_complaint before these are provided will be REJECTED by the system — it will "
+                "not create the ticket, so keep asking instead."
+            )
             parts.append(
                 "When you call confirm_identity, pass the citizen's name in the `name` argument if they "
                 'have stated it anywhere in this conversation (e.g. "My name is ...").'

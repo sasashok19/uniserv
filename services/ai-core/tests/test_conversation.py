@@ -17,6 +17,7 @@ from app.conversation.agent import (
     TestEventRequest,
     _effective_max_followups,
 )
+from app.conversation.intake_fields import DEFAULT_INTAKE_FIELDS, catalog_for_tenant
 from app.conversation.openai_gateway import OpenAIAssistantGateway
 
 
@@ -469,6 +470,9 @@ def test_openai_gateway_run_turn_drives_tool_call_loop_to_completion():
 
 
 def test_tool_confirm_identity_calls_resolver_and_updates_state():
+    """No mandatory fields configured (empty field_configs) — identity_status
+    passes straight through from the resolver, same as before Feature 15/16's
+    assistant-path intake gate existed."""
     agent = ConversationAgent("t1")
     req = _req(
         channel="whatsapp",
@@ -479,14 +483,20 @@ def test_tool_confirm_identity_calls_resolver_and_updates_state():
     resolved = {"masterId": "m-1", "identityStatus": "confirmed", "isNew": True}
     with patch("app.conversation.agent.IdentityResolver") as resolver_cls:
         resolver_cls.return_value.resolve = AsyncMock(return_value=resolved)
-        result = _run(agent._tool_confirm_identity(req, state, {"declaredAnonymous": False}))
+        result = _run(agent._tool_confirm_identity(req, state, {"declaredAnonymous": False}, [], catalog_for_tenant(None)))
 
-    assert result == resolved
+    assert result == {**resolved, "identityStatus": "confirmed", "missingFields": []}
     assert state["identity_status"] == "confirmed"
     assert state["master_id"] == "m-1"
 
 
 def test_tool_submit_complaint_publishes_complaint_ready():
+    """`_tool_submit_complaint` itself is unconditional by design — the
+    Feature 15/16 mandatory-intake-fields gate lives one level up, in
+    `_process_via_assistant`'s `execute_tool` closure (see the
+    "assistant path: mandatory intake fields gate" tests below), so that
+    submit_complaint's own tool-output shape stays simple regardless of
+    channel/tenant config. This test covers the unconditional path only."""
     agent = ConversationAgent("t1")
     req = _req()
     state = {"identity_status": "confirmed", "master_id": "m-1"}
@@ -520,7 +530,8 @@ def test_tool_confirm_identity_carries_native_email_when_model_confirms_by_phone
 
     with patch("app.conversation.agent.IdentityResolver") as resolver_cls:
         resolver_cls.return_value.resolve = AsyncMock(return_value={"masterId": "m-9", "identityStatus": "confirmed"})
-        _run(agent._tool_confirm_identity(req, state, {"identityType": "phone", "identityValue": "+917890678908"}))
+        _run(agent._tool_confirm_identity(
+            req, state, {"identityType": "phone", "identityValue": "+917890678908"}, [], catalog_for_tenant(None)))
 
     resolve_req = resolver_cls.return_value.resolve.await_args.args[0]
     assert resolve_req.confirmedPhone == "+917890678908"
@@ -538,12 +549,286 @@ def test_tool_confirm_identity_anonymous_does_not_leak_native_email():
     with patch("app.conversation.agent.IdentityResolver") as resolver_cls:
         resolver_cls.return_value.resolve = AsyncMock(
             return_value={"masterId": "m-a", "identityStatus": "anonymous"})
-        _run(agent._tool_confirm_identity(req, state, {"declaredAnonymous": True}))
+        _run(agent._tool_confirm_identity(req, state, {"declaredAnonymous": True}, [], catalog_for_tenant(None)))
 
     resolve_req = resolver_cls.return_value.resolve.await_args.args[0]
     assert resolve_req.declaredAnonymous is True
     assert resolve_req.confirmedEmail is None
     assert resolve_req.confirmedPhone is None
+
+
+# ---------------------------------------------------------------------------
+# Assistant path: mandatory intake fields gate (Feature 15/16 bug fix).
+#
+# Reported bug: a verified WhatsApp sender's very first message ("Meter not
+# working" — no name/email at all) reached a fully "Confirmed" ticket even
+# though the tenant's intake-fields config marks Name and Email mandatory
+# for the whatsapp channel. Root cause: the assistant path's only
+# enforcement of mandatory fields was a per-turn instruction *hint* to the
+# model, gated on `identity_status != "confirmed"` — and WhatsApp's verified
+# phone number confirms identity trivially, before the model had ever asked
+# for anything. `_update_intake_and_get_missing` + the `execute_tool` gates
+# in `_process_via_assistant` are what closes that gap: mandatory fields are
+# now enforced in code, independent of what the model decides to call.
+# ---------------------------------------------------------------------------
+
+def test_update_intake_and_get_missing_flags_everything_missing_on_bare_message():
+    """The exact reported scenario: a brand-new verified WhatsApp number
+    sends a message with no name/email indicators at all."""
+    agent = ConversationAgent("t1")
+    req = _req(
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
+        rawText="Meter not working",
+    )
+    from app.conversation.intake_fields import DEFAULT_INTAKE_FIELDS
+    state = {}
+    with patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)):
+        missing = _run(agent._update_intake_and_get_missing(
+            req, state, DEFAULT_INTAKE_FIELDS["whatsapp"], catalog_for_tenant(None)))
+
+    assert "Name" in missing
+    assert "Email" in missing
+
+
+def test_update_intake_and_get_missing_merges_across_turns():
+    """A field satisfied on an earlier turn must not be re-asked, even
+    though it's absent from the CURRENT turn's raw text — mirrors how the
+    rule-based path never re-asks a field already given."""
+    agent = ConversationAgent("t1")
+    from app.conversation.intake_fields import DEFAULT_INTAKE_FIELDS
+    field_configs = DEFAULT_INTAKE_FIELDS["whatsapp"]
+    state = {}
+
+    req1 = _req(
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
+        rawText="Meter not working",
+    )
+    with patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)):
+        missing1 = _run(agent._update_intake_and_get_missing(req1, state, field_configs, catalog_for_tenant(None)))
+    assert set(missing1) == {"Name", "Email"}
+
+    req2 = _req(
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
+        rawText="My name is Ravi Kumar",
+    )
+    with patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)):
+        missing2 = _run(agent._update_intake_and_get_missing(req2, state, field_configs, catalog_for_tenant(None)))
+    assert missing2 == ["Email"]  # Name satisfied on turn 1, not re-asked
+
+
+def test_update_intake_and_get_missing_known_identity_skips_reasking():
+    """A returning WhatsApp citizen with name+email already on file gets no
+    intake friction — same UX the rule-based path already guarantees."""
+    agent = ConversationAgent("t1")
+    from app.conversation.intake_fields import DEFAULT_INTAKE_FIELDS
+    req = _req(
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
+        rawText="My electricity bill for March is double the usual amount",
+    )
+    known = {"master_id": "m-1", "name": "Ravi Kumar", "email": "ravi@example.com", "phone": "+919876543210"}
+    with patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=known)):
+        missing = _run(agent._update_intake_and_get_missing(
+            req, {}, DEFAULT_INTAKE_FIELDS["whatsapp"], catalog_for_tenant(None)))
+
+    assert missing == []
+
+
+def test_update_intake_and_get_missing_anonymous_drops_name_email_but_keeps_service_id():
+    """Declaring anonymous (detected from raw text, same heuristic as the
+    rule-based path) drops ordinary-mandatory fields but not a field
+    explicitly flagged mandatory-even-if-anonymous."""
+    agent = ConversationAgent("t1")
+    from app.conversation.intake_fields import DEFAULT_INTAKE_FIELDS
+    req = _req(
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
+        rawText="anonymous - my meter is faulty",
+    )
+    with patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)):
+        missing = _run(agent._update_intake_and_get_missing(
+            req, {}, DEFAULT_INTAKE_FIELDS["whatsapp"], catalog_for_tenant(None)))
+
+    assert missing == ["Service/Customer ID"]
+
+
+def test_tool_confirm_identity_holds_ticket_pending_when_mandatory_fields_missing():
+    """The core fix: even though the resolver confirms a verified WhatsApp
+    identity instantly, the TICKET must not be surfaced as identity-confirmed
+    (which is what moves it into the dashboard's Confirmed queue) while
+    Name/Email are still outstanding."""
+    agent = ConversationAgent("t1")
+    from app.conversation.intake_fields import DEFAULT_INTAKE_FIELDS
+    req = _req(
+        ticketId="tkt-whatsapp-1",
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
+        rawText="Meter not working",
+    )
+    state = {"identity_status": "pending", "master_id": None, "intake": {}}
+
+    with patch("app.conversation.agent.IdentityResolver") as resolver_cls, \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})) as update_ticket:
+        resolver_cls.return_value.resolve = AsyncMock(
+            return_value={"masterId": "m-whatsapp-1", "identityStatus": "confirmed"})
+        result = _run(agent._tool_confirm_identity(
+            req, state, {"declaredAnonymous": False}, DEFAULT_INTAKE_FIELDS["whatsapp"], catalog_for_tenant(None)))
+
+    assert state["identity_status"] == "pending"  # NOT "confirmed" — mandatory fields still missing
+    assert result["identityStatus"] == "pending"
+    assert set(result["missingFields"]) == {"Name", "Email"}
+    update_ticket.assert_awaited_once()
+    assert update_ticket.await_args.args[1]["identityStatus"] == "pending"
+
+
+def test_tool_confirm_identity_promotes_to_confirmed_once_mandatory_fields_present():
+    """Positive case: once Name/Email are both in the accumulated intake,
+    confirm_identity DOES surface the real resolved status."""
+    agent = ConversationAgent("t1")
+    from app.conversation.intake_fields import DEFAULT_INTAKE_FIELDS
+    req = _req(
+        ticketId="tkt-whatsapp-2",
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
+        rawText="My name is Ravi Kumar, email ravi@example.com",
+    )
+    state = {"identity_status": "pending", "master_id": None, "intake": {
+        "name": {"value": "Ravi Kumar", "valid": True, "source": "extracted"},
+        "email": {"value": "ravi@example.com", "valid": True, "source": "extracted"},
+    }}
+
+    with patch("app.conversation.agent.IdentityResolver") as resolver_cls, \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})) as update_ticket:
+        resolver_cls.return_value.resolve = AsyncMock(
+            return_value={"masterId": "m-whatsapp-2", "identityStatus": "confirmed"})
+        result = _run(agent._tool_confirm_identity(
+            req, state, {"declaredAnonymous": False}, DEFAULT_INTAKE_FIELDS["whatsapp"], catalog_for_tenant(None)))
+
+    assert state["identity_status"] == "confirmed"
+    assert result["identityStatus"] == "confirmed"
+    assert result["missingFields"] == []
+    assert update_ticket.await_args.args[1]["identityStatus"] == "confirmed"
+
+
+def test_assistant_path_whatsapp_bare_message_does_not_reach_confirmed_or_complaint_ready():
+    """End-to-end regression test for the reported bug, exercising the real
+    `_process_via_assistant` turn (not just the tool handlers in isolation):
+    a brand-new verified WhatsApp sender's first message is "Meter not
+    working" with no name/email. The model calls confirm_identity (as its
+    base instructions tell it to for a verified channel) and then attempts
+    submit_complaint — both must be honoured/refused such that the ticket
+    never reaches the Confirmed queue and no complaint.ready is published."""
+    agent = ConversationAgent("t1")
+    req = _req(
+        ticketId="tkt-whatsapp-3",
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
+        rawText="Meter not working",
+    )
+
+    submit_result_holder = {}
+
+    async def fake_run_turn(tenant_id, state_key, user_message, execute_tool, additional_instructions):
+        await execute_tool("confirm_identity", {"declaredAnonymous": False})
+        submit_result_holder["result"] = await execute_tool(
+            "submit_complaint", {"complaint_summary": "Meter not working", "category_hint": "technical"})
+        return "Could you share your name and email so we can register your complaint?"
+
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=True), \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
+         patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "get_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent, "_save_state", new=AsyncMock()) as save_state, \
+         patch.object(agent._openai, "run_turn", new=AsyncMock(side_effect=fake_run_turn)), \
+         patch.object(agent._db, "add_message", new=AsyncMock(return_value={})), \
+         patch.object(agent, "_publisher") as publisher, \
+         patch("app.conversation.agent.IdentityResolver") as resolver_cls:
+        resolver_cls.return_value.resolve = AsyncMock(
+            return_value={"masterId": "m-whatsapp-3", "identityStatus": "confirmed"})
+        publisher.publish = AsyncMock(return_value="1-0")
+        result = _run(agent.process(req))
+
+    # submit_complaint was refused — no complaint.ready published.
+    assert submit_result_holder["result"]["error"] == "intake_incomplete"
+    assert set(submit_result_holder["result"]["missingFields"]) == {"Name", "Email"}
+    published_streams = [call.args[0] for call in publisher.publish.await_args_list]
+    assert "complaint.ready" not in published_streams
+
+    # The ticket stays "pending" — never surfaced as Confirmed — despite the
+    # resolver having confirmed the (native, verified) WhatsApp identity.
+    assert result["identityStatus"] == "pending"
+    saved_state = save_state.await_args.args[1]
+    assert saved_state["identity_status"] == "pending"
+    assert result["complaintReady"] is False
+
+
+def test_assistant_path_whatsapp_with_name_and_email_reaches_confirmed_and_complaint_ready():
+    """Positive counterpart: once the citizen provides Name+Email (in a
+    labeled, extractable form), the SAME flow succeeds end-to-end."""
+    agent = ConversationAgent("t1")
+    req = _req(
+        ticketId="tkt-whatsapp-4",
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
+        rawText="Name: Ravi Kumar\nEmail: ravi@example.com\nMeter not working",
+    )
+
+    async def fake_run_turn(tenant_id, state_key, user_message, execute_tool, additional_instructions):
+        await execute_tool("confirm_identity", {"declaredAnonymous": False})
+        await execute_tool(
+            "submit_complaint", {"complaint_summary": "Meter not working", "category_hint": "technical"})
+        return "Thanks, we've logged your complaint."
+
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=True), \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
+         patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "get_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent, "_save_state", new=AsyncMock()), \
+         patch.object(agent._openai, "run_turn", new=AsyncMock(side_effect=fake_run_turn)), \
+         patch.object(agent._db, "add_message", new=AsyncMock(return_value={})), \
+         patch.object(agent, "_publisher") as publisher, \
+         patch("app.conversation.agent.IdentityResolver") as resolver_cls:
+        resolver_cls.return_value.resolve = AsyncMock(
+            return_value={"masterId": "m-whatsapp-4", "identityStatus": "confirmed"})
+        publisher.publish = AsyncMock(return_value="1-0")
+        result = _run(agent.process(req))
+
+    assert result["identityStatus"] == "confirmed"
+    assert result["complaintReady"] is True
+    published_streams = [call.args[0] for call in publisher.publish.await_args_list]
+    assert "complaint.ready" in published_streams
+
+
+def test_render_additional_instructions_lists_actually_missing_fields():
+    req = _req(
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
+    )
+    state = {"identity_status": "confirmed", "questions_asked": 0, "complaint_ready": False}
+    instr = ConversationAgent._render_additional_instructions(
+        req, state, DEFAULT_INTAKE_FIELDS["whatsapp"], 2, catalog_for_tenant(None), missing=["Name", "Email"])
+
+    assert "Name" in instr
+    assert "Email" in instr
+    assert "REJECTED" in instr
+
+
+def test_render_additional_instructions_omits_mandatory_hint_when_nothing_missing():
+    """Even with identity_status='confirmed' (the OLD, buggy gating
+    condition), an EMPTY missing list must suppress the block — `missing` is
+    now the sole authority, not identity_status."""
+    req = _req()
+    state = {"identity_status": "confirmed", "questions_asked": 0, "complaint_ready": False}
+    instr = ConversationAgent._render_additional_instructions(req, state, [], 2, {}, missing=[])
+    assert "REQUIRES" not in instr
+    assert "REJECTED" not in instr
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +967,7 @@ def test_assistant_path_persists_inbound_and_ai_reply_when_no_tool_called():
              "identity_status": "confirmed", "master_id": "m-1", "extracted_fields": {"complaint_summary": "x"},
              "questions_asked": 0, "complaint_ready": True,
          })), \
+         patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
          patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
          patch.object(agent._db, "get_ticket", new=AsyncMock(return_value={})), \
          patch.object(agent, "_save_state", new=AsyncMock()), \
@@ -712,9 +998,15 @@ def test_assistant_path_skips_inbound_persist_when_submit_complaint_called():
         await execute_tool("submit_complaint", {"complaint_summary": "billing issue", "category_hint": "billing"})
         return "Thanks, we've logged your complaint."
 
+    # No mandatory intake fields configured for this tenant/channel (empty
+    # list, not absent — see fields_for_channel), so the Feature 15/16 gate
+    # never blocks submit_complaint here; this test is about persistence,
+    # not the intake gate (covered separately above).
+    tenant_config = {"intakeFields": {"email": []}}
     with patch.object(OpenAIAssistantGateway, "is_available", return_value=True), \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
-         patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
+         patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
+         patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value=tenant_config)), \
          patch.object(agent._db, "get_ticket", new=AsyncMock(return_value={})), \
          patch.object(agent, "_save_state", new=AsyncMock()), \
          patch.object(agent._openai, "run_turn", new=AsyncMock(side_effect=fake_run_turn)), \
