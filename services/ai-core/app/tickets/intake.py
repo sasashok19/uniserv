@@ -30,7 +30,7 @@ message that number ever sends, and the old threadId lookup below applied
 no status filter at all. That meant a citizen whose ticket had already been
 resolved, texting weeks later about something completely unrelated, got
 silently appended to the old, resolved ticket rather than starting a new
-one. Two fixes, both channel-agnostic in principle:
+one. Fixes, all channel-agnostic in principle:
 - An explicit `TKT-XXXXX` reference now resolves regardless of channel —
   checked in the raw message body, not just an email subject, so a citizen
   on ANY channel who mentions a ticket number gets routed to it exactly
@@ -40,15 +40,23 @@ one. Two fixes, both channel-agnostic in principle:
   accidental thread-key collision (WhatsApp) must never resurrect a closed
   ticket, whereas a citizen-typed reference still can (that's a deliberate
   citizen action, e.g. reopening).
-- For a channel with no subject line at all (WhatsApp today), once neither
-  of those match, resolution falls back to identity + open-ticket count:
-  zero open tickets -> new; exactly one -> append (matches the identity+
-  category dedup `check_duplicate` already does for the no-stub case); two
-  or more -> still create a new ticket rather than guessing which one this
-  continues (a wrong silent merge is worse than an extra ticket an agent
-  can merge by hand) — a full "which of your N open complaints is this"
-  back-and-forth is not implemented yet (see README's "Subject-line ticket
-  threading & dedup" section).
+- For a channel with no subject line at all (WhatsApp today), resolution
+  now tries identity + open-ticket count BEFORE the threadId match, not
+  after: zero open tickets -> new; exactly one -> append (matches the
+  identity+category dedup `check_duplicate` already does for the no-stub
+  case); two or more -> still create a new ticket rather than guessing
+  which one this continues (a wrong silent merge is worse than an extra
+  ticket an agent can merge by hand). The threadId match is now reached
+  ONLY when identity hasn't linked to any ticket yet (still a safety net
+  for that narrow window) — it used to run FIRST, which meant it always
+  won as long as a single ticket for that phone number was open, silently
+  reusing it for a genuinely unrelated new complaint (reported live: a
+  second, different complaint got appended as a note onto an existing
+  "No power" ticket) — the exact "too coarse a signal" failure mode
+  category-based dedup had for email, just recreated one layer deeper.
+  A full "which of your N open complaints is this" back-and-forth is not
+  implemented yet (see README's "Subject-line ticket threading & dedup"
+  section).
 """
 
 import logging
@@ -103,11 +111,12 @@ async def ensure_ticket_stub(
     transport thread/message-id tracking (In-Reply-To headers, etc.) fails
     or the citizen re-quotes an old message in a new one. `thread_key`
     itself is unique per email when there's no real In-Reply-To (see
-    `ConversationAgent._thread_key`), so the threadId lookup below only
-    ever matches a GENUINE prior thread for email, never an unrelated new
-    email from the same address; for WhatsApp (a stable per-phone key),
-    that same lookup is guarded by an open-status requirement instead (see
-    module docstring).
+    `ConversationAgent._thread_key`), so the threadId lookup is a
+    perfectly good PRIMARY signal for email; for WhatsApp (a stable
+    per-phone key, not a per-conversation one) it's only a safety-net
+    FALLBACK for the narrow window before identity has linked to a ticket
+    at all — see module docstring for why it can't be the primary signal
+    there.
     """
     referenced = extract_ticket_number(subject) or extract_ticket_number(raw_text)
     if referenced:
@@ -118,10 +127,6 @@ async def ensure_ticket_stub(
             return {"id": matches[0]["id"], "ticketNumber": matches[0].get("ticket_number")}
         logger.warning("message referenced unknown ticket traceId=%s ticketNumber=%s — treating as new",
                         trace_id, referenced)
-
-    existing = await db.list_tickets(tenant_id, threadId=thread_key, status=OPEN_STATUSES, trace_id=trace_id)
-    if existing:
-        return {"id": existing[0]["id"], "ticketNumber": existing[0].get("ticket_number")}
 
     if channel != "email" and channel_identity_value:
         identity = await _find_identity_for_channel(
@@ -140,7 +145,23 @@ async def ensure_ticket_stub(
                     "rather than guessing which one this continues traceId=%s masterId=%s",
                     len(open_tickets), trace_id, identity["master_id"],
                 )
+                return await _create_stub(db, tenant_id, thread_key, channel, origin_message_id, trace_id)
+            # Exactly zero open tickets linked to this identity — fall
+            # through to the thread-key check below (safety net for a
+            # ticket that hasn't been linked to the identity yet, e.g.
+            # still on its very first turn).
 
+    existing = await db.list_tickets(tenant_id, threadId=thread_key, status=OPEN_STATUSES, trace_id=trace_id)
+    if existing:
+        return {"id": existing[0]["id"], "ticketNumber": existing[0].get("ticket_number")}
+
+    return await _create_stub(db, tenant_id, thread_key, channel, origin_message_id, trace_id)
+
+
+async def _create_stub(
+    db: DbWriterClient, tenant_id: str, thread_key: str, channel: str,
+    origin_message_id: Optional[str], trace_id: Optional[str],
+) -> dict:
     ticket = await db.create_ticket({
         "tenantId": tenant_id,
         "threadId": thread_key,

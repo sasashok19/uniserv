@@ -110,10 +110,10 @@ def test_ensure_ticket_stub_does_not_reuse_resolved_whatsapp_ticket():
     """The exact reported bug: an old RESOLVED ticket must not be silently
     reused just because it shares the same (permanent, per-phone) thread key."""
     db = AsyncMock()
-    # 1st call: threadId lookup, status-filtered -> the resolved ticket is
-    # correctly excluded by db-writer's status filter, so it comes back empty.
-    # 2nd call: identityId lookup for open tickets -> also empty (the
-    # citizen's only ticket is the resolved one, which isn't "open").
+    # 1st call: identityId lookup for open tickets -> empty (the citizen's
+    # only ticket is the resolved one, which isn't "open").
+    # 2nd call: threadId lookup (fallback for the not-yet-linked window) ->
+    # also empty -- the resolved ticket is correctly excluded by the status filter.
     db.list_tickets = AsyncMock(side_effect=[[], []])
     db.find_by_phone = AsyncMock(return_value={"master_id": "m-1"})
     db.create_ticket = AsyncMock(return_value={"id": "t-new", "ticketNumber": "TKT-00050"})
@@ -126,21 +126,19 @@ def test_ensure_ticket_stub_does_not_reuse_resolved_whatsapp_ticket():
     assert stub == {"id": "t-new", "ticketNumber": "TKT-00050"}
     db.create_ticket.assert_awaited_once()
     first_call = db.list_tickets.await_args_list[0]
-    assert first_call.kwargs["threadId"] == "whatsapp:+919876543210"
+    assert first_call.kwargs["identityId"] == "m-1"
     assert first_call.kwargs["status"] == OPEN_STATUSES
     second_call = db.list_tickets.await_args_list[1]
-    assert second_call.kwargs["identityId"] == "m-1"
+    assert second_call.kwargs["threadId"] == "whatsapp:+919876543210"
     assert second_call.kwargs["status"] == OPEN_STATUSES
 
 
 def test_ensure_ticket_stub_whatsapp_appends_to_sole_open_ticket():
     """A genuine follow-up (identity has exactly one currently-open ticket)
-    still gets appended, not duplicated."""
+    still gets appended, not duplicated — resolved via identity FIRST, never
+    reaching the threadId fallback at all."""
     db = AsyncMock()
-    db.list_tickets = AsyncMock(side_effect=[
-        [],  # threadId lookup misses (nothing OPEN with this exact key)
-        [{"id": "t-open-1", "ticket_number": "TKT-00060"}],  # identity's sole open ticket
-    ])
+    db.list_tickets = AsyncMock(return_value=[{"id": "t-open-1", "ticket_number": "TKT-00060"}])
     db.find_by_phone = AsyncMock(return_value={"master_id": "m-2"})
     db.create_ticket = AsyncMock()
 
@@ -151,16 +149,18 @@ def test_ensure_ticket_stub_whatsapp_appends_to_sole_open_ticket():
 
     assert stub == {"id": "t-open-1", "ticketNumber": "TKT-00060"}
     db.create_ticket.assert_not_called()
+    db.list_tickets.assert_awaited_once_with(
+        "t1", identityId="m-2", status=OPEN_STATUSES, sortBy="createdAt", sortDir="desc", trace_id="tr-7")
 
 
 def test_ensure_ticket_stub_whatsapp_creates_new_when_multiple_open_tickets():
     """Genuinely ambiguous (2+ open tickets, no explicit reference) — the
-    safe default is a NEW ticket, never a silent guess-merge."""
+    safe default is a NEW ticket, never a silent guess-merge. Resolved
+    entirely via identity — the threadId fallback is never consulted, since
+    that would just pick one of the very tickets just judged ambiguous."""
     db = AsyncMock()
-    db.list_tickets = AsyncMock(side_effect=[
-        [],
-        [{"id": "t-open-1", "ticket_number": "TKT-00061"}, {"id": "t-open-2", "ticket_number": "TKT-00062"}],
-    ])
+    db.list_tickets = AsyncMock(
+        return_value=[{"id": "t-open-1", "ticket_number": "TKT-00061"}, {"id": "t-open-2", "ticket_number": "TKT-00062"}])
     db.find_by_phone = AsyncMock(return_value={"master_id": "m-3"})
     db.create_ticket = AsyncMock(return_value={"id": "t-new-2", "ticketNumber": "TKT-00070"})
 
@@ -170,6 +170,7 @@ def test_ensure_ticket_stub_whatsapp_creates_new_when_multiple_open_tickets():
         channel_identity_value="+919876543212", trace_id="tr-8"))
 
     assert stub == {"id": "t-new-2", "ticketNumber": "TKT-00070"}
+    db.list_tickets.assert_awaited_once()
 
 
 def test_ensure_ticket_stub_whatsapp_brand_new_number_creates_new_without_identity_lookup_crash():

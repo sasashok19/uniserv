@@ -750,13 +750,29 @@ resolved ticket instead of starting a new one. Fixed in `ensure_ticket_stub`
   (`open,assigned,in_progress,reopened` — `app/dedup/service.py`'s
   `OPEN_STATUSES`, now also including `reopened`, which it was previously
   missing).
-- For a channel with no subject line at all (WhatsApp today), once neither
-  an explicit reference nor an open threadId match, resolution falls back
-  to identity + open-ticket count: zero open tickets → new; exactly one →
-  append (the same identity+open-status logic `check_duplicate` already
-  used for the no-stub case); two or more → still create a NEW ticket
-  rather than guessing which one this continues — a wrong silent merge is
-  worse than an extra ticket an agent can merge by hand.
+- For a channel with no subject line at all (WhatsApp today), resolution
+  now tries identity + open-ticket count BEFORE the threadId match, not
+  after: zero open tickets → new; exactly one → append (the same
+  identity+open-status logic `check_duplicate` already used for the
+  no-stub case); two or more → still create a NEW ticket rather than
+  guessing which one this continues — a wrong silent merge is worse than
+  an extra ticket an agent can merge by hand. The threadId match is now
+  reached ONLY as a fallback for the narrow window before identity has
+  linked to any ticket yet — **live-testing found it used to run FIRST**,
+  which meant it always won as long as a single ticket for that phone
+  number was open, silently reusing it for a genuinely unrelated new
+  complaint ("Put not closed" got appended onto an existing "No power"
+  ticket) — the exact "too coarse a signal" failure category-based dedup
+  had for email, recreated one layer deeper.
+- **Known remaining limitation (exactly one open ticket, different topic).**
+  Count-based resolution genuinely cannot distinguish "a follow-up on my
+  one open ticket" from "an unrelated second complaint, and I happen to
+  have exactly one other open ticket" — both look identical by count
+  alone, and a keyword classifier can't help either (an uncategorizable
+  message like "Put not closed" gives no signal either way). Closing this
+  needs a real content-level judgment (does this message plausibly
+  continue the existing ticket's summary, or not) — see the Feature 18
+  message-quality check below, which this reuses.
 - **Not implemented** (deliberately deferred, documented so it isn't
   mistaken for an oversight): a citizen swipe-replying to a specific
   WhatsApp message (`context.id`) is already captured as `inReplyTo`, but
