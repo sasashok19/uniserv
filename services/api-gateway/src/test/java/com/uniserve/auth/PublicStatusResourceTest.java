@@ -34,9 +34,12 @@ class PublicStatusResourceTest {
         // The exact reported bug: TKT-00013 exists but has no direct lookup
         // path -- previously always fell through to the anon-ref branch,
         // which can never match a ticket number, and 404'd despite the
-        // ticket existing.
+        // ticket existing. NOTE: deliberately no "tenant_id" key here --
+        // TicketService.list()'s projection never includes it (unlike the
+        // single-ticket GET), and reading it as if it did was a second,
+        // live-only regression this test now guards against.
         when(db.listTickets("tenantId=t1&ticketNumber=TKT-00013")).thenReturn(List.of(Map.of(
-                "id", "tkt-id-13", "ticket_number", "TKT-00013", "tenant_id", "t1",
+                "id", "tkt-id-13", "ticket_number", "TKT-00013",
                 "identity_id", "m-1", "status", "open", "category", "outage")));
         when(db.listTickets("tenantId=t1&identityId=m-1")).thenReturn(List.of(
                 Map.of("ticket_number", "TKT-00013", "status", "open", "category", "outage", "updated_at", "2026-08-01"),
@@ -56,7 +59,7 @@ class PublicStatusResourceTest {
     @Test
     void ticketNumberLookupIsCaseInsensitive() {
         when(db.listTickets("tenantId=t1&ticketNumber=tkt-00013")).thenReturn(List.of(Map.of(
-                "id", "tkt-id-13", "ticket_number", "TKT-00013", "tenant_id", "t1", "identity_id", "m-1")));
+                "id", "tkt-id-13", "ticket_number", "TKT-00013", "identity_id", "m-1")));
         when(db.listTickets("tenantId=t1&identityId=m-1")).thenReturn(List.of(
                 Map.of("ticket_number", "TKT-00013", "status", "open", "category", "outage", "updated_at", "2026-08-01")));
 

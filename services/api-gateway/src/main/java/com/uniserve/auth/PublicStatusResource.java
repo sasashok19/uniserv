@@ -88,11 +88,15 @@ public class PublicStatusResource {
             return notFound(ticketNumber);
         }
         Map<String, Object> matched = matches.get(0);
-        String tenantId = String.valueOf(matched.get("tenant_id"));
+        // NOTE: TicketService.list()'s projection (LIST_COLUMNS) does not
+        // include tenant_id (unlike the single-ticket GET, which uses
+        // Ticket#toMap()) -- reading matched.get("tenant_id") here previously
+        // always returned null, silently producing zero expanded results.
+        // This lookup only ever runs against the gateway's own tenant anyway.
         Object identityId = matched.get("identity_id");
 
         List<Map<String, Object>> tickets = (identityId != null)
-                ? db.listTickets("tenantId=" + enc(tenantId) + "&identityId=" + enc(String.valueOf(identityId)))
+                ? db.listTickets("tenantId=" + enc(defaultTenant) + "&identityId=" + enc(String.valueOf(identityId)))
                 : matches;
         return ok(ticketNumber, false, tickets);
     }
