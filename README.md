@@ -301,6 +301,17 @@ cd services/db-writer  && mvn quarkus:dev
   word-boundary check — without it, "email" matched mid-word inside the
   citizen's own address (`miscemail19@gmail.com` contains "email" as a
   substring), silently truncating the captured value.
+  **Contradictory identity-gate instructions for email (live-testing
+  fix).** The Assistant's base instructions said to *ask* the citizen for
+  an email/phone whenever the channel isn't "verified" — true for email
+  (Meta-style channel verification doesn't apply to it), but the separate
+  per-turn hint said the opposite ("never ask, it's already known from the
+  From address"). Live testing showed the model resolving this
+  contradiction by calling no tool at all on the first email turn, never
+  confirming identity. Fixed by having the base instructions explicitly
+  treat email's own From address the same as a verified channel for this
+  decision — `confirm_identity` is called immediately either way, with the
+  tenant's other required fields still tracked and gated separately.
   **Conversation memory (Valkey state + the OpenAI thread) is keyed by the
   ticket** (`_conv_key` → `ticket:<id>`), not the per-message email thread key,
   so a citizen's identity reply — which threads off *our* outbound email and so
@@ -1041,7 +1052,10 @@ own tickets and `/agents` performance are lead/admin only via
 
 **Internal / dev / adapter test endpoints**
 - `POST /api/v1/internal/adapters/email/poll` — manual IMAP poll
-- `POST /api/v1/internal/adapters/email/test-send` — send a test outbound email
+- `POST /api/v1/internal/adapters/email/test-send` — send a test outbound email;
+  `{sent:true}` on success, `502 {sent:false, error:<real message>}` on a
+  provider failure (e.g. Resend's sandbox recipient restriction — see
+  [docs/02a_ADAPTER_EMAIL.md](docs/02a_ADAPTER_EMAIL.md))
 - `POST /api/v1/internal/adapters/whatsapp/send` — send an outbound WhatsApp
   message via Meta Graph API (called by ai-core's `sender.py`)
 - `GET /api/v1/internal/events/latest?stream=` — inspect the last published event on a stream

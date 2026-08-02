@@ -41,6 +41,18 @@ DO_NOT_REMOVE_NOTE = (
 )
 
 
+def _error_body_snippet(exc: Exception) -> Optional[str]:
+    """api-gateway's own error response body, when the failure is an HTTP
+    error status — httpx's default exception message ("Server error '500...'
+    for url ...") never includes it, so without this the REAL cause (e.g.
+    Resend's 403 detail) only ever showed up in api-gateway's logs, not
+    ai-core's, forcing a cross-service log hunt for every delivery failure."""
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    return response.text[:500]
+
+
 def _subject_with_ticket(base_subject: str, ticket_number: Optional[str]) -> str:
     if not ticket_number:
         return base_subject
@@ -88,7 +100,8 @@ async def send_email(
             logger.warning("email send reported false: traceId=%s to=%s", trace_id, to_address)
         return {"delivered": sent}
     except Exception as exc:  # noqa: BLE001 - report and let the caller decide on retry/DLQ
-        logger.error("email delivery failed: traceId=%s to=%s error=%s", trace_id, to_address, exc)
+        logger.error("email delivery failed: traceId=%s to=%s error=%s body=%s",
+                      trace_id, to_address, exc, _error_body_snippet(exc))
         raise
 
 
@@ -122,7 +135,8 @@ async def send_whatsapp(
             logger.warning("whatsapp send reported false: traceId=%s to=%s", trace_id, to_phone)
         return {"delivered": sent}
     except Exception as exc:  # noqa: BLE001 - report and let the caller decide on retry/DLQ
-        logger.error("whatsapp delivery failed: traceId=%s to=%s error=%s", trace_id, to_phone, exc)
+        logger.error("whatsapp delivery failed: traceId=%s to=%s error=%s body=%s",
+                      trace_id, to_phone, exc, _error_body_snippet(exc))
         raise
 
 

@@ -7,6 +7,7 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
 
 import java.util.Map;
 
@@ -21,6 +22,8 @@ import java.util.Map;
  */
 @Path("/api/v1/internal/adapters/email")
 public class EmailAdapterResource {
+
+    private static final Logger LOG = Logger.getLogger(EmailAdapterResource.class);
 
     @Inject
     EmailAdapter emailAdapter;
@@ -50,11 +53,23 @@ public class EmailAdapterResource {
                     .entity(Map.of("sent", false, "error", "'to' is required"))
                     .build();
         }
-        boolean sent = emailAdapter.sendReply(
-                request.to(),
-                request.subject() == null ? "(no subject)" : request.subject(),
-                request.body() == null ? "" : request.body(),
-                request.inReplyToMessageId());
-        return Response.ok(Map.of("sent", sent)).build();
+        // Caught here (rather than left to Quarkus's default handler) so the
+        // REAL failure — e.g. Resend's 403 "you can only send to your own
+        // verified address" — reaches ai-core's caller as a readable message
+        // instead of a bare, generic 500 that hides which upstream call
+        // actually failed and why.
+        try {
+            boolean sent = emailAdapter.sendReply(
+                    request.to(),
+                    request.subject() == null ? "(no subject)" : request.subject(),
+                    request.body() == null ? "" : request.body(),
+                    request.inReplyToMessageId());
+            return Response.ok(Map.of("sent", sent)).build();
+        } catch (Exception e) {
+            LOG.errorf(e, "test-send failed for to=%s", request.to());
+            return Response.status(Response.Status.BAD_GATEWAY)
+                    .entity(Map.of("sent", false, "error", e.getMessage()))
+                    .build();
+        }
     }
 }

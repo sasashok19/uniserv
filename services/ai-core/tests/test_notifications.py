@@ -3,7 +3,10 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.notifications.sender import deliver_reply, send_ticket_ack, send_whatsapp
+import httpx
+import pytest
+
+from app.notifications.sender import _error_body_snippet, deliver_reply, send_email, send_ticket_ack, send_whatsapp
 
 
 def _run(coro):
@@ -145,6 +148,58 @@ def test_deliver_reply_reports_failure_without_raising_when_gateway_says_not_sen
     with patch("app.notifications.sender.httpx.AsyncClient", return_value=ctx):
         result = _run(deliver_reply(payload))
     assert result == {"delivered": False}
+
+
+# ---------------------------------------------------------------------------
+# Cross-service debuggability fix: api-gateway's real error detail (e.g.
+# Resend's 403 "you can only send to your own verified address") previously
+# only ever appeared in api-gateway's OWN logs — httpx's default exception
+# message doesn't include the response body, so ai-core's log line said
+# nothing more than "Server error '500...'", forcing a cross-service log
+# hunt for every delivery failure.
+# ---------------------------------------------------------------------------
+
+def test_error_body_snippet_extracts_response_text_from_http_status_error():
+    request = httpx.Request("POST", "https://example.test/test-send")
+    response = httpx.Response(403, text='{"message":"Resend 403 detail"}', request=request)
+    exc = httpx.HTTPStatusError("error", request=request, response=response)
+    assert _error_body_snippet(exc) == '{"message":"Resend 403 detail"}'
+
+
+def test_error_body_snippet_returns_none_for_non_http_exceptions():
+    assert _error_body_snippet(ValueError("boom")) is None
+
+
+def test_send_email_logs_the_real_error_body_on_http_failure(caplog):
+    request = httpx.Request("POST", "https://example.test/test-send")
+    response = httpx.Response(403, text='{"message":"Resend 403 detail"}', request=request)
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=response)
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=client)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("app.notifications.sender.httpx.AsyncClient", return_value=ctx), \
+         pytest.raises(httpx.HTTPStatusError):
+        _run(send_email("citizen@citizen-mail.dev", "Subject", "Body"))
+
+    assert "Resend 403 detail" in caplog.text
+
+
+def test_send_whatsapp_logs_the_real_error_body_on_http_failure(caplog):
+    request = httpx.Request("POST", "https://example.test/send")
+    response = httpx.Response(500, text="upstream WhatsApp error detail", request=request)
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=response)
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=client)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("app.notifications.sender.httpx.AsyncClient", return_value=ctx), \
+         pytest.raises(httpx.HTTPStatusError):
+        _run(send_whatsapp("+919876543210", "hello"))
+
+    assert "upstream WhatsApp error detail" in caplog.text
 
 
 def test_send_ticket_ack_includes_ticket_number_in_subject_and_body_for_email():
