@@ -155,6 +155,13 @@ class TestEventRequest(BaseModel):
     # ConversationAgent._thread_key). Also persisted as the ticket's
     # origin_message_id for outbound reply threading.
     messageId: Optional[str] = None
+    # Feature 19: the id of the message THIS one replies to -- a WhatsApp
+    # swipe-reply's context.id (Meta's quoted-message reference) or an
+    # email's In-Reply-To header. When it matches some OTHER ticket's own
+    # origin_message_id, that's the most explicit "this continues that
+    # ticket" signal a citizen can give -- see app/tickets/intake.py
+    # ensure_ticket_stub, which checks it before any text/identity heuristic.
+    inReplyTo: Optional[str] = None
 
 
 class ConversationAgent:

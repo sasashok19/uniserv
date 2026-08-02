@@ -200,3 +200,16 @@ HTTP/1.1 200 OK
 - Webhook/inspector endpoints are unauthenticated in Phase 1.
 - Outbound send is unauthenticated too (`/api/v1/internal/adapters/whatsapp/send`, PHASE_1 — see 11_MULTI_TENANCY), same as the email adapter's `/test-send`.
 - No pre-approved template message support — see "24-hour customer service window" above.
+- **Swipe-reply ticket matching (Feature 19).** A citizen's swipe-reply to a
+  specific WhatsApp message carries Meta's `context.id` (the quoted
+  message's wamid) in the webhook payload — `WhatsAppParser` has always
+  captured this as `inReplyTo` on the `ChannelMessageReceived` event, but
+  it went unused for inbound ticket routing until now (only outbound reply
+  threading consumed it). ai-core's `ensure_ticket_stub`
+  (`app/tickets/intake.py`) now checks it FIRST: if `inReplyTo` matches a
+  ticket's own `origin_message_id`, that ticket is used directly — the most
+  explicit continuation signal a citizen can give, ahead of an explicit
+  `TKT-XXXXX` mention in the text or the identity/same-topic heuristic. See
+  the README's "Subject-line ticket threading & dedup" section for the
+  live-tested bug this fixes (a swipe-reply follow-up with no topical
+  overlap to its parent message was creating a duplicate ticket).

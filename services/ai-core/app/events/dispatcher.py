@@ -67,6 +67,7 @@ async def _handle_channel_message(tenant_id: str, event: dict) -> None:
         threadId=payload.get("threadId"),
         subject=payload.get("subject"),
         messageId=payload.get("messageId"),
+        inReplyTo=payload.get("inReplyTo"),
         traceId=trace_id,
     )
     thread_key = ConversationAgent._thread_key(req)
@@ -110,7 +111,7 @@ async def _handle_channel_message(tenant_id: str, event: dict) -> None:
         DbWriterClient(), tenant_id, thread_key, req.channel,
         subject=req.subject, raw_text=req.rawText,
         channel_identity_type=req.channelIdentity.type, channel_identity_value=req.channelIdentity.value,
-        origin_message_id=req.messageId, trace_id=trace_id)
+        origin_message_id=req.messageId, in_reply_to=req.inReplyTo, trace_id=trace_id)
     req.ticketId = stub["id"]
     req.ticketNumber = stub.get("ticketNumber")
     try:

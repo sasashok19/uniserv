@@ -86,6 +86,23 @@ def test_whatsapp_never_runs_the_coherence_precheck():
     assess.assert_not_called()
 
 
+def test_in_reply_to_is_forwarded_from_payload_to_ensure_ticket_stub():
+    """Feature 19: the WhatsApp adapter's context.id (or email's
+    In-Reply-To) rides in the event payload as inReplyTo -- must reach
+    ensure_ticket_stub as in_reply_to, or swipe-reply matching is dead on
+    arrival regardless of how well the intake-side logic is written."""
+    with patch("app.events.dispatcher.ensure_ticket_stub", new=AsyncMock(
+            return_value={"id": "t-14", "ticketNumber": "TKT-00014"})) as ensure_stub, \
+         patch("app.events.dispatcher.ConversationAgent") as agent_cls:
+        agent_cls.return_value.process = AsyncMock(return_value={"complaintReady": False})
+        event = _event("whatsapp", "It happens around 11PM",
+                        identity_value="+919876543213", identity_type="phone")
+        event["payload"]["inReplyTo"] = "wamid.ORIGINAL123"
+        _run(_handle_channel_message("t1", event))
+
+    assert ensure_stub.await_args.kwargs["in_reply_to"] == "wamid.ORIGINAL123"
+
+
 def test_auto_generated_email_short_circuits_before_the_coherence_check():
     """A bounce/DSN must never spend an LLM call on the coherence check --
     the existing auto-generated-mail skip must still run first."""

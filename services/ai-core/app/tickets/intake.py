@@ -70,6 +70,20 @@ open ticket at the time. Closed with a real content judgment
 against the existing ticket's own original complaint text — best-effort
 (falls back to "same topic", i.e. append, on any LLM failure/unavailability,
 same as every other LLM-assisted decision in this codebase).
+
+Feature 19: even Feature 18's same-topic judgment can misfire on a short,
+context-free follow-up ("It happens around 11PM" alone gives no topic
+signal either way) — live-tested, this created a needless duplicate ticket
+for a citizen who had explicitly swipe-replied to their original WhatsApp
+message. A swipe-reply's quoted-message id (Meta's `context.id`) was
+already captured by the WhatsApp adapter but never used for inbound
+routing, only for outbound reply threading. `ensure_ticket_stub` now
+checks it FIRST, against every ticket's own `origin_message_id` — the most
+explicit, un-inferred continuation signal a citizen can give, ahead of
+even an explicit ticket-number-in-text match. Requires a new
+`originMessageId` filter on db-writer's `GET /api/v1/db/tickets`
+(`TicketService.buildWhere`), since routing needs to look a message up by
+what it's a reply to, not just by ticket number/thread/identity.
 """
 
 import logging
@@ -114,24 +128,48 @@ async def ensure_ticket_stub(
     db: DbWriterClient, tenant_id: str, thread_key: str, channel: str,
     subject: Optional[str] = None, raw_text: Optional[str] = None,
     channel_identity_type: Optional[str] = None, channel_identity_value: Optional[str] = None,
-    origin_message_id: Optional[str] = None, trace_id: Optional[str] = None,
+    origin_message_id: Optional[str] = None, in_reply_to: Optional[str] = None,
+    trace_id: Optional[str] = None,
 ) -> dict:
     """Find the ticket this message belongs to, or create a bare stub.
 
-    An explicit ticket-number reference (subject or message body) takes
-    priority over everything else — it is a citizen-visible, explicit
-    reference rather than an inferred one, and is what lets a reply to an
-    old ticket resolve to that exact ticket even if the underlying
-    transport thread/message-id tracking (In-Reply-To headers, etc.) fails
-    or the citizen re-quotes an old message in a new one. `thread_key`
-    itself is unique per email when there's no real In-Reply-To (see
-    `ConversationAgent._thread_key`), so the threadId lookup is a
-    perfectly good PRIMARY signal for email; for WhatsApp (a stable
-    per-phone key, not a per-conversation one) it's only a safety-net
-    FALLBACK for the narrow window before identity has linked to a ticket
-    at all — see module docstring for why it can't be the primary signal
-    there.
+    Resolution order, most explicit signal first:
+
+    1. `in_reply_to` (Feature 19) — a WhatsApp swipe-reply's quoted-message
+       id or an email's In-Reply-To header. When it matches some ticket's
+       own `origin_message_id`, the citizen has taken an explicit UI action
+       (or their mail client has) pointing at exactly one prior message —
+       stronger than anything inferred from text or identity, and needs no
+       interpretation at all. Previously this field was parsed by the
+       WhatsApp adapter (`WhatsAppParser.inReplyTo`) but never used for
+       inbound routing, only for outbound reply threading — a citizen who
+       swiped to reply on their original complaint still fell through to
+       the identity/topic heuristic below, which has no way to know a
+       swipe-reply happened and can (and, live-tested, did) misjudge a
+       short follow-up like "It happens around 11PM" as a different topic
+       from the original message, creating a duplicate ticket instead of
+       appending to the one being replied to.
+    2. An explicit `TKT-XXXXX` reference (subject or message body) — a
+       citizen-visible, explicit reference rather than an inferred one,
+       and is what lets a reply to an old ticket resolve to that exact
+       ticket even if `in_reply_to` isn't available (or the citizen
+       re-quotes an old message in a new one rather than replying to it).
+    3. Identity + open-ticket-count/topic heuristic, then thread_key — see
+       below and the module docstring. `thread_key` itself is unique per
+       email when there's no real In-Reply-To (see
+       `ConversationAgent._thread_key`), so the threadId lookup is a
+       perfectly good PRIMARY signal for email; for WhatsApp (a stable
+       per-phone key, not a per-conversation one) it's only a safety-net
+       FALLBACK for the narrow window before identity has linked to a
+       ticket at all.
     """
+    if in_reply_to:
+        matches = await db.list_tickets(tenant_id, originMessageId=in_reply_to, trace_id=trace_id)
+        if matches:
+            logger.info("ticket resolved via in-reply-to traceId=%s inReplyTo=%s ticketId=%s",
+                        trace_id, in_reply_to, matches[0]["id"])
+            return {"id": matches[0]["id"], "ticketNumber": matches[0].get("ticket_number")}
+
     referenced = extract_ticket_number(subject) or extract_ticket_number(raw_text)
     if referenced:
         matches = await db.list_tickets(tenant_id, ticketNumber=referenced, trace_id=trace_id)

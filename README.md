@@ -780,15 +780,11 @@ resolved ticket instead of starting a new one. Fixed in `ensure_ticket_stub`
   alone, and a keyword classifier can't help either (an uncategorizable
   message like "Put not closed" gives no signal either way). Closed with a
   real content-level judgment — see "Message quality" below.
-- **Not implemented** (deliberately deferred, documented so it isn't
-  mistaken for an oversight): a citizen swipe-replying to a specific
-  WhatsApp message (`context.id`) is already captured as `inReplyTo`, but
-  outbound sends don't yet persist their own wamid anywhere, so that signal
-  can't be matched back to a ticket the way email's In-Reply-To can — doing
-  so needs a small db-writer schema addition. Also not implemented: an
-  interactive "which of your N open complaints is this?" back-and-forth for
-  the 2+-open-tickets case — today it just creates a new ticket, which an
-  agent can merge manually via the dashboard if needed.
+- **Fixed (swipe-reply resolves directly) — Feature 19, see below.**
+- **Not implemented:** an interactive "which of your N open complaints is
+  this?" back-and-forth for the 2+-open-tickets case — today it just
+  creates a new ticket, which an agent can merge manually via the
+  dashboard if needed.
 
 **Status inquiries (Feature 17).** "What's the status of my complaint?" is
 a fundamentally different kind of message — a read-only question about an
@@ -864,6 +860,50 @@ has no other way to complain.
   rule-based path's existing behaviour (file a vague complaint after one
   follow-up; append-on-exactly-one-open-ticket with no content check) is
   unchanged, same graceful-degradation pattern as rubric priority scoring.
+
+**Swipe-reply / In-Reply-To ticket matching (Feature 19).** Even Feature
+18's same-topic judgment can misfire on a short, context-free follow-up —
+live-tested: a citizen swipe-replied to their own "Voltage fluctuation in
+my area" WhatsApp complaint (ticket TKT-00014) with just "It happens
+around 11PM"; the LLM same-topic check had no way to know a swipe-reply
+had happened and judged the two as unrelated, creating a needless
+duplicate ticket (TKT-00015) instead of appending to the one being
+replied to. A WhatsApp swipe-reply's quoted-message id (Meta's
+`context.id`) was already captured end-to-end as `inReplyTo`
+(`WhatsAppParser` → `ChannelMessageReceived.inReplyTo` → the event
+payload) but never consumed — it was wired for *outbound* reply
+threading only. `ensure_ticket_stub` now checks it FIRST, ahead of even
+an explicit `TKT-XXXXX` reference in the text: if `inReplyTo` matches
+some ticket's own `origin_message_id`, that ticket is used directly, no
+text/identity/topic judgment involved — a citizen taking an explicit "reply
+to this message" action is the least ambiguous continuation signal there
+is. Requires a new `originMessageId` filter on db-writer's
+`GET /api/v1/db/tickets` (`TicketService.buildWhere`), since this is now a
+"find the ticket this specific message originated from" lookup, not just
+by ticket number/thread/identity. Works for email too (an
+`In-Reply-To` header maps to the same `inReplyTo` field), though email
+already has robust subject-line matching — this is an extra safety net
+there (e.g. a mail client that strips the `[Ticket TKT-XXXXX]` tag from
+"Re:" subjects).
+
+**Duplicate "complaint registered" acknowledgement (also live-tested).**
+Independently of the above, the SAME conversation surfaced a second bug:
+citizens got two separate confirmation messages for one new ticket — the
+assistant's own end-of-turn "closing acknowledgement" (`ASSISTANT_
+INSTRUCTIONS`, `app/conversation/tools.py`) stated the ticket number/
+"registered", and moments later the async `complaint.ready` pipeline
+(`app/notifications/sender.send_ticket_ack`, triggered once
+`create_ticket_from_complaint` actually creates the ticket) sent its own,
+separate structured ack — the two were never meant to both announce the
+same thing. Fixed by instructing the model to send a brief, generic
+closing acknowledgement ("Thanks, we're on it") **without** stating a
+ticket number or the word "registered"/"logged"/"created" — the
+structured ack remains the single authoritative confirmation with the
+real ticket number, sent once the ticket actually exists rather than
+guessed at mid-conversation. **Operational note:** this is an
+`ASSISTANT_INSTRUCTIONS` change, so it needs `scripts/update_assistant.py`
+run once against the live `OPENAI_ASSISTANT_ID` to take effect (see the
+Feature 17 status-inquiry note above for why).
 
 ---
 
@@ -1146,7 +1186,8 @@ own tickets and `/agents` performance are lead/admin only via
 
 **Tickets**
 - `POST /api/v1/db/tickets`, `GET /api/v1/db/tickets` (filterable/paginated
-  — `identityStatus`, `threadId`, `ticketNumber`, `includeArchived`, etc.),
+  — `identityStatus`, `threadId`, `ticketNumber`, `originMessageId` (Feature
+  19 — swipe-reply/In-Reply-To matching), `includeArchived`, etc.),
   `GET/PATCH /api/v1/db/tickets/{id}`
 - `POST /api/v1/db/tickets/{id}/transition`
 - `POST/GET /api/v1/db/tickets/{id}/notes`, `GET/POST /api/v1/db/tickets/{id}/messages`, `GET /api/v1/db/tickets/{id}/events`
@@ -1419,10 +1460,11 @@ IDLE (real-time push) — polling only; WhatsApp pre-approved template
 messages — outbound WhatsApp only supports free-form text, which Meta
 restricts to within 24h of the citizen's last inbound message (see
 [docs/02b_ADAPTER_WHATSAPP.md](docs/02b_ADAPTER_WHATSAPP.md)); a send
-attempted outside that window simply fails; WhatsApp reply-id (swipe-reply)
-ticket matching and an interactive "which of your open complaints is this?"
-disambiguation flow (see the Feature 17 note above) — both documented,
-deliberately deferred, not silent gaps.
+attempted outside that window simply fails; an interactive "which of your
+open complaints is this?" disambiguation flow for the 2+-open-tickets case
+(see the Feature 17 note above) — today it just creates a new ticket,
+which an agent can merge manually via the dashboard if needed; documented,
+deliberately deferred, not a silent gap.
 
 **Phase 2 (planned, not built):** Twitter/IVR/WebChat channels; field-level
 AES-256-GCM encryption for PII columns (`PiiEncryptionService`, KMS/Vault key

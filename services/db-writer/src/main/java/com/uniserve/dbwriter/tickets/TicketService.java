@@ -114,11 +114,11 @@ public class TicketService {
     public List<Map<String, Object>> list(String tenantId, String status, String assignedTo,
                                           String channel, String category, String identityId,
                                           String identityStatus, String threadId, String ticketNumber,
-                                          boolean includeArchived, int page, int pageSize,
+                                          String originMessageId, boolean includeArchived, int page, int pageSize,
                                           String sortBy, String sortDir) {
         Map<String, Object> params = new HashMap<>();
         String where = buildWhere(tenantId, status, assignedTo, channel, category, identityId,
-                identityStatus, threadId, ticketNumber, includeArchived, params);
+                identityStatus, threadId, ticketNumber, originMessageId, includeArchived, params);
         // NOTE: SORT_COLUMNS is an immutable Map.ofEntries map — get(null) throws
         // NPE, so guard the null (callers without an explicit sortBy: ai-core's
         // thread-id stub lookups, older dashboard sessions).
@@ -159,10 +159,10 @@ public class TicketService {
     /** Full count of tickets matching the same filters (for pagination). */
     public long count(String tenantId, String status, String assignedTo, String channel, String category,
                       String identityId, String identityStatus, String threadId, String ticketNumber,
-                      boolean includeArchived) {
+                      String originMessageId, boolean includeArchived) {
         Map<String, Object> params = new HashMap<>();
         String where = buildWhere(tenantId, status, assignedTo, channel, category, identityId,
-                identityStatus, threadId, ticketNumber, includeArchived, params);
+                identityStatus, threadId, ticketNumber, originMessageId, includeArchived, params);
         var q = Panache.getEntityManager().createNativeQuery("select count(*) from tickets t where " + where);
         params.forEach(q::setParameter);
         return ((Number) q.getSingleResult()).longValue();
@@ -198,11 +198,13 @@ public class TicketService {
         return cols;
     }
 
-    /** Shared native-SQL WHERE clause (alias {@code t}); fills {@code params}. */
-    private static String buildWhere(String tenantId, String status, String assignedTo, String channel,
+    /** Shared native-SQL WHERE clause (alias {@code t}); fills {@code params}.
+     * Package-private (not {@code private}) so {@link TicketServiceTest} can
+     * exercise it directly, pure-function style, without a live database. */
+    static String buildWhere(String tenantId, String status, String assignedTo, String channel,
                                      String category, String identityId, String identityStatus,
-                                     String threadId, String ticketNumber, boolean includeArchived,
-                                     Map<String, Object> params) {
+                                     String threadId, String ticketNumber, String originMessageId,
+                                     boolean includeArchived, Map<String, Object> params) {
         StringBuilder w = new StringBuilder("t.tenant_id = :tenantId");
         params.put("tenantId", tenantId);
         if (status != null && !status.isBlank()) {
@@ -228,6 +230,17 @@ public class TicketService {
         if (ticketNumber != null && !ticketNumber.isBlank()) {
             w.append(" and t.ticket_number = :ticketNumber");
             params.put("ticketNumber", ticketNumber);
+        }
+        if (originMessageId != null && !originMessageId.isBlank()) {
+            // Feature 19: lets a citizen's WhatsApp swipe-reply (Meta's
+            // context.id, the wamid of the message they replied to) or an
+            // email's In-Reply-To header resolve straight to the ticket that
+            // message originated from — the most explicit continuation
+            // signal available, stronger than free-text ticket-number
+            // parsing or identity/topic heuristics. See
+            // ai-core's app/tickets/intake.py ensure_ticket_stub.
+            w.append(" and t.origin_message_id = :originMessageId");
+            params.put("originMessageId", originMessageId);
         }
         if (channel != null && !channel.isBlank()) {
             w.append(" and t.channel_origin = :channel");

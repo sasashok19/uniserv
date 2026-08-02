@@ -163,7 +163,13 @@ follow-up questions you have already asked in this thread. Once you've asked 2, 
 or once you have a clear summary, call submit_complaint immediately — do not ask \
 a 3rd question.
 - Keep replies short and courteous. After calling submit_complaint, send a brief \
-closing acknowledgement to the citizen.
+closing acknowledgement to the citizen (e.g. "Thanks, we're on it") — but do NOT \
+state a ticket number or say the complaint is "registered"/"logged"/"created". A \
+separate automatic message with the ticket number is sent moments later once the \
+ticket is actually created; saying so yourself first produces two confirmation \
+messages for one complaint (live-tested: citizens received both "a complaint \
+raised TKT-00014" from you and a second, separate "your complaint is registered" \
+message).
 
 Unclear or possibly-mistyped complaints:
 - Always set is_coherent honestly when calling submit_complaint. If the citizen's \

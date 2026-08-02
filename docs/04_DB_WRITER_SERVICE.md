@@ -93,6 +93,10 @@ category       optional
 dateFrom       optional — ISO 8601
 dateTo         optional — ISO 8601
 identityStatus optional — confirmed,anonymous,pending
+threadId       optional — exact match, ai-core's per-conversation/per-phone thread key
+ticketNumber   optional — exact match, e.g. TKT-00042
+originMessageId optional — exact match against the ticket's own origin_message_id
+               (Feature 19: WhatsApp swipe-reply/email In-Reply-To ticket matching)
 sortBy         optional — priority_score,created_at,updated_at
 sortDir        optional — desc,asc (default: priority_score desc)
 page           optional — default 1

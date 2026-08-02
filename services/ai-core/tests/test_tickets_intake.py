@@ -334,3 +334,59 @@ def test_update_ticket_identity_patches_identity_fields():
 
     db.update_ticket.assert_awaited_once_with(
         "t-1", {"identityId": "m-1", "identityStatus": "confirmed"}, trace_id="tr-3")
+
+
+def test_ensure_ticket_stub_in_reply_to_resolves_directly():
+    """Feature 19: a WhatsApp swipe-reply (or email In-Reply-To) whose quoted
+    message id matches a ticket's origin_message_id resolves to THAT ticket
+    without ever touching the ticket-number/identity/thread checks below it."""
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(return_value=[{"id": "t-14", "ticket_number": "TKT-00014"}])
+    db.find_by_phone = AsyncMock()
+    db.create_ticket = AsyncMock()
+
+    stub = _run(ensure_ticket_stub(
+        db, "t1", "whatsapp:+919876543213", "whatsapp",
+        raw_text="It happens around 11PM", channel_identity_type="phone",
+        channel_identity_value="+919876543213", in_reply_to="wamid.ORIGINAL123",
+        trace_id="tr-19"))
+
+    assert stub == {"id": "t-14", "ticketNumber": "TKT-00014"}
+    db.list_tickets.assert_awaited_once_with("t1", originMessageId="wamid.ORIGINAL123", trace_id="tr-19")
+    db.find_by_phone.assert_not_called()
+    db.create_ticket.assert_not_called()
+
+
+def test_ensure_ticket_stub_in_reply_to_wins_over_explicit_ticket_number_in_text():
+    """Even when the message ALSO happens to mention a different ticket
+    number, in_reply_to -- the more explicit, un-inferred signal -- resolves
+    first and the ticket-number lookup never runs."""
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(return_value=[{"id": "t-14", "ticket_number": "TKT-00014"}])
+    db.create_ticket = AsyncMock()
+
+    stub = _run(ensure_ticket_stub(
+        db, "t1", "whatsapp:+919876543213", "whatsapp",
+        raw_text="re TKT-00099 -- it happens around 11PM",
+        in_reply_to="wamid.ORIGINAL123", trace_id="tr-19b"))
+
+    assert stub == {"id": "t-14", "ticketNumber": "TKT-00014"}
+    db.list_tickets.assert_awaited_once_with("t1", originMessageId="wamid.ORIGINAL123", trace_id="tr-19b")
+
+
+def test_ensure_ticket_stub_falls_back_when_in_reply_to_does_not_match_any_ticket():
+    """An in_reply_to that matches nothing (e.g. the quoted message predates
+    origin_message_id tracking) must not block resolution -- falls through
+    to the next signal exactly like an unknown ticket-number reference does."""
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(side_effect=[[], [{"id": "t-1", "ticket_number": "TKT-00001"}]])
+    db.create_ticket = AsyncMock()
+
+    stub = _run(ensure_ticket_stub(
+        db, "t1", "email:citizen@example.com", "email",
+        subject="[Ticket TKT-00001]", in_reply_to="wamid.UNKNOWN", trace_id="tr-19c"))
+
+    assert stub == {"id": "t-1", "ticketNumber": "TKT-00001"}
+    assert db.list_tickets.await_count == 2
+    db.list_tickets.assert_any_await("t1", originMessageId="wamid.UNKNOWN", trace_id="tr-19c")
+    db.list_tickets.assert_any_await("t1", ticketNumber="TKT-00001", trace_id="tr-19c")
