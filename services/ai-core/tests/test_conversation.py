@@ -832,6 +832,151 @@ def test_render_additional_instructions_omits_mandatory_hint_when_nothing_missin
 
 
 # ---------------------------------------------------------------------------
+# Feature 17: "what's the status of my complaint?" — status summary, shared
+# by the rule-based path (regex intent detection) and the assistant path
+# (check_complaint_status tool), both channel-agnostic.
+# ---------------------------------------------------------------------------
+
+def test_rule_based_status_inquiry_bypasses_identity_gate_and_never_files_a_complaint():
+    agent = ConversationAgent("t1")
+    req = _req(
+        ticketId="tkt-status-1", rawText="What's the status of my complaint?",
+        channelIdentity=ChannelIdentityIn(type="email", value="citizen@example.com", verified=False),
+    )
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+         patch.object(agent, "_publisher") as publisher, \
+         patch.object(agent._db, "find_by_email", new=AsyncMock(return_value={"master_id": "m-1"})), \
+         patch.object(agent._db, "list_tickets", new=AsyncMock(return_value=[
+             {"id": "t-1", "ticket_number": "TKT-00042", "category": "billing", "status": "resolved"},
+         ])), \
+         patch.object(agent._db, "get_notes", new=AsyncMock(return_value=[{"content": "Refund processed"}])), \
+         patch.object(agent._db, "get_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "add_message", new=AsyncMock(return_value={})) as add_message:
+        publisher.publish = AsyncMock(return_value="1-0")
+        result = _run(agent.process(req))
+
+    assert result == {"identityStatus": "n/a", "complaintReady": False, "statusInquiry": True}
+    publisher.publish.assert_awaited_once()  # ai.reply.send only — never complaint.ready
+    stream_arg, event_arg = publisher.publish.await_args.args
+    assert stream_arg == "ai.reply.send"
+    assert "TKT-00042" in event_arg["payload"]["messageText"]
+    assert "Refund processed" in event_arg["payload"]["messageText"]
+    # the citizen's own inquiry is still recorded on the ticket's Conversation timeline
+    inbound = next(c for c in add_message.await_args_list if c.args[1]["direction"] == "inbound")
+    assert inbound.args[1]["content"] == "What's the status of my complaint?"
+
+
+def test_rule_based_status_inquiry_works_for_whatsapp_identically():
+    """Channel-agnostic by design: identical detection/handling for WhatsApp."""
+    agent = ConversationAgent("t1")
+    req = _req(
+        ticketId="tkt-status-2",
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
+        rawText="Any update on my last complaint?",
+    )
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+         patch.object(agent, "_publisher") as publisher, \
+         patch.object(agent._db, "find_by_phone", new=AsyncMock(return_value=None)), \
+         patch.object(agent._db, "get_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "add_message", new=AsyncMock(return_value={})):
+        publisher.publish = AsyncMock(return_value="1-0")
+        result = _run(agent.process(req))
+
+    assert result["statusInquiry"] is True
+    event_arg = publisher.publish.await_args.args[1]
+    assert "don't have any complaints on file" in event_arg["payload"]["messageText"]
+
+
+def test_rule_based_genuine_new_complaint_is_not_mistaken_for_status_inquiry():
+    """Regression guard: ordinary complaint wording must never false-positive
+    into the status-inquiry branch (no 'status'/'update'/'progress' words
+    near 'complaint'/'ticket', so the identity gate runs as normal)."""
+    agent = ConversationAgent("t1")
+    req = _req(rawText="My meter is not working and it's been broken for days")
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+         patch.object(agent, "_publisher") as publisher, \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
+         patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
+         patch.object(agent, "_save_state", new=AsyncMock()):
+        publisher.publish = AsyncMock(return_value="1-0")
+        result = _run(agent.process(req))
+
+    assert "statusInquiry" not in result
+    assert result["identityRequestSent"] is True  # normal identity gate ran
+
+
+def test_status_inquiry_regex_matches_common_phrasings():
+    from app.conversation.agent import _STATUS_INQUIRY_RE
+    positives = [
+        "What's the status of my complaint?",
+        "any update on my last complaint",
+        "How's my ticket going?",
+        "what happened to my complaint",
+        "Can you give me a progress update on my issue",
+    ]
+    for text in positives:
+        assert _STATUS_INQUIRY_RE.search(text), f"expected a match for: {text!r}"
+
+    negatives = [
+        "My meter is not working",
+        "My electricity bill for March is double the usual amount",
+        "My complaint is that my water heater broke",
+    ]
+    for text in negatives:
+        assert not _STATUS_INQUIRY_RE.search(text), f"unexpected match for: {text!r}"
+
+
+def test_tool_check_status_returns_summary_for_model_to_relay():
+    agent = ConversationAgent("t1")
+    req = _req(channelIdentity=ChannelIdentityIn(type="email", value="citizen@example.com", verified=False))
+    with patch.object(agent._db, "find_by_email", new=AsyncMock(return_value=None)):
+        result = _run(agent._tool_check_status(req))
+
+    assert "summary" in result
+    assert "don't have any complaints on file" in result["summary"]
+
+
+def test_assistant_path_check_complaint_status_tool_end_to_end():
+    """The assistant decides (via tool-calling) that this is a status
+    inquiry, calls check_complaint_status, and relays the summary — never
+    touching confirm_identity/submit_complaint for this turn."""
+    agent = ConversationAgent("t1")
+    req = _req(
+        ticketId="tkt-status-3", ticketNumber="TKT-00090", rawText="What's the status of my complaint?",
+    )
+
+    async def fake_run_turn(tenant_id, state_key, user_message, execute_tool, additional_instructions):
+        result = await execute_tool("check_complaint_status", {})
+        return result["summary"]
+
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=True), \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
+         patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "get_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "find_by_email", new=AsyncMock(return_value={"master_id": "m-9"})), \
+         patch.object(agent._db, "list_tickets", new=AsyncMock(return_value=[
+             {"id": "t-9", "ticket_number": "TKT-00080", "category": "technical", "status": "in_progress"},
+         ])), \
+         patch.object(agent._db, "get_notes", new=AsyncMock(return_value=[])), \
+         patch.object(agent._db, "get_messages", new=AsyncMock(return_value=[])), \
+         patch.object(agent, "_save_state", new=AsyncMock()), \
+         patch.object(agent._openai, "run_turn", new=AsyncMock(side_effect=fake_run_turn)), \
+         patch.object(agent._db, "add_message", new=AsyncMock(return_value={})), \
+         patch.object(agent, "_publisher") as publisher:
+        publisher.publish = AsyncMock(return_value="1-0")
+        result = _run(agent.process(req))
+
+    assert result["complaintReady"] is False
+    published_streams = [call.args[0] for call in publisher.publish.await_args_list]
+    assert "complaint.ready" not in published_streams
+    event_arg = next(c for c in publisher.publish.await_args_list if c.args[0] == "ai.reply.send").args[1]
+    assert "TKT-00080" in event_arg["payload"]["messageText"]
+
+
+# ---------------------------------------------------------------------------
 # Conversation persistence — a citizen's reply on an already-open ticket
 # (e.g. one moved to pending_customer) and the AI's own reply must both
 # appear in the ticket's Conversation timeline, not just whichever turn

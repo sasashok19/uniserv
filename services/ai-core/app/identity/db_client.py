@@ -109,6 +109,19 @@ class DbWriterClient:
         resp = await self._request("POST", f"/api/v1/db/tickets/{ticket_id}/messages", trace_id, json=payload)
         return resp.json()
 
+    async def get_messages(self, ticket_id: str, trace_id: Optional[str] = None) -> list[dict]:
+        """A ticket's Conversation timeline, oldest first (db-writer's own
+        ordering) — used by the status-summary feature to fall back to the
+        most recent message when a ticket has no internal notes yet."""
+        resp = await self._request("GET", f"/api/v1/db/tickets/{ticket_id}/messages", trace_id)
+        return resp.json().get("data", [])
+
+    async def get_notes(self, ticket_id: str, trace_id: Optional[str] = None) -> list[dict]:
+        """A ticket's internal/transition notes, oldest first — the "last
+        action taken" for the status-summary feature is the newest of these."""
+        resp = await self._request("GET", f"/api/v1/db/tickets/{ticket_id}/notes", trace_id)
+        return resp.json().get("data", [])
+
     async def get_tenant_config(self, tenant_id: str, trace_id: Optional[str] = None) -> dict:
         """Parsed `config_json` for a tenant (Feature 15/16 intake fields,
         categories, SLA) — `{}` on any failure so a config problem never

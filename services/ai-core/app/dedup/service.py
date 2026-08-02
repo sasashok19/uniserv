@@ -10,7 +10,7 @@ from typing import Optional
 
 from app.identity.db_client import DbWriterClient
 
-OPEN_STATUSES = "open,assigned,in_progress"
+OPEN_STATUSES = "open,assigned,in_progress,reopened"
 
 
 async def check_duplicate(db: DbWriterClient, tenant_id: str, master_id: str, category: str,

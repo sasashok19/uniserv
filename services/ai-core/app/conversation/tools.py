@@ -67,13 +67,38 @@ SUBMIT_COMPLAINT_TOOL = {
     },
 }
 
-ASSISTANT_TOOLS = [CONFIRM_IDENTITY_TOOL, SUBMIT_COMPLAINT_TOOL]
+CHECK_COMPLAINT_STATUS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "check_complaint_status",
+        "description": (
+            "Look up the citizen's own recent complaints and their current status. "
+            "Call this when the citizen is asking about an EXISTING complaint (e.g. "
+            "\"what's the status of my complaint?\", \"any update on my last complaint?\", "
+            "\"what happened to my ticket?\") rather than describing a new problem or "
+            "answering an identity/intake question. Returns a ready-to-send summary."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+}
+
+ASSISTANT_TOOLS = [CONFIRM_IDENTITY_TOOL, SUBMIT_COMPLAINT_TOOL, CHECK_COMPLAINT_STATUS_TOOL]
 
 ASSISTANT_NAME = "UniServe Complaint Intake Agent"
 
 ASSISTANT_INSTRUCTIONS = """\
 You are the UniServe citizen complaint intake agent. You run the identity gate \
 first, then gather enough detail to log a complaint.
+
+Status inquiries (check this FIRST, before the identity gate):
+- If the citizen is asking about an EXISTING complaint's status/progress \
+("what's the status of my complaint?", "any update on my last complaint?", "what \
+happened to my ticket?") rather than describing a new problem, call \
+check_complaint_status immediately — do not run the identity gate or ask for \
+intake details first, this is a read-only lookup by their own channel address. \
+When it returns a summary, relay that summary to the citizen EXACTLY as given — \
+verbatim, do not paraphrase, reword, or alter any ticket number, status, or note \
+it contains.
 
 Identity gate:
 - If the message metadata says the channel identity is already verified (e.g. a \

@@ -26,6 +26,7 @@ from app.conversation.intake_fields import (
     missing_fields,
 )
 from app.conversation.openai_gateway import OpenAIAssistantGateway
+from app.conversation.status_lookup import summarize_recent_tickets
 from app.events import streams
 from app.events.client import get_valkey
 from app.events.event import build_event
@@ -49,6 +50,23 @@ FOLLOWUP_QUESTION = (
 # value with no label isn't handled here (that needs real NLU — see the
 # OpenAI assistant path's confirm_identity tool).
 _ANONYMOUS_REPLY_RE = re.compile(r"\banonymous\b", re.IGNORECASE)
+
+# Feature 17: a citizen asking about an EXISTING complaint ("what's the
+# status of my last complaint?") is a fundamentally different turn from one
+# describing a new problem or replying to an intake question — it should
+# never be gated on identity/mandatory fields, and must never itself be
+# treated as a complaint to file. Deliberately requires an explicit
+# status/update/progress word NEAR a complaint/ticket/case word (rather than
+# just "my complaint(s)" alone), so a genuine new complaint's own wording
+# ("my complaint is that my meter isn't working") never false-positives —
+# this is channel-agnostic by design (same check for email and WhatsApp).
+_STATUS_INQUIRY_RE = re.compile(
+    r"\b(status|update|progress|news)\b.{0,40}\b(complaint|ticket|issue|case)s?\b"
+    r"|\b(complaint|ticket|issue|case)s?\b.{0,40}\b(status|update|progress)\b"
+    r"|\bhow(?:'s|’s| is| are)\b.{0,20}\b(complaint|ticket|issue|case)s?\b.{0,20}\b(going|doing|progressing)\b"
+    r"|\bwhat(?:'s|’s| is)?\b.{0,20}\bhappen(?:ed|ing)?\b.{0,30}\b(complaint|ticket|issue|case)\b",
+    re.IGNORECASE,
+)
 
 
 def _effective_max_followups(tenant_config: dict) -> int:
@@ -136,6 +154,8 @@ class ConversationAgent:
 
     async def _process_rule_based(self, req: TestEventRequest) -> dict:
         thread_key = self._thread_key(req)
+        if _STATUS_INQUIRY_RE.search(req.rawText or ""):
+            return await self._handle_status_inquiry(req, thread_key)
         # Conversation memory is keyed by the STABLE ticket (see _conv_key),
         # not the per-message email thread_key — otherwise a citizen's reply
         # (which threads off our identity-request email) would land on a new
@@ -256,6 +276,24 @@ class ConversationAgent:
             "complaintReady": complaint_ready,
             "extractedFields": extracted,
         }
+
+    async def _handle_status_inquiry(self, req: TestEventRequest, thread_key: str) -> dict:
+        """Feature 17: "what's the status of my complaint?" — a read-only
+        query, never gated on identity/mandatory fields and never itself
+        treated as a complaint to file. Shared by the rule-based path (this
+        method) and the assistant path's `check_complaint_status` tool
+        (`_tool_check_status`), so both channels get the identical summary
+        logic — only how the INTENT is detected differs (regex here, the
+        model's own judgement there), matching how the rest of this class
+        already treats the two paths' mechanisms as appropriately different
+        while sharing the underlying data/behaviour.
+        """
+        summary = await summarize_recent_tickets(
+            self._db, req.tenantId, req.channelIdentity.type, req.channelIdentity.value, trace_id=req.traceId)
+        logger.info("status inquiry handled traceId=%s threadId=%s", req.traceId, thread_key)
+        await self._persist_inbound(req, req.rawText)
+        await self._send_reply(req, thread_key, summary)
+        return {"identityStatus": "n/a", "complaintReady": False, "statusInquiry": True}
 
     async def _find_known_identity(self, req: TestEventRequest) -> Optional[dict]:
         """The existing identity profile for this citizen's channel address,
@@ -421,6 +459,8 @@ class ConversationAgent:
                     }
                 submitted_this_turn = True
                 return await self._tool_submit_complaint(req, thread_key, state, args)
+            if name == "check_complaint_status":
+                return await self._tool_check_status(req)
             return {"error": f"unknown tool '{name}'"}
 
         reply_text = await self._openai.run_turn(
@@ -536,6 +576,20 @@ class ConversationAgent:
                 "extractedFields": extracted,
             }, trace_id=req.traceId))
         return {"complaintReady": True, "messageId": message_id}
+
+    async def _tool_check_status(self, req: TestEventRequest) -> dict:
+        """Feature 17: the assistant-path equivalent of `_handle_status_inquiry`
+        (rule-based path) — same underlying `summarize_recent_tickets` call, so
+        both paths give the citizen the identical summary regardless of
+        channel. The composed text is returned to the model as `summary`
+        rather than sent directly, so it flows through the SAME single
+        end-of-turn `_send_reply` call every other tool result does (avoiding
+        a double-send); `ASSISTANT_INSTRUCTIONS` tells the model to relay it
+        verbatim rather than paraphrase.
+        """
+        summary = await summarize_recent_tickets(
+            self._db, req.tenantId, req.channelIdentity.type, req.channelIdentity.value, trace_id=req.traceId)
+        return {"summary": summary}
 
     @staticmethod
     def _render_user_message(req: TestEventRequest) -> str:

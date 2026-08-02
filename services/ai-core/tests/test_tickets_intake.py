@@ -3,6 +3,7 @@
 import asyncio
 from unittest.mock import AsyncMock
 
+from app.dedup.service import OPEN_STATUSES
 from app.tickets.intake import ensure_ticket_stub, extract_ticket_number, update_ticket_identity
 
 
@@ -19,7 +20,8 @@ def test_ensure_ticket_stub_reuses_existing_ticket_for_thread():
 
     assert stub == {"id": "t-1", "ticketNumber": "TKT-00001"}
     db.create_ticket.assert_not_called()
-    db.list_tickets.assert_awaited_once_with("t1", threadId="email:citizen@example.com", trace_id="tr-1")
+    db.list_tickets.assert_awaited_once_with(
+        "t1", threadId="email:citizen@example.com", status=OPEN_STATUSES, trace_id="tr-1")
 
 
 def test_ensure_ticket_stub_creates_bare_stub_when_none_exists():
@@ -83,6 +85,147 @@ def test_extract_ticket_number_finds_reference_anywhere_in_subject():
     assert extract_ticket_number("Re: Billing issue [Ticket TKT-00042]") == "TKT-00042"
     assert extract_ticket_number("No reference here") is None
     assert extract_ticket_number(None) is None
+
+
+def test_extract_ticket_number_also_matches_message_body():
+    """Feature 17: a channel with no subject line (WhatsApp) can still get a
+    deterministic match if the citizen mentions the ticket number directly —
+    e.g. answering a disambiguation prompt, or following up unprompted."""
+    assert extract_ticket_number("Following up on TKT-00099, any update?") == "TKT-00099"
+
+
+# ---------------------------------------------------------------------------
+# Feature 17: WhatsApp threading/dedup fix.
+#
+# Bug: WhatsApp's thread key (`whatsapp:<phone>`) is identical for every
+# message that number ever sends, and the threadId lookup applied no status
+# filter — so a citizen whose ticket had already been resolved, texting
+# weeks later about something unrelated, was silently appended to the old,
+# resolved ticket. These tests cover the fix: the threadId fallback now
+# requires OPEN status, and (for non-email channels) falls back further to
+# an identity + open-ticket-count resolution.
+# ---------------------------------------------------------------------------
+
+def test_ensure_ticket_stub_does_not_reuse_resolved_whatsapp_ticket():
+    """The exact reported bug: an old RESOLVED ticket must not be silently
+    reused just because it shares the same (permanent, per-phone) thread key."""
+    db = AsyncMock()
+    # 1st call: threadId lookup, status-filtered -> the resolved ticket is
+    # correctly excluded by db-writer's status filter, so it comes back empty.
+    # 2nd call: identityId lookup for open tickets -> also empty (the
+    # citizen's only ticket is the resolved one, which isn't "open").
+    db.list_tickets = AsyncMock(side_effect=[[], []])
+    db.find_by_phone = AsyncMock(return_value={"master_id": "m-1"})
+    db.create_ticket = AsyncMock(return_value={"id": "t-new", "ticketNumber": "TKT-00050"})
+
+    stub = _run(ensure_ticket_stub(
+        db, "t1", "whatsapp:+919876543210", "whatsapp",
+        raw_text="Now my new water heater is broken too", channel_identity_type="phone",
+        channel_identity_value="+919876543210", trace_id="tr-6"))
+
+    assert stub == {"id": "t-new", "ticketNumber": "TKT-00050"}
+    db.create_ticket.assert_awaited_once()
+    first_call = db.list_tickets.await_args_list[0]
+    assert first_call.kwargs["threadId"] == "whatsapp:+919876543210"
+    assert first_call.kwargs["status"] == OPEN_STATUSES
+    second_call = db.list_tickets.await_args_list[1]
+    assert second_call.kwargs["identityId"] == "m-1"
+    assert second_call.kwargs["status"] == OPEN_STATUSES
+
+
+def test_ensure_ticket_stub_whatsapp_appends_to_sole_open_ticket():
+    """A genuine follow-up (identity has exactly one currently-open ticket)
+    still gets appended, not duplicated."""
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(side_effect=[
+        [],  # threadId lookup misses (nothing OPEN with this exact key)
+        [{"id": "t-open-1", "ticket_number": "TKT-00060"}],  # identity's sole open ticket
+    ])
+    db.find_by_phone = AsyncMock(return_value={"master_id": "m-2"})
+    db.create_ticket = AsyncMock()
+
+    stub = _run(ensure_ticket_stub(
+        db, "t1", "whatsapp:+919876543211", "whatsapp",
+        raw_text="Still waiting on this", channel_identity_type="phone",
+        channel_identity_value="+919876543211", trace_id="tr-7"))
+
+    assert stub == {"id": "t-open-1", "ticketNumber": "TKT-00060"}
+    db.create_ticket.assert_not_called()
+
+
+def test_ensure_ticket_stub_whatsapp_creates_new_when_multiple_open_tickets():
+    """Genuinely ambiguous (2+ open tickets, no explicit reference) — the
+    safe default is a NEW ticket, never a silent guess-merge."""
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(side_effect=[
+        [],
+        [{"id": "t-open-1", "ticket_number": "TKT-00061"}, {"id": "t-open-2", "ticket_number": "TKT-00062"}],
+    ])
+    db.find_by_phone = AsyncMock(return_value={"master_id": "m-3"})
+    db.create_ticket = AsyncMock(return_value={"id": "t-new-2", "ticketNumber": "TKT-00070"})
+
+    stub = _run(ensure_ticket_stub(
+        db, "t1", "whatsapp:+919876543212", "whatsapp",
+        raw_text="A completely different issue", channel_identity_type="phone",
+        channel_identity_value="+919876543212", trace_id="tr-8"))
+
+    assert stub == {"id": "t-new-2", "ticketNumber": "TKT-00070"}
+
+
+def test_ensure_ticket_stub_whatsapp_brand_new_number_creates_new_without_identity_lookup_crash():
+    """A phone number never seen before — find_by_phone returns None, and the
+    identity branch must be skipped cleanly rather than erroring."""
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(return_value=[])
+    db.find_by_phone = AsyncMock(return_value=None)
+    db.create_ticket = AsyncMock(return_value={"id": "t-brand-new", "ticketNumber": "TKT-00071"})
+
+    stub = _run(ensure_ticket_stub(
+        db, "t1", "whatsapp:+919800000099", "whatsapp",
+        raw_text="Meter not working", channel_identity_type="phone",
+        channel_identity_value="+919800000099", trace_id="tr-9"))
+
+    assert stub == {"id": "t-brand-new", "ticketNumber": "TKT-00071"}
+    db.list_tickets.assert_awaited_once()  # only the threadId lookup — no identityId lookup possible
+
+
+def test_ensure_ticket_stub_email_channel_never_uses_identity_fallback():
+    """Regression guard: email already has its own (better) subject-based
+    mechanism — the identity+open-count fallback is WhatsApp-specific and
+    must not kick in for email even when a channel identity value is passed."""
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(return_value=[])
+    db.find_by_email = AsyncMock()
+    db.create_ticket = AsyncMock(return_value={"id": "t-email-new", "ticketNumber": "TKT-00080"})
+
+    stub = _run(ensure_ticket_stub(
+        db, "t1", "email:msg-abc", "email",
+        raw_text="My bill is wrong", channel_identity_type="email",
+        channel_identity_value="citizen@example.com", trace_id="tr-10"))
+
+    assert stub == {"id": "t-email-new", "ticketNumber": "TKT-00080"}
+    db.find_by_email.assert_not_called()
+
+
+def test_ensure_ticket_stub_explicit_reference_in_whatsapp_body_wins_over_open_count():
+    """A citizen who mentions a ticket number directly (e.g. answering a
+    disambiguation prompt) resolves to THAT ticket, bypassing the
+    identity/open-count heuristic entirely — and works regardless of that
+    ticket's status, same as email's subject-reference behaviour."""
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(return_value=[{"id": "t-referenced", "ticket_number": "TKT-00042"}])
+    db.find_by_phone = AsyncMock()
+    db.create_ticket = AsyncMock()
+
+    stub = _run(ensure_ticket_stub(
+        db, "t1", "whatsapp:+919876543213", "whatsapp",
+        raw_text="This is about TKT-00042, any update?", channel_identity_type="phone",
+        channel_identity_value="+919876543213", trace_id="tr-11"))
+
+    assert stub == {"id": "t-referenced", "ticketNumber": "TKT-00042"}
+    db.list_tickets.assert_awaited_once_with("t1", ticketNumber="TKT-00042", trace_id="tr-11")
+    db.find_by_phone.assert_not_called()
+    db.create_ticket.assert_not_called()
 
 
 def test_update_ticket_identity_patches_identity_fields():

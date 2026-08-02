@@ -663,15 +663,19 @@ matched on identity + category + open-status alone — too coarse a signal
 once a citizen has more than one thing going on with the same category.
 
 **The fix:** every outbound email's subject now carries the ticket number
-(`[Ticket TKT-00042]`), and an inbound email's subject is checked for that
-same reference before anything else (`extract_ticket_number`,
+(`[Ticket TKT-00042]`), and an inbound email's subject — or, since Feature
+17, the raw message BODY of any channel — is checked for that same
+reference before anything else (`extract_ticket_number`,
 `app/tickets/intake.py`) — a citizen's reply always preserves the subject
 line (as "Re: ..."), so this is a precise, citizen-visible signal rather
-than an inferred one. `ensure_ticket_stub` resolves in this order:
+than an inferred one, and a citizen on any channel typing "following up on
+TKT-00042" gets the same precise resolution. `ensure_ticket_stub` resolves
+in this order:
 
-1. Subject references a real ticket number → that exact ticket, regardless of thread/category.
-2. Otherwise, the existing thread (`threadId`, via In-Reply-To/References headers).
-3. Otherwise, a brand-new stub ticket — this is what a genuinely new complaint gets.
+1. An explicit `TKT-XXXXX` reference (subject or message body) → that exact ticket, regardless of thread/category/status.
+2. Otherwise, the existing thread (`threadId` — via In-Reply-To/References headers for email; a stable per-phone key for WhatsApp), but **only if that ticket is still open** (Feature 17 — see below).
+3. Otherwise, for a channel with no subject line (WhatsApp): identity + open-ticket-count (see below).
+4. Otherwise, a brand-new stub ticket — this is what a genuinely new complaint gets.
 
 Because of this, `create_ticket_from_complaint` (`app/tickets/service.py`)
 no longer runs the identity+category dedup for any message that already
@@ -707,6 +711,62 @@ that stored value as `EmailAdapter.sendReply(...)`'s `inReplyToMessageId`
 `app/notifications/sender.py`) hard-coded `null`, so replies arrived as
 disconnected new emails. `app/tickets/service.py` returns `originMessageId`
 from `create_ticket_from_complaint` so `dispatcher.py` can thread the ack too.
+
+**WhatsApp threading fix (Feature 17).** WhatsApp has no subject line, so
+its thread key (`whatsapp:<phone>`) is the SAME for every message that
+number ever sends — the bug was that the threadId lookup applied no status
+filter at all, so a citizen whose ticket had already been resolved, texting
+weeks later about something unrelated, got silently appended to the old,
+resolved ticket instead of starting a new one. Fixed in `ensure_ticket_stub`
+(`app/tickets/intake.py`):
+- The threadId fallback now requires the ticket still be OPEN
+  (`open,assigned,in_progress,reopened` — `app/dedup/service.py`'s
+  `OPEN_STATUSES`, now also including `reopened`, which it was previously
+  missing).
+- For a channel with no subject line at all (WhatsApp today), once neither
+  an explicit reference nor an open threadId match, resolution falls back
+  to identity + open-ticket count: zero open tickets → new; exactly one →
+  append (the same identity+open-status logic `check_duplicate` already
+  used for the no-stub case); two or more → still create a NEW ticket
+  rather than guessing which one this continues — a wrong silent merge is
+  worse than an extra ticket an agent can merge by hand.
+- **Not implemented** (deliberately deferred, documented so it isn't
+  mistaken for an oversight): a citizen swipe-replying to a specific
+  WhatsApp message (`context.id`) is already captured as `inReplyTo`, but
+  outbound sends don't yet persist their own wamid anywhere, so that signal
+  can't be matched back to a ticket the way email's In-Reply-To can — doing
+  so needs a small db-writer schema addition. Also not implemented: an
+  interactive "which of your N open complaints is this?" back-and-forth for
+  the 2+-open-tickets case — today it just creates a new ticket, which an
+  agent can merge manually via the dashboard if needed.
+
+**Status inquiries (Feature 17).** "What's the status of my complaint?" is
+a fundamentally different kind of message — a read-only question about an
+EXISTING complaint, never gated on identity/mandatory fields and never
+itself treated as a new complaint to file. Detected channel-agnostically
+(same logic for email and WhatsApp): the rule-based path uses a regex
+requiring an explicit status/update/progress word near
+complaint/ticket/issue/case (`_STATUS_INQUIRY_RE`,
+`app/conversation/agent.py`, deliberately narrow so genuine complaint
+wording like "my complaint is that my meter isn't working" never
+false-positives); the assistant path gets a `check_complaint_status` tool
+instead (`app/conversation/tools.py`), which the model calls on its own
+judgement. Both paths call the same `summarize_recent_tickets`
+(`app/conversation/status_lookup.py`): resolve identity by the citizen's
+phone/email, pull their last 5 tickets (`GET /api/v1/db/tickets?identityId=
+...&sortBy=createdAt&sortDir=desc&pageSize=5` — already supported the
+`identityId` filter, no db-writer change needed), and for each ticket look
+up its most recent internal note (`ticket_notes`, falling back to the most
+recent outbound message if the ticket has no notes yet) as the "last
+action taken." The summary text is composed by code, not left to the LLM
+to paraphrase, so a citizen can never be told a hallucinated status or
+note — the assistant path is instructed to relay it verbatim.
+**Operational note:** the Assistant's tool schema lives on OpenAI's
+platform, created once via `scripts/create_assistant.py` — that script only
+ever *creates* a new Assistant, so adding `check_complaint_status` to
+`ASSISTANT_TOOLS` doesn't reach an already-existing, deployed Assistant on
+its own. Run the new `scripts/update_assistant.py` once to push the updated
+tools/instructions onto the existing `OPENAI_ASSISTANT_ID`.
 
 ---
 
@@ -1239,7 +1299,11 @@ where the actual code deviated from (or corrected) the original spec:
 priority scoring; SQLite WAL via db-writer; full agent dashboard
 (functional-minimal UI); outbound email + WhatsApp notifications; dev mock
 seed data; JWT auth + RBAC; transaction tracing & log-level control (this
-doc's [Logging](#logging-log-levels--transaction-tracing) section).
+doc's [Logging](#logging-log-levels--transaction-tracing) section);
+cross-channel ticket threading/dedup (subject-line or explicit-reference
+matching, open-status-gated thread reuse, identity+open-count fallback for
+subject-less channels) and a "status of my complaint" summary, both
+channel-agnostic (see [Subject-line ticket threading & dedup](#subject-line-ticket-threading--dedup)).
 
 **Not yet wired despite existing code:** the rule-based (no-LLM) identity
 gate recognises "anonymous" or a labeled reply to its structured intake
@@ -1251,7 +1315,10 @@ IDLE (real-time push) — polling only; WhatsApp pre-approved template
 messages — outbound WhatsApp only supports free-form text, which Meta
 restricts to within 24h of the citizen's last inbound message (see
 [docs/02b_ADAPTER_WHATSAPP.md](docs/02b_ADAPTER_WHATSAPP.md)); a send
-attempted outside that window simply fails.
+attempted outside that window simply fails; WhatsApp reply-id (swipe-reply)
+ticket matching and an interactive "which of your open complaints is this?"
+disambiguation flow (see the Feature 17 note above) — both documented,
+deliberately deferred, not silent gaps.
 
 **Phase 2 (planned, not built):** Twitter/IVR/WebChat channels; field-level
 AES-256-GCM encryption for PII columns (`PiiEncryptionService`, KMS/Vault key
