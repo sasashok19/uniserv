@@ -35,7 +35,7 @@ class PublicStatusResourceTest {
         // path -- previously always fell through to the anon-ref branch,
         // which can never match a ticket number, and 404'd despite the
         // ticket existing.
-        when(db.listTickets("ticketNumber=TKT-00013")).thenReturn(List.of(Map.of(
+        when(db.listTickets("tenantId=t1&ticketNumber=TKT-00013")).thenReturn(List.of(Map.of(
                 "id", "tkt-id-13", "ticket_number", "TKT-00013", "tenant_id", "t1",
                 "identity_id", "m-1", "status", "open", "category", "outage")));
         when(db.listTickets("tenantId=t1&identityId=m-1")).thenReturn(List.of(
@@ -55,7 +55,7 @@ class PublicStatusResourceTest {
 
     @Test
     void ticketNumberLookupIsCaseInsensitive() {
-        when(db.listTickets("ticketNumber=tkt-00013")).thenReturn(List.of(Map.of(
+        when(db.listTickets("tenantId=t1&ticketNumber=tkt-00013")).thenReturn(List.of(Map.of(
                 "id", "tkt-id-13", "ticket_number", "TKT-00013", "tenant_id", "t1", "identity_id", "m-1")));
         when(db.listTickets("tenantId=t1&identityId=m-1")).thenReturn(List.of(
                 Map.of("ticket_number", "TKT-00013", "status", "open", "category", "outage", "updated_at", "2026-08-01")));
@@ -69,7 +69,7 @@ class PublicStatusResourceTest {
     void ticketNumberLookupFallsBackToJustThatTicketWhenIdentityNotYetLinked() {
         // A ticket still in the intake/pending stage has no identity_id yet --
         // must not crash, and must still return the one ticket it does have.
-        when(db.listTickets("ticketNumber=TKT-00099")).thenReturn(List.of(Map.of(
+        when(db.listTickets("tenantId=t1&ticketNumber=TKT-00099")).thenReturn(List.of(Map.of(
                 "id", "tkt-id-99", "ticket_number", "TKT-00099", "tenant_id", "t1",
                 "status", "open", "category", "other")));
 
@@ -87,7 +87,7 @@ class PublicStatusResourceTest {
 
     @Test
     void ticketNumberLookupReturns404WhenTicketDoesNotExist() {
-        when(db.listTickets("ticketNumber=TKT-99999")).thenReturn(List.of());
+        when(db.listTickets("tenantId=t1&ticketNumber=TKT-99999")).thenReturn(List.of());
 
         Response response = resource.status("TKT-99999");
 
@@ -103,7 +103,7 @@ class PublicStatusResourceTest {
         Response response = resource.status("citizen@example.org");
 
         assertEquals(200, response.getStatus());
-        verify(db, never()).listTickets(org.mockito.ArgumentMatchers.startsWith("ticketNumber="));
+        verify(db, never()).listTickets(org.mockito.ArgumentMatchers.contains("ticketNumber="));
     }
 
     @Test

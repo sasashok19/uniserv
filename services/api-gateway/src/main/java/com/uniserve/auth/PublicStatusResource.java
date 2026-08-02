@@ -78,7 +78,12 @@ public class PublicStatusResource {
      * back to just the matched ticket if it has no identity linked yet
      * (still in the intake/pending stage). */
     private Response statusByTicketNumber(String ticketNumber) {
-        List<Map<String, Object>> matches = db.listTickets("ticketNumber=" + enc(ticketNumber));
+        // db-writer's /api/v1/db/tickets requires tenantId (400 TENANT_REQUIRED
+        // otherwise) -- this is a cross-tenant citizen lookup by ticket number
+        // alone, so we scan with the gateway's own default tenant rather than
+        // one derived from the (not yet known) ticket.
+        List<Map<String, Object>> matches = db.listTickets(
+                "tenantId=" + enc(defaultTenant) + "&ticketNumber=" + enc(ticketNumber));
         if (matches.isEmpty()) {
             return notFound(ticketNumber);
         }
