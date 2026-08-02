@@ -502,6 +502,16 @@ cd services/db-writer  && mvn quarkus:dev
 - `src/app/status/[ref]/page.tsx` — public, unauthenticated, server-rendered
   citizen status lookup by `ANON-XXXX` ref or email; calls api-gateway's
   `GET /api/v1/public/status/{ref}` server-side.
+- `src/app/page.tsx` — the public landing page (`/`). Was a bare placeholder
+  whose "Track a complaint" link pointed at a hardcoded example ref
+  (`ANON-TEST`) — no real way for a citizen to look up their OWN complaint.
+  Now a branded, high-contrast hero with a working search form that submits
+  to `/status/{value}` (client-side `router.push`, matching what
+  `PublicStatusResource` actually accepts: an `ANON-XXXX` ref or an email —
+  **not** a phone number or a `TKT-XXXXX` ticket number, so the copy
+  deliberately doesn't imply either works). "Agent sign in" is kept as a
+  small, secondary link to `/login` — citizens are this page's primary
+  audience, not staff.
 - `src/app/api/*` — Next.js route handlers acting as a thin BFF: proxy to
   api-gateway, forwarding the JWT cookie.
 - The fuller component library documented in
