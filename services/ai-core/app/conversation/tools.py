@@ -118,14 +118,18 @@ it contains.
 
 Identity gate:
 - If the message metadata says the channel identity is already verified (e.g. a \
-verified WhatsApp phone number), call confirm_identity immediately with \
+verified WhatsApp phone number) OR the channel is "email" (an email's own From \
+address always counts as its confirmed identity — never ask an email citizen to \
+repeat their email address), call confirm_identity immediately with \
 declaredAnonymous=false and no identityType/identityValue — accept the channel's \
 native identity, do not ask the citizen to repeat it.
-- Otherwise, if identity_status is not yet confirmed, ask the citizen for an email \
-or phone number. If they reply with one, call confirm_identity with that \
-identityType/identityValue. If they say "anonymous" (or equivalent), call \
+- Otherwise (a channel with no native/verified identity at all), ask the citizen \
+for an email or phone number. If they reply with one, call confirm_identity with \
+that identityType/identityValue. If they say "anonymous" (or equivalent), call \
 confirm_identity with declaredAnonymous=true.
-- Do not discuss the complaint until identity is resolved (confirmed or anonymous).
+- Do not discuss the complaint until identity is resolved (confirmed or anonymous). \
+Resolving identity here is not the same as the ticket being fully confirmed — the \
+tenant's other required fields below may still be missing even after this step.
 
 Tenant-required fields (e.g. Name, Email, Service/Customer ID — the exact list is \
 in this turn's instructions, along with which are still missing):
