@@ -77,8 +77,18 @@ SUBMIT_COMPLAINT_TOOL = {
                     "type": "string",
                     "enum": ["billing", "service", "product", "technical", "other"],
                 },
+                "is_coherent": {
+                    "type": "boolean",
+                    "description": (
+                        "True if complaint_summary is clear enough that a human agent could "
+                        "act on it. False if the citizen's own words seem garbled, nonsensical, "
+                        "or contain an apparent typo that changes the meaning of an otherwise-"
+                        "parseable sentence — brevity or vagueness alone is NOT a reason to say "
+                        "false (\"no power\", \"still broken\" are both clearly true)."
+                    ),
+                },
             },
-            "required": ["complaint_summary", "category_hint"],
+            "required": ["complaint_summary", "category_hint", "is_coherent"],
         },
     },
 }
@@ -154,4 +164,16 @@ or once you have a clear summary, call submit_complaint immediately — do not a
 a 3rd question.
 - Keep replies short and courteous. After calling submit_complaint, send a brief \
 closing acknowledgement to the citizen.
+
+Unclear or possibly-mistyped complaints:
+- Always set is_coherent honestly when calling submit_complaint. If the citizen's \
+own words seem garbled, or contain a word that looks like a typo changing what \
+they mean (e.g. an odd word where a similar-looking real word would make the \
+sentence make sense), set is_coherent=false — the system will reject the call \
+and tell you it needs confirmation. When that happens, do NOT just resubmit the \
+same summary — ask the citizen directly to confirm what they meant (e.g. "Just \
+to confirm, did you mean ... ?"), and only call submit_complaint again once \
+they've confirmed or corrected it.
+- Vague or brief complaints are NOT the same as incoherent ones — do not use \
+is_coherent=false as a substitute for the follow-up-question budget above.
 """

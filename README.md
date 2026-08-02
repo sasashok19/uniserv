@@ -774,15 +774,13 @@ resolved ticket instead of starting a new one. Fixed in `ensure_ticket_stub`
   complaint ("Put not closed" got appended onto an existing "No power"
   ticket) — the exact "too coarse a signal" failure category-based dedup
   had for email, recreated one layer deeper.
-- **Known remaining limitation (exactly one open ticket, different topic).**
-  Count-based resolution genuinely cannot distinguish "a follow-up on my
-  one open ticket" from "an unrelated second complaint, and I happen to
+- **Fixed (exactly one open ticket, different topic) — Feature 18.**
+  Count-based resolution alone genuinely cannot distinguish "a follow-up on
+  my one open ticket" from "an unrelated second complaint, and I happen to
   have exactly one other open ticket" — both look identical by count
   alone, and a keyword classifier can't help either (an uncategorizable
-  message like "Put not closed" gives no signal either way). Closing this
-  needs a real content-level judgment (does this message plausibly
-  continue the existing ticket's summary, or not) — see the Feature 18
-  message-quality check below, which this reuses.
+  message like "Put not closed" gives no signal either way). Closed with a
+  real content-level judgment — see "Message quality" below.
 - **Not implemented** (deliberately deferred, documented so it isn't
   mistaken for an oversight): a citizen swipe-replying to a specific
   WhatsApp message (`context.id`) is already captured as `inReplyTo`, but
@@ -820,6 +818,53 @@ ever *creates* a new Assistant, so adding `check_complaint_status` to
 `ASSISTANT_TOOLS` doesn't reach an already-existing, deployed Assistant on
 its own. Run the new `scripts/update_assistant.py` once to push the updated
 tools/instructions onto the existing `OPENAI_ASSISTANT_ID`.
+
+**Message quality — coherence & same-topic checks (Feature 18).** Two
+related content-level judgments, both live-testing-driven, both in the new
+`app/classify/message_quality.py` (a plain chat-completion call — same
+pattern as `app/priority/llm_scorer.py`, not the Assistants gateway — so it
+needs only an API key, no assistant id) and both **best-effort**: any
+error/timeout/missing key returns `None`, and every caller treats that as
+"assume the safe default" — a false rejection/split here is worse than a
+false negative, since a citizen whose real complaint gets silently dropped
+has no other way to complain.
+
+- **`assess_coherence(text)`** — is this message clear enough to act on, or
+  does it read as gibberish/a garbled typo? Brevity/vagueness alone is
+  explicitly NOT the test ("no power" is coherent) — only text a human
+  agent genuinely couldn't act on qualifies. Channel behaviour deliberately
+  differs, per what was asked for:
+  - **Email — hard reject, no ticket at all.** `dispatcher.py`'s
+    `_handle_channel_message` calls this BEFORE `ensure_ticket_stub`, so an
+    incoherent email never gets a ticket stub (or a ticket number) — a
+    polite rejection is sent directly (`send_email`, no ticket to thread
+    it against) and the pipeline stops there.
+  - **WhatsApp — ask for confirmation, not reject.** A stub already exists
+    by the time this matters (Feature 12's "every message gets a stub"
+    still holds for WhatsApp), so instead `submit_complaint`'s new
+    `is_coherent` argument (the model's own honesty check on its
+    `complaint_summary`) is enforced in code in
+    `_process_via_assistant`'s `execute_tool` — `false` refuses the call
+    and tells the model to ask the citizen to confirm/clarify rather than
+    file it, mirroring the Feature 17 mandatory-fields refusal pattern
+    exactly (model reports its understanding via a tool argument; code
+    enforces the consequence, not just a prompt hint).
+- **`is_same_topic(existing_text, existing_category, new_text)`** — closes
+  the Feature 17 gap noted above: `ensure_ticket_stub`'s "exactly one open
+  ticket → append" default couldn't tell a genuine follow-up apart from an
+  unrelated second complaint, and a keyword classifier gives no signal
+  either way for an uncategorisable message. Now, when there's exactly one
+  open ticket, its original complaint text is fetched
+  (`db.get_messages` → first inbound message) and compared against the new
+  message; only a confident "different topic" creates a new ticket instead
+  of appending. Live-tested regression case: "No power" (existing ticket)
+  vs. "Put not closed" (new message) — same identity, one open ticket,
+  correctly recognised as different complaints.
+- **Rule-based (no-LLM) fallback:** both checks are LLM-only and simply
+  don't run without an API key (`available()` returns `False`) — the
+  rule-based path's existing behaviour (file a vague complaint after one
+  follow-up; append-on-exactly-one-open-ticket with no content check) is
+  unchanged, same graceful-degradation pattern as rubric priority scoring.
 
 ---
 
@@ -1358,8 +1403,12 @@ seed data; JWT auth + RBAC; transaction tracing & log-level control (this
 doc's [Logging](#logging-log-levels--transaction-tracing) section);
 cross-channel ticket threading/dedup (subject-line or explicit-reference
 matching, open-status-gated thread reuse, identity+open-count fallback for
-subject-less channels) and a "status of my complaint" summary, both
-channel-agnostic (see [Subject-line ticket threading & dedup](#subject-line-ticket-threading--dedup)).
+subject-less channels, content-level same-topic disambiguation) and a
+"status of my complaint" summary, both channel-agnostic (see
+[Subject-line ticket threading & dedup](#subject-line-ticket-threading--dedup));
+message-quality gating — coherence check (email hard-rejects with no
+ticket, WhatsApp asks for confirmation) and same-topic disambiguation, both
+LLM-driven and best-effort (see "Message quality" in the same section).
 
 **Not yet wired despite existing code:** the rule-based (no-LLM) identity
 gate recognises "anonymous" or a labeled reply to its structured intake

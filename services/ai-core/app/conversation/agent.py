@@ -484,6 +484,30 @@ class ConversationAgent:
                             + ". Ask the citizen for these before calling submit_complaint again."
                         ),
                     }
+                # Feature 18: the model's own honesty check on its
+                # complaint_summary — refused in code (not just discouraged
+                # by the instructions above) so an unclear/likely-mistyped
+                # complaint can't slip through just because the model
+                # decided to submit anyway. Channel-agnostic here: email's
+                # HARD reject (no ticket at all) happens earlier, before a
+                # stub ever exists (dispatcher.py's coherence pre-check) —
+                # by the time submit_complaint runs, a stub already exists
+                # for every channel, so the only remaining option is to ask
+                # for confirmation, not to un-create anything.
+                if not args.get("is_coherent", True):
+                    logger.info(
+                        "submit_complaint refused: complaint text judged unclear/incoherent "
+                        "traceId=%s threadId=%s",
+                        req.traceId, thread_key,
+                    )
+                    return {
+                        "error": "unclear_complaint",
+                        "message": (
+                            "The complaint text seems unclear or possibly mistyped. Ask the "
+                            "citizen to confirm or clarify what they meant before calling "
+                            "submit_complaint again."
+                        ),
+                    }
                 submitted_this_turn = True
                 return await self._tool_submit_complaint(req, thread_key, state, args)
             if name == "check_complaint_status":

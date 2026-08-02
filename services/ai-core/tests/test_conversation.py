@@ -902,6 +902,137 @@ def test_assistant_path_whatsapp_with_name_and_email_reaches_confirmed_and_compl
     assert "complaint.ready" in published_streams
 
 
+# ---------------------------------------------------------------------------
+# Feature 18: is_coherent gate on submit_complaint — refuses to file an
+# unclear/likely-mistyped complaint the model itself flagged, regardless of
+# channel (email's HARD no-ticket-at-all reject happens earlier, in
+# dispatcher.py, before a stub even exists — see test_dispatcher.py; by the
+# time submit_complaint runs a stub already exists for every channel, so
+# what's left here is "ask for confirmation," which applies uniformly).
+# ---------------------------------------------------------------------------
+
+def test_assistant_path_refuses_submit_complaint_when_model_flags_incoherent():
+    agent = ConversationAgent("t1")
+    req = _req(
+        ticketId="tkt-incoherent-1",
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
+        rawText="Put not closed",
+    )
+
+    captured = {}
+
+    async def fake_run_turn(tenant_id, state_key, user_message, execute_tool, additional_instructions):
+        await execute_tool("confirm_identity", {"declaredAnonymous": False})
+        captured["result"] = await execute_tool(
+            "submit_complaint",
+            {"complaint_summary": "Put not closed", "category_hint": "other", "is_coherent": False},
+        )
+        return "Just to confirm — did you mean a pit/manhole that hasn't been closed?"
+
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=True), \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_find_known_identity", new=AsyncMock(return_value={
+             "master_id": "m-1", "name": "Ashok", "email": "ashok@example.com",
+         })), \
+         patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "get_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent, "_save_state", new=AsyncMock()), \
+         patch.object(agent._openai, "run_turn", new=AsyncMock(side_effect=fake_run_turn)), \
+         patch.object(agent._db, "add_message", new=AsyncMock(return_value={})), \
+         patch.object(agent, "_publisher") as publisher, \
+         patch("app.conversation.agent.IdentityResolver") as resolver_cls:
+        resolver_cls.return_value.resolve = AsyncMock(
+            return_value={"masterId": "m-1", "identityStatus": "confirmed"})
+        publisher.publish = AsyncMock(return_value="1-0")
+        result = _run(agent.process(req))
+
+    assert captured["result"]["error"] == "unclear_complaint"
+    published_streams = [call.args[0] for call in publisher.publish.await_args_list]
+    assert "complaint.ready" not in published_streams
+    assert result["complaintReady"] is False
+
+
+def test_assistant_path_submits_complaint_when_model_confirms_coherent():
+    """Positive case: once the citizen confirms/clarifies and the model
+    reports is_coherent=true, submit_complaint proceeds as normal."""
+    agent = ConversationAgent("t1")
+    req = _req(
+        ticketId="tkt-incoherent-2",
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
+        rawText="Yes, the pit near my house hasn't been closed",
+    )
+
+    async def fake_run_turn(tenant_id, state_key, user_message, execute_tool, additional_instructions):
+        await execute_tool("confirm_identity", {"declaredAnonymous": False})
+        await execute_tool(
+            "submit_complaint",
+            {"complaint_summary": "An open pit near the citizen's house hasn't been closed",
+             "category_hint": "other", "is_coherent": True},
+        )
+        return "Thanks, we've logged your complaint."
+
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=True), \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
+         patch.object(agent, "_find_known_identity", new=AsyncMock(return_value={
+             "master_id": "m-1", "name": "Ashok", "email": "ashok@example.com",
+         })), \
+         patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "get_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent, "_save_state", new=AsyncMock()), \
+         patch.object(agent._openai, "run_turn", new=AsyncMock(side_effect=fake_run_turn)), \
+         patch.object(agent._db, "add_message", new=AsyncMock(return_value={})), \
+         patch.object(agent, "_publisher") as publisher, \
+         patch("app.conversation.agent.IdentityResolver") as resolver_cls:
+        resolver_cls.return_value.resolve = AsyncMock(
+            return_value={"masterId": "m-1", "identityStatus": "confirmed"})
+        publisher.publish = AsyncMock(return_value="1-0")
+        result = _run(agent.process(req))
+
+    published_streams = [call.args[0] for call in publisher.publish.await_args_list]
+    assert "complaint.ready" in published_streams
+    assert result["complaintReady"] is True
+
+
+def test_assistant_path_submit_complaint_gate_defaults_to_coherent_when_field_omitted():
+    """Defensive default: if the model somehow omits is_coherent despite it
+    being a required schema field, the CODE-LEVEL gate must not refuse —
+    default to coherent rather than blocking every complaint that happens
+    to omit it."""
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="tkt-incoherent-3", rawText="My bill is wrong")
+
+    async def fake_run_turn(tenant_id, state_key, user_message, execute_tool, additional_instructions):
+        result = await execute_tool(
+            "submit_complaint", {"complaint_summary": "My bill is wrong", "category_hint": "billing"})
+        assert "error" not in result
+        return "Thanks, we've logged your complaint."
+
+    with patch.object(OpenAIAssistantGateway, "is_available", return_value=True), \
+         patch.object(agent, "_load_state", new=AsyncMock(return_value={
+             "identity_status": "confirmed", "master_id": "m-1", "extracted_fields": {},
+             "questions_asked": 0, "complaint_ready": False,
+         })), \
+         patch.object(agent, "_find_known_identity", new=AsyncMock(return_value={
+             "master_id": "m-1", "name": "Jane Doe",
+         })), \
+         patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "get_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent, "_save_state", new=AsyncMock()), \
+         patch.object(agent._openai, "run_turn", new=AsyncMock(side_effect=fake_run_turn)), \
+         patch.object(agent._db, "add_message", new=AsyncMock(return_value={})), \
+         patch.object(agent, "_publisher") as publisher:
+        publisher.publish = AsyncMock(return_value="1-0")
+        result = _run(agent.process(req))
+
+    published_streams = [call.args[0] for call in publisher.publish.await_args_list]
+    assert "complaint.ready" in published_streams
+    assert result["complaintReady"] is True
+
+
 def test_render_additional_instructions_lists_actually_missing_fields():
     req = _req(
         channel="whatsapp",

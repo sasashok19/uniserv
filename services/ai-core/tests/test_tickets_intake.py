@@ -1,7 +1,7 @@
 """Unit tests for ticket stub lifecycle (Feature 06 x 12 x 15)."""
 
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from app.dedup.service import OPEN_STATUSES
 from app.tickets.intake import ensure_ticket_stub, extract_ticket_number, update_ticket_identity
@@ -151,6 +151,103 @@ def test_ensure_ticket_stub_whatsapp_appends_to_sole_open_ticket():
     db.create_ticket.assert_not_called()
     db.list_tickets.assert_awaited_once_with(
         "t1", identityId="m-2", status=OPEN_STATUSES, sortBy="createdAt", sortDir="desc", trace_id="tr-7")
+
+
+# ---------------------------------------------------------------------------
+# Feature 18: even with the reorder fix, "exactly one open ticket" was still
+# an UNCONDITIONAL append — count alone can't tell a genuine follow-up apart
+# from an unrelated second complaint, and a keyword classifier gives no
+# signal either way for text like "Put not closed" (matches no category).
+# These test the real content-level check that closes that gap.
+# ---------------------------------------------------------------------------
+
+def test_ensure_ticket_stub_creates_new_when_sole_open_ticket_is_a_different_topic():
+    """The exact reported bug, reproduced: "No power" (existing ticket) vs
+    "Put not closed" (new message) — same identity, one open ticket, but a
+    different complaint."""
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(return_value=[
+        {"id": "t-power", "ticket_number": "TKT-00090", "category": "outage"},
+    ])
+    db.find_by_phone = AsyncMock(return_value={"master_id": "m-ashok"})
+    db.get_messages = AsyncMock(return_value=[
+        {"direction": "inbound", "content": "No power"},
+    ])
+    db.create_ticket = AsyncMock(return_value={"id": "t-new", "ticketNumber": "TKT-00091"})
+
+    with patch("app.tickets.intake.is_same_topic", new=AsyncMock(return_value=False)) as same_topic:
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+918939012727", "whatsapp",
+            raw_text="Put not closed", channel_identity_type="phone",
+            channel_identity_value="+918939012727", trace_id="tr-18a"))
+
+    assert stub == {"id": "t-new", "ticketNumber": "TKT-00091"}
+    same_topic.assert_awaited_once_with("No power", "outage", "Put not closed")
+
+
+def test_ensure_ticket_stub_appends_when_sole_open_ticket_is_the_same_topic():
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(return_value=[
+        {"id": "t-power", "ticket_number": "TKT-00090", "category": "outage"},
+    ])
+    db.find_by_phone = AsyncMock(return_value={"master_id": "m-ashok"})
+    db.get_messages = AsyncMock(return_value=[
+        {"direction": "inbound", "content": "No power"},
+    ])
+    db.create_ticket = AsyncMock()
+
+    with patch("app.tickets.intake.is_same_topic", new=AsyncMock(return_value=True)):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+918939012727", "whatsapp",
+            raw_text="Still no power, any update?", channel_identity_type="phone",
+            channel_identity_value="+918939012727", trace_id="tr-18b"))
+
+    assert stub == {"id": "t-power", "ticketNumber": "TKT-00090"}
+    db.create_ticket.assert_not_called()
+
+
+def test_ensure_ticket_stub_appends_when_same_topic_check_unavailable():
+    """Best-effort: if the LLM check itself is unavailable/fails (returns
+    None), fall back to the safe default (append) rather than blocking or
+    guessing wrong."""
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(return_value=[
+        {"id": "t-power", "ticket_number": "TKT-00090", "category": "outage"},
+    ])
+    db.find_by_phone = AsyncMock(return_value={"master_id": "m-ashok"})
+    db.get_messages = AsyncMock(return_value=[{"direction": "inbound", "content": "No power"}])
+    db.create_ticket = AsyncMock()
+
+    with patch("app.tickets.intake.is_same_topic", new=AsyncMock(return_value=None)):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+918939012727", "whatsapp",
+            raw_text="Put not closed", channel_identity_type="phone",
+            channel_identity_value="+918939012727", trace_id="tr-18c"))
+
+    assert stub == {"id": "t-power", "ticketNumber": "TKT-00090"}
+    db.create_ticket.assert_not_called()
+
+
+def test_ensure_ticket_stub_skips_same_topic_check_when_no_message_history():
+    """No fetchable original complaint text (e.g. get_messages failed or the
+    ticket somehow has no inbound message yet) -- skip the LLM call
+    entirely and fall back to append, rather than comparing against nothing."""
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(return_value=[
+        {"id": "t-power", "ticket_number": "TKT-00090", "category": "outage"},
+    ])
+    db.find_by_phone = AsyncMock(return_value={"master_id": "m-ashok"})
+    db.get_messages = AsyncMock(return_value=[])
+    db.create_ticket = AsyncMock()
+
+    with patch("app.tickets.intake.is_same_topic", new=AsyncMock()) as same_topic:
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+918939012727", "whatsapp",
+            raw_text="Put not closed", channel_identity_type="phone",
+            channel_identity_value="+918939012727", trace_id="tr-18d"))
+
+    assert stub == {"id": "t-power", "ticketNumber": "TKT-00090"}
+    same_topic.assert_not_called()
 
 
 def test_ensure_ticket_stub_whatsapp_creates_new_when_multiple_open_tickets():

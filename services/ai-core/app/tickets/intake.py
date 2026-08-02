@@ -57,12 +57,26 @@ one. Fixes, all channel-agnostic in principle:
   A full "which of your N open complaints is this" back-and-forth is not
   implemented yet (see README's "Subject-line ticket threading & dedup"
   section).
+
+Feature 18: even the fix above has a gap count-based logic alone can't
+close — when there is EXACTLY one open ticket, "append" was still the
+unconditional default, and a keyword classifier gives no signal either way
+for an uncategorisable message ("Put not closed" doesn't match ANY
+category keyword, same as a genuine vague follow-up like "any update?").
+Live-tested: a second, unrelated complaint got appended onto an existing
+"No power" ticket even after the reorder fix, because there was only ONE
+open ticket at the time. Closed with a real content judgment
+(`app/classify/message_quality.is_same_topic`) comparing the new message
+against the existing ticket's own original complaint text — best-effort
+(falls back to "same topic", i.e. append, on any LLM failure/unavailability,
+same as every other LLM-assisted decision in this codebase).
 """
 
 import logging
 import re
 from typing import Optional
 
+from app.classify.message_quality import is_same_topic
 from app.dedup.service import OPEN_STATUSES
 from app.identity.db_client import DbWriterClient
 
@@ -136,9 +150,21 @@ async def ensure_ticket_stub(
                 tenant_id, identityId=identity["master_id"], status=OPEN_STATUSES,
                 sortBy="createdAt", sortDir="desc", trace_id=trace_id)
             if len(open_tickets) == 1:
+                candidate = open_tickets[0]
+                existing_text = await _existing_complaint_text(db, candidate["id"], trace_id)
+                same_topic = True
+                if existing_text:
+                    same_topic = await is_same_topic(existing_text, candidate.get("category"), raw_text or "")
+                if same_topic is False:
+                    logger.info(
+                        "identity's one open ticket looks like a different topic — creating a new "
+                        "ticket rather than appending traceId=%s existingTicketId=%s",
+                        trace_id, candidate["id"],
+                    )
+                    return await _create_stub(db, tenant_id, thread_key, channel, origin_message_id, trace_id)
                 logger.info("ticket resolved via identity's sole open ticket traceId=%s ticketId=%s",
-                            trace_id, open_tickets[0]["id"])
-                return {"id": open_tickets[0]["id"], "ticketNumber": open_tickets[0].get("ticket_number")}
+                            trace_id, candidate["id"])
+                return {"id": candidate["id"], "ticketNumber": candidate.get("ticket_number")}
             if len(open_tickets) > 1:
                 logger.info(
                     "identity has %d open tickets and no explicit reference — creating a new ticket "
@@ -156,6 +182,20 @@ async def ensure_ticket_stub(
         return {"id": existing[0]["id"], "ticketNumber": existing[0].get("ticket_number")}
 
     return await _create_stub(db, tenant_id, thread_key, channel, origin_message_id, trace_id)
+
+
+async def _existing_complaint_text(db: DbWriterClient, ticket_id: str, trace_id: Optional[str]) -> Optional[str]:
+    """The ticket's ORIGINAL complaint text (its first inbound message) —
+    the "existing complaint" side of the same-topic comparison above.
+    Best-effort: any failure just means the comparison is skipped (falls
+    back to the safe "same topic" default in the caller), never blocks
+    ticket routing over a message-history fetch problem."""
+    try:
+        messages = await db.get_messages(ticket_id, trace_id=trace_id)
+    except Exception:  # noqa: BLE001 - best-effort, see docstring
+        return None
+    inbound = [m for m in messages if m.get("direction") == "inbound" and m.get("content")]
+    return inbound[0]["content"] if inbound else None
 
 
 async def _create_stub(
