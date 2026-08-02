@@ -500,16 +500,15 @@ cd services/db-writer  && mvn quarkus:dev
   The Ticket Queue table shows the same resolved name in its own
   "Assigned to" column.
 - `src/app/status/[ref]/page.tsx` — public, unauthenticated, server-rendered
-  citizen status lookup by `ANON-XXXX` ref or email; calls api-gateway's
-  `GET /api/v1/public/status/{ref}` server-side.
+  citizen status lookup by `TKT-XXXXX` ticket number, `ANON-XXXX` ref, or
+  email; calls api-gateway's `GET /api/v1/public/status/{ref}` server-side.
 - `src/app/page.tsx` — the public landing page (`/`). Was a bare placeholder
   whose "Track a complaint" link pointed at a hardcoded example ref
   (`ANON-TEST`) — no real way for a citizen to look up their OWN complaint.
   Now a branded, high-contrast hero with a working search form that submits
-  to `/status/{value}` (client-side `router.push`, matching what
-  `PublicStatusResource` actually accepts: an `ANON-XXXX` ref or an email —
-  **not** a phone number or a `TKT-XXXXX` ticket number, so the copy
-  deliberately doesn't imply either works). "Agent sign in" is kept as a
+  to `/status/{value}` (client-side `router.push`), matching what
+  `PublicStatusResource` accepts — **not** a phone number, so the copy
+  deliberately doesn't imply that works. "Agent sign in" is kept as a
   small, secondary link to `/login` — citizens are this page's primary
   audience, not staff.
 - `src/app/api/*` — Next.js route handlers acting as a thin BFF: proxy to
@@ -1116,7 +1115,7 @@ own tickets and `/agents` performance are lead/admin only via
   than `olderThanDays` (default 60)
 
 **Public citizen portal**
-- `GET /api/v1/public/status/{ref}` — no auth; `ref` is an `ANON-XXXX` ref or an email
+- `GET /api/v1/public/status/{ref}` — no auth; `ref` is a `TKT-XXXXX` ticket number, an `ANON-XXXX` ref, or an email
 
 **Channel webhooks**
 - `POST /api/v1/webhooks/whatsapp` (HMAC-validated), `GET /api/v1/webhooks/whatsapp` (Meta handshake)

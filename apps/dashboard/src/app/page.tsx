@@ -9,10 +9,11 @@ import { useState } from "react";
  * "Track a complaint" link pointed at a hardcoded example ref (`ANON-TEST`)
  * — there was no real way for a citizen to look up their OWN complaint.
  * This is now a working search that submits to `/status/{ref}`
- * (`PublicStatusResource` accepts an `ANON-XXXX` reference or an email —
- * NOT a phone number or a `TKT-XXXXX` ticket number, so the copy below
- * must not imply otherwise). "Agent sign in" is kept as a small, secondary
- * link — citizens are the primary audience of this page, staff are not.
+ * (`PublicStatusResource` accepts a `TKT-XXXXX` ticket number, an
+ * `ANON-XXXX` reference, or an email — NOT a phone number, so the copy
+ * below must not imply that works). "Agent sign in" is kept as a small,
+ * secondary link — citizens are the primary audience of this page, staff
+ * are not.
  */
 export default function Home() {
   const router = useRouter();
@@ -51,8 +52,8 @@ export default function Home() {
         <div className="mt-10 w-full rounded-2xl border border-white/15 bg-white/10 p-6 text-left shadow-2xl backdrop-blur-md sm:p-8">
           <h2 className="text-xl font-semibold text-white">Track your complaint</h2>
           <p className="mt-1 text-sm text-white/70">
-            Enter the reference number we gave you (e.g. ANON-1234) or the
-            email address you wrote in from.
+            Enter your ticket number (e.g. TKT-00042), your ANON-XXXX
+            reference, or the email address you wrote in from.
           </p>
           <form onSubmit={trackComplaint} className="mt-4 flex flex-col gap-2 sm:flex-row" noValidate>
             <input
@@ -61,8 +62,8 @@ export default function Home() {
                 setQuery(e.target.value);
                 if (error) setError("");
               }}
-              placeholder="ANON-1234 or you@example.com"
-              aria-label="Reference number or email"
+              placeholder="TKT-00042, ANON-1234, or you@example.com"
+              aria-label="Ticket number, reference number, or email"
               className="w-full rounded-lg border border-white/20 bg-white/95 px-4 py-2.5 text-sm text-slate-800 placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#02C39A]"
             />
             <button
