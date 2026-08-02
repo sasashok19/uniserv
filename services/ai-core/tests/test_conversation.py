@@ -713,6 +713,102 @@ def test_tool_confirm_identity_promotes_to_confirmed_once_mandatory_fields_prese
     assert update_ticket.await_args.args[1]["identityStatus"] == "confirmed"
 
 
+# ---------------------------------------------------------------------------
+# Feature 17 fix: providedFields bridge (live-testing regression, 2026-08-02
+# transcript). A verified WhatsApp citizen gave their name/email in casual,
+# unlabeled phrasing ("Ashok, miscemail19@gmail.com"; later "I already
+# provided the name… ashok") — the label-anchored regex never matched either
+# reply, so identity_status stayed "pending" forever even though the model
+# itself correctly understood who was writing in. providedFields lets the
+# model hand that understanding to the gate directly instead of making us
+# re-derive it from raw text.
+# ---------------------------------------------------------------------------
+
+def test_merge_provided_fields_maps_label_to_key_and_validates():
+    from app.conversation.agent import _merge_provided_fields
+    state = {}
+    _merge_provided_fields(state, {"Name": "Ashok", "Email": "miscemail19@gmail.com"}, catalog_for_tenant(None))
+
+    assert state["intake"]["name"] == {"value": "Ashok", "valid": True, "source": "extracted"}
+    assert state["intake"]["email"] == {
+        "value": "miscemail19@gmail.com", "valid": True, "source": "extracted",
+    }
+
+
+def test_merge_provided_fields_ignores_unknown_labels_and_blank_values():
+    from app.conversation.agent import _merge_provided_fields
+    state = {}
+    _merge_provided_fields(state, {"NotARealLabel": "whatever", "Name": "   "}, catalog_for_tenant(None))
+    assert state.get("intake", {}) == {}
+
+
+def test_merge_provided_fields_overwrites_earlier_regex_extraction():
+    from app.conversation.agent import _merge_provided_fields
+    state = {"intake": {"name": {"value": None, "valid": True, "source": None}}}
+    _merge_provided_fields(state, {"Name": "Ashok"}, catalog_for_tenant(None))
+    assert state["intake"]["name"]["value"] == "Ashok"
+
+
+def test_tool_confirm_identity_provided_fields_satisfies_gate_from_casual_phrasing():
+    """The exact reported bug, reproduced directly against the tool handler:
+    the model calls confirm_identity with providedFields={"Name": "Ashok"} —
+    a value that "Ashok, miscemail19@gmail.com" (no literal "name"/"email"
+    words) could never have satisfied via regex alone — and the ticket now
+    correctly promotes to confirmed instead of staying pending forever."""
+    agent = ConversationAgent("t1")
+    req = _req(
+        ticketId="tkt-ashok-1",
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+918939012727", verified=True),
+        rawText="Ashok, miscemail19@gmail.com",
+    )
+    state = {"identity_status": "pending", "master_id": None, "intake": {}}
+
+    with patch("app.conversation.agent.IdentityResolver") as resolver_cls, \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})) as update_ticket:
+        resolver_cls.return_value.resolve = AsyncMock(
+            return_value={"masterId": "m-ashok", "identityStatus": "confirmed"})
+        result = _run(agent._tool_confirm_identity(
+            req, state,
+            {"declaredAnonymous": False, "providedFields": {"Name": "Ashok", "Email": "miscemail19@gmail.com"}},
+            DEFAULT_INTAKE_FIELDS["whatsapp"], catalog_for_tenant(None)))
+
+    assert state["identity_status"] == "confirmed"
+    assert result["missingFields"] == []
+    assert update_ticket.await_args.args[1]["identityStatus"] == "confirmed"
+    # The full (untruncated) email now also reaches the identity resolver.
+    resolve_req = resolver_cls.return_value.resolve.await_args.args[0]
+    assert resolve_req.confirmedName == "Ashok"
+
+
+def test_tool_confirm_identity_provided_fields_satisfies_gate_from_ellipsis_phrasing():
+    """The third message in the same transcript: "I already provided the
+    name… ashok" — contains the word "name" but followed by an ellipsis, not
+    a recognised separator, so the regex still wouldn't have matched. Model
+    understood it regardless and can supply it via providedFields."""
+    agent = ConversationAgent("t1")
+    req = _req(
+        ticketId="tkt-ashok-1",
+        channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+918939012727", verified=True),
+        rawText="I already provided the name… ashok",
+    )
+    state = {"identity_status": "pending", "master_id": None, "intake": {
+        "email": {"value": "miscemail19@gmail.com", "valid": True, "source": "extracted"},
+    }}
+
+    with patch("app.conversation.agent.IdentityResolver") as resolver_cls, \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})):
+        resolver_cls.return_value.resolve = AsyncMock(
+            return_value={"masterId": "m-ashok", "identityStatus": "confirmed"})
+        result = _run(agent._tool_confirm_identity(
+            req, state, {"declaredAnonymous": False, "providedFields": {"Name": "ashok"}},
+            DEFAULT_INTAKE_FIELDS["whatsapp"], catalog_for_tenant(None)))
+
+    assert state["identity_status"] == "confirmed"
+    assert result["missingFields"] == []
+
+
 def test_assistant_path_whatsapp_bare_message_does_not_reach_confirmed_or_complaint_ready():
     """End-to-end regression test for the reported bug, exercising the real
     `_process_via_assistant` turn (not just the tool handlers in isolation):

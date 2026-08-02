@@ -93,6 +93,33 @@ def _flatten_intake(intake: dict) -> dict:
     return {k: v["value"] for k, v in intake.items() if v.get("source") == "extracted"}
 
 
+def _merge_provided_fields(state: dict, provided_fields: dict, catalog: dict) -> None:
+    """Merge the assistant's explicit `confirm_identity(providedFields=...)`
+    argument (label -> value) into the tracked intake state (Feature 17).
+
+    This is the bridge a label-anchored regex can't be: the model has
+    already understood the citizen's own words ("it's Ashok" is obviously a
+    name to a human, but matches no "name ..." pattern), so once it hands
+    that understanding back to us explicitly, it's authoritative — no
+    validation-of-plausibility beyond the catalog's own validator, and it
+    overwrites rather than defers to whatever (if anything) the per-turn
+    regex pass already found, since this is a deliberate, later signal.
+    Unknown labels (a typo, or a label from a stale/different tenant
+    config) are silently ignored rather than raising — a chat turn must
+    never crash because the model echoed back a slightly wrong label.
+    """
+    if not provided_fields:
+        return
+    label_to_key = {spec["label"]: key for key, spec in catalog.items()}
+    intake = state.setdefault("intake", {})
+    for label, value in provided_fields.items():
+        key = label_to_key.get(label)
+        if not key or not isinstance(value, str) or not value.strip():
+            continue
+        value = value.strip()
+        intake[key] = {"value": value, "valid": catalog[key]["validate"](value), "source": "extracted"}
+
+
 class ChannelIdentityIn(BaseModel):
     type: Optional[str] = None
     value: Optional[str] = None
@@ -495,6 +522,13 @@ class ConversationAgent:
         declared_anonymous = bool(args.get("declaredAnonymous", False))
         if declared_anonymous:
             state["declared_anonymous"] = True
+        # Feature 17 fix: providedFields is the bridge between what the model
+        # already correctly understood from casual conversation (e.g. "it's
+        # Ashok") and the missing_fields gate below, which previously only
+        # ever saw whatever a label-anchored regex could re-derive from raw
+        # text — and silently kept a ticket "pending" forever whenever a
+        # citizen answered without literally saying the field's name.
+        _merge_provided_fields(state, args.get("providedFields") or {}, catalog)
         identity_type = args.get("identityType") or req.channelIdentity.type
         identity_value = args.get("identityValue") or req.channelIdentity.value
         # Only trust "verified" when the model is confirming the channel's own native
@@ -503,6 +537,11 @@ class ConversationAgent:
 
         confirmed_email = identity_value if (identity_type == "email" and not declared_anonymous) else None
         confirmed_phone = identity_value if (identity_type == "phone" and not declared_anonymous) else None
+        # Sourced from the SAME merged intake state the gate checks below —
+        # not a separate "name" tool argument (the schema never declared
+        # one, so it was always None) — guaranteeing the identity profile
+        # and the gate agree on what "name" was actually provided.
+        confirmed_name = (state.get("intake", {}).get("name") or {}).get("value")
         # The channel's own NATIVE identity always rides along, whatever the model
         # confirmed with. Without this, an email citizen who confirms via a typed
         # phone number gets a phone-only profile — their sender address (known all
@@ -529,7 +568,7 @@ class ConversationAgent:
             declaredAnonymous=declared_anonymous,
             confirmedEmail=confirmed_email,
             confirmedPhone=confirmed_phone,
-            confirmedName=args.get("name"),
+            confirmedName=confirmed_name,
             rawText=req.rawText,
             traceId=req.traceId,
         )

@@ -17,7 +17,11 @@ CONFIRM_IDENTITY_TOOL = {
             "number — pass declaredAnonymous=false with no identityType/identityValue "
             "to accept the channel's native identity), once the citizen supplies an "
             "email or phone number in the chat, or once they say they want to stay "
-            "anonymous."
+            "anonymous. ALSO call this again (even if identity was already confirmed) "
+            "whenever the citizen gives you a NEW value for any of the tenant's "
+            "required fields (e.g. their name), passing it via providedFields — this "
+            "is the ONLY way that information reaches ticket creation, regardless of "
+            "how casually they phrase it."
         ),
         "parameters": {
             "type": "object",
@@ -34,6 +38,18 @@ CONFIRM_IDENTITY_TOOL = {
                 "identityValue": {
                     "type": "string",
                     "description": "The phone number or email the citizen supplied in the chat, if any.",
+                },
+                "providedFields": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": (
+                        "Map of field LABEL -> value, for ANY of the tenant's requested "
+                        "fields shown to you in this turn's instructions (e.g. \"Name\", "
+                        "\"Email\", \"Service/Customer ID\") that the citizen has stated "
+                        "anywhere in this conversation so far — however casually phrased. "
+                        "Use the exact label text you were given, as the object key. "
+                        "Include every value you already know, not just new ones this turn."
+                    ),
                 },
             },
             "required": ["declaredAnonymous"],
@@ -110,6 +126,20 @@ or phone number. If they reply with one, call confirm_identity with that \
 identityType/identityValue. If they say "anonymous" (or equivalent), call \
 confirm_identity with declaredAnonymous=true.
 - Do not discuss the complaint until identity is resolved (confirmed or anonymous).
+
+Tenant-required fields (e.g. Name, Email, Service/Customer ID — the exact list is \
+in this turn's instructions, along with which are still missing):
+- These are tracked SEPARATELY from identity confirmation above — a verified \
+channel resolves identity instantly, but the ticket still cannot be confirmed \
+until these are ALSO satisfied.
+- Whenever the citizen states a value for one of these — in ANY phrasing, labeled \
+or not ("my name is Ashok", "Ashok", "it's Ashok") — call confirm_identity again \
+with providedFields containing every value you know so far, keyed by the exact \
+label text you were given.
+- If confirm_identity's (or submit_complaint's) result still lists missing fields \
+after you've just done this, that means the value you sent wasn't understood — \
+do NOT call the same tool again with the same information. Instead, ask the \
+citizen a clear follow-up question for exactly what's still listed as missing.
 
 Info gathering (after identity is resolved):
 - You need a complaint_summary (1-3 sentences on what happened) and a \

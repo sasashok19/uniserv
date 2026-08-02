@@ -91,6 +91,29 @@ def test_extract_configured_fields_flags_invalid_but_supplied_value():
     assert extracted["mobile"]["source"] == "extracted"
 
 
+def test_extract_configured_fields_email_word_boundary_does_not_match_mid_word():
+    """Regression: 'miscemail19@gmail.com' contains "email" as a literal
+    substring (m-i-s-c-EMAIL-19...) — without a word-boundary check before
+    the label, the old regex matched starting mid-word and captured a
+    truncated '19@gmail.com' instead of the real address. Live-testing
+    transcript that surfaced this: citizen replied "Ashok, miscemail19@gmail.com"."""
+    extracted = extract_configured_fields(
+        "Ashok, miscemail19@gmail.com", "whatsapp", "+919876543210", True,
+        [{"key": "email", "mandatory": True, "mandatoryIfAnonymous": False}],
+    )
+    # No literal "email" LABEL word (only the substring inside the address
+    # itself) -> correctly not extracted, rather than silently truncated.
+    assert extracted["email"]["value"] is None
+
+
+def test_extract_configured_fields_email_still_matches_with_real_label():
+    extracted = extract_configured_fields(
+        "My email is miscemail19@gmail.com", "whatsapp", "+919876543210", True,
+        [{"key": "email", "mandatory": True, "mandatoryIfAnonymous": False}],
+    )
+    assert extracted["email"] == {"value": "miscemail19@gmail.com", "valid": True, "source": "extracted"}
+
+
 def test_missing_fields_flags_absent_mandatory_field():
     extracted = {"name": {"value": None, "valid": True, "source": None},
                  "mobile": {"value": None, "valid": True, "source": None},

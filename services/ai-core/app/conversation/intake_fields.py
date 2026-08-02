@@ -37,24 +37,27 @@ def _extract_name(text: str) -> Optional[str]:
 
 
 def _extract_mobile(text: str) -> Optional[str]:
-    match = re.search(rf"mobile(?:\s*number)?\s*(?:\([^)]*\))?{_SEP}(\+?[\d\s\-]{{4,15}})", text, re.IGNORECASE)
+    match = re.search(rf"\bmobile(?:\s*number)?\s*(?:\([^)]*\))?{_SEP}(\+?[\d\s\-]{{4,15}})", text, re.IGNORECASE)
     return _digits_only(match.group(1)) or None if match else None
 
 
 def _extract_email(text: str) -> Optional[str]:
+    # \b matters here: without it, "email" matches mid-word inside the
+    # citizen's OWN address (e.g. "miscemail19@gmail.com" contains "email"
+    # as a substring), silently truncating the captured value.
     match = re.search(
-        rf"email{_SEP}([A-Za-z0-9][A-Za-z0-9._%+\-]*@[A-Za-z0-9][A-Za-z0-9.\-]*\.[A-Za-z]{{2,24}})",
+        rf"\bemail{_SEP}([A-Za-z0-9][A-Za-z0-9._%+\-]*@[A-Za-z0-9][A-Za-z0-9.\-]*\.[A-Za-z]{{2,24}})",
         text, re.IGNORECASE)
     return match.group(1).strip() if match else None
 
 
 def _extract_service_id(text: str) -> Optional[str]:
-    match = re.search(rf"(?:service|customer)[\s/]*id{_SEP}([A-Za-z0-9\-]{{2,20}})", text, re.IGNORECASE)
+    match = re.search(rf"\b(?:service|customer)[\s/]*id{_SEP}([A-Za-z0-9\-]{{2,20}})", text, re.IGNORECASE)
     return match.group(1).strip() if match else None
 
 
 def _extract_pincode(text: str) -> Optional[str]:
-    match = re.search(rf"(?:area\s*)?pin\s*code\s*(?:\([^)]*\))?{_SEP}([\d\s\-]{{4,10}})", text, re.IGNORECASE)
+    match = re.search(rf"(?:area\s*)?\bpin\s*code\s*(?:\([^)]*\))?{_SEP}([\d\s\-]{{4,10}})", text, re.IGNORECASE)
     return _digits_only(match.group(1)) or None if match else None
 
 

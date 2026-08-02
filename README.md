@@ -285,6 +285,22 @@ cd services/db-writer  && mvn quarkus:dev
   until the tenant's mandatory fields for that channel are actually present
   — fixing a real bug where a bare WhatsApp message with no name/email
   reached a fully "Confirmed" ticket despite both being mandatory.
+  **Live-testing follow-up bug:** the label-anchored regex extractor
+  (designed for the rule-based path's structured numbered-form replies)
+  couldn't understand casual conversational replies at all — "Ashok,
+  miscemail19@gmail.com" (no literal "name"/"email" words) or "I already
+  provided the name… ashok" (the separator regex didn't recognise an
+  ellipsis) both left the ticket stuck "pending" forever despite the model
+  correctly identifying the citizen every time. Fixed by giving the model a
+  direct channel to hand over what it already understood:
+  `confirm_identity`'s `providedFields` argument (label → value, using the
+  exact labels shown in that turn's instructions) is merged into the
+  tracked intake state (`_merge_provided_fields`) and takes priority over
+  the regex pass, which remains only as a cheap best-effort pre-check.
+  `_extract_email` (and the other label extractors) also gained a
+  word-boundary check — without it, "email" matched mid-word inside the
+  citizen's own address (`miscemail19@gmail.com` contains "email" as a
+  substring), silently truncating the captured value.
   **Conversation memory (Valkey state + the OpenAI thread) is keyed by the
   ticket** (`_conv_key` → `ticket:<id>`), not the per-message email thread key,
   so a citizen's identity reply — which threads off *our* outbound email and so
