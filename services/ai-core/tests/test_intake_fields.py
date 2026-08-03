@@ -230,6 +230,102 @@ def test_custom_digits_field_extracts_validates_and_blocks_gate():
     assert any("Consumer Number" in m for m in missing)
 
 
+# ---------------------------------------------------------------------------
+# Feature 20: email validation + consumer-domain typo detection.
+#
+# Reported bug: "Nithya@gmaill.com" was accepted outright (the validator was
+# `bool(v)`), written onto the identity profile, and the citizen was never
+# asked about it — so every notification we'd ever send them would bounce
+# into nothing.
+# ---------------------------------------------------------------------------
+
+from app.conversation.intake_fields import (  # noqa: E402
+    is_email_syntax_valid,
+    suggest_email_correction,
+    validate_email,
+)
+
+_EMAIL_FIELD = [{"key": "email", "mandatory": True, "mandatoryIfAnonymous": False}]
+
+
+def test_suggest_email_correction_catches_the_reported_typo():
+    assert suggest_email_correction("Nithya@gmaill.com") == "Nithya@gmail.com"
+
+
+def test_suggest_email_correction_catches_transposed_letters():
+    """"gmial"/"hotmial" are distance TWO under plain Levenshtein — a
+    substitution-only check misses both, and they're among the commonest
+    real mistypings there are."""
+    assert suggest_email_correction("x@gmial.com") == "x@gmail.com"
+    assert suggest_email_correction("x@hotmial.com") == "x@hotmail.com"
+
+
+def test_suggest_email_correction_covers_insertions_deletions_substitutions():
+    assert suggest_email_correction("x@yahooo.com") == "x@yahoo.com"
+    assert suggest_email_correction("x@gmail.co") == "x@gmail.com"
+    assert suggest_email_correction("x@gnail.com") == "x@gmail.com"
+
+
+def test_suggest_email_correction_never_second_guesses_a_plausible_domain():
+    """Only a domain that is one keystroke from a KNOWN consumer domain is
+    ever questioned — an ordinary corporate/government address must sail
+    through untouched, as must a known domain that merely resembles another
+    ("mail.com" is one character from "gmail.com" but is perfectly real)."""
+    assert suggest_email_correction("citizen@gmail.com") is None
+    assert suggest_email_correction("ceo@uniserve-energy.co.in") is None
+    assert suggest_email_correction("officer@tn.gov.in") is None
+    assert suggest_email_correction("someone@mail.com") is None
+    assert suggest_email_correction(None) is None
+    assert suggest_email_correction("no-at-sign") is None
+
+
+def test_validate_email_rejects_malformed_and_typo_addresses_only():
+    assert validate_email("dharshini.s.raj@gmail.com") is True
+    assert validate_email("officer@tn.gov.in") is True
+    assert validate_email("Nithya@gmaill.com") is False    # typo domain
+    assert validate_email("noatsign") is False             # malformed
+    assert validate_email("bad@@x.com") is False
+    assert validate_email("trailing@dot.") is False
+    assert validate_email("") is False
+    assert is_email_syntax_valid("Nithya@gmaill.com") is True  # shape is fine; the DOMAIN is the problem
+
+
+def test_missing_fields_asks_the_citizen_to_confirm_a_likely_typo():
+    """A refused email must come back as an actionable question naming both
+    spellings — not as a bare "invalid", which tells the citizen nothing and
+    tells the assistant nothing to relay."""
+    extracted = {"email": {"value": "Nithya@gmaill.com", "valid": False, "source": "extracted"}}
+    missing = missing_fields(extracted, _EMAIL_FIELD, declared_anonymous=False)
+
+    assert len(missing) == 1
+    assert "Nithya@gmail.com" in missing[0]     # the suggestion
+    assert "Nithya@gmaill.com" in missing[0]    # what they actually typed
+
+
+def test_missing_fields_falls_back_to_generic_wording_for_unguessable_addresses():
+    extracted = {"email": {"value": "not-an-email", "valid": False, "source": "extracted"}}
+    missing = missing_fields(extracted, _EMAIL_FIELD, declared_anonymous=False)
+
+    assert len(missing) == 1
+    assert "not-an-email" in missing[0]
+    assert "did you mean" not in missing[0]
+
+
+def test_valid_email_on_retry_clears_the_gate():
+    """The end of the reported transcript: the citizen sends a real address
+    and nothing is outstanding any more — which is what lets the ticket move
+    to confirmed."""
+    extracted = {"email": {"value": "dharshini.s.raj@gmail.com", "valid": True, "source": "extracted"}}
+    assert missing_fields(extracted, _EMAIL_FIELD, declared_anonymous=False) == []
+
+
+def test_email_field_validation_flows_through_the_catalog_extractor():
+    extracted = extract_configured_fields(
+        "My email is Nithya@gmaill.com", "whatsapp", "+918939014142", True, _EMAIL_FIELD)
+    assert extracted["email"]["value"] == "Nithya@gmaill.com"
+    assert extracted["email"]["valid"] is False
+
+
 def test_custom_field_appears_in_identity_request_form():
     catalog = catalog_for_tenant(_CUSTOM_CONFIG)
     fields = fields_for_channel(_CUSTOM_CONFIG, "email", catalog=catalog)

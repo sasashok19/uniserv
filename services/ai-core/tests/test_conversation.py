@@ -1391,3 +1391,294 @@ def test_assistant_path_skips_inbound_persist_when_submit_complaint_called():
     assert len(calls) == 1  # only the outbound AI reply — inbound left to create_ticket_from_complaint
     assert calls[0].args[1]["direction"] == "outbound"
     assert calls[0].args[1]["authorType"] == "ai"
+
+
+# ---------------------------------------------------------------------------
+# Feature 20: mistyped email must not reach the identity profile, and partial
+# intake must reach the ticket.
+#
+# Reported transcript (+918939014142): "Nithya / Nithya@gmaill.com /
+# 56784567". The typo domain was accepted and written to the profile, and the
+# service id — the one answer that WAS good — was recorded nowhere, because
+# the only place it was ever written was ticket creation, which never
+# happened.
+# ---------------------------------------------------------------------------
+
+_WHATSAPP_ID = ChannelIdentityIn(type="phone", value="+918939014142", verified=True)
+
+
+def test_tool_confirm_identity_keeps_a_typo_email_off_the_identity_profile():
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="tkt-16", channel="whatsapp", channelIdentity=_WHATSAPP_ID,
+               rawText="Nithya, Nithya@gmaill.com, 56784567")
+    state = {"identity_status": "pending", "master_id": None, "intake": {}}
+
+    with patch("app.conversation.agent.IdentityResolver") as resolver_cls, \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})) as update_ticket:
+        resolver_cls.return_value.resolve = AsyncMock(
+            return_value={"masterId": "m-nithya", "identityStatus": "confirmed"})
+        result = _run(agent._tool_confirm_identity(
+            req, state,
+            {"declaredAnonymous": False, "identityType": "email", "identityValue": "Nithya@gmaill.com",
+             "providedFields": {"Name": "Nithya", "Email": "Nithya@gmaill.com",
+                                "Service/Customer ID": "56784567"}},
+            DEFAULT_INTAKE_FIELDS["whatsapp"], catalog_for_tenant(None)))
+
+    resolve_req = resolver_cls.return_value.resolve.await_args.args[0]
+    assert resolve_req.confirmedEmail is None          # the typo never reaches the profile
+    assert resolve_req.confirmedName == "Nithya"       # the good answers still do
+    # The gate holds the ticket back and asks about the address, naming both spellings.
+    assert state["identity_status"] == "pending"
+    assert len(result["missingFields"]) == 1
+    assert "Nithya@gmail.com" in result["missingFields"][0]
+    assert "Nithya@gmaill.com" in result["missingFields"][0]
+    # ...and the service id is written onto the stub on this very turn.
+    assert update_ticket.await_args.args[1]["serviceId"] == "56784567"
+    assert update_ticket.await_args.args[1]["identityStatus"] == "pending"
+
+
+def test_tool_confirm_identity_accepts_the_corrected_email_and_confirms_the_same_ticket():
+    """The retry turn: same stub (same ticketId), corrected address — the gate
+    clears, the profile finally gets an email, and the EXISTING ticket is what
+    moves to confirmed."""
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="tkt-16", channel="whatsapp", channelIdentity=_WHATSAPP_ID,
+               rawText="dharshini.s.raj@gmail.com")
+    state = {"identity_status": "pending", "master_id": "m-nithya", "intake": {
+        "name": {"value": "Nithya", "valid": True, "source": "extracted"},
+        "serviceId": {"value": "56784567", "valid": True, "source": "extracted"},
+        "email": {"value": "Nithya@gmaill.com", "valid": False, "source": "extracted"},
+    }}
+
+    with patch("app.conversation.agent.IdentityResolver") as resolver_cls, \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})) as update_ticket:
+        resolver_cls.return_value.resolve = AsyncMock(
+            return_value={"masterId": "m-nithya", "identityStatus": "confirmed"})
+        result = _run(agent._tool_confirm_identity(
+            req, state,
+            {"declaredAnonymous": False,
+             "providedFields": {"Email": "dharshini.s.raj@gmail.com"}},
+            DEFAULT_INTAKE_FIELDS["whatsapp"], catalog_for_tenant(None)))
+
+    assert result["missingFields"] == []
+    assert state["identity_status"] == "confirmed"
+    resolve_req = resolver_cls.return_value.resolve.await_args.args[0]
+    assert resolve_req.confirmedEmail == "dharshini.s.raj@gmail.com"
+    assert update_ticket.await_args.args[0] == "tkt-16"          # the SAME ticket, not a new one
+    assert update_ticket.await_args.args[1]["identityStatus"] == "confirmed"
+
+
+def test_ticket_fields_from_intake_ignores_unvalidated_and_secondhand_values():
+    from app.conversation.agent import _ticket_fields_from_intake
+    assert _ticket_fields_from_intake({}) == {}
+    assert _ticket_fields_from_intake(
+        {"serviceId": {"value": "56784567", "valid": True, "source": "extracted"}}) == {"serviceId": "56784567"}
+    # Invalid, or already-on-file rather than freshly written -> not re-stamped.
+    assert _ticket_fields_from_intake({"serviceId": {"value": "??", "valid": False, "source": "extracted"}}) == {}
+    assert _ticket_fields_from_intake({"serviceId": {"value": "1", "valid": True, "source": "known"}}) == {}
+    # Identity attributes belong to the profile, not to a ticket column.
+    assert _ticket_fields_from_intake({"name": {"value": "Nithya", "valid": True, "source": "extracted"}}) == {}
+
+
+def _queried_email_state(**overrides) -> dict:
+    state = {"identity_status": "pending", "master_id": "m-1",
+             "queried_intake": {"email": {"asked": "nithya@gmaill.com"}},
+             "intake": {
+                 "name": {"value": "Nithya", "valid": True, "source": "extracted"},
+                 "email": {"value": "nithya@gmaill.com", "valid": False, "source": "extracted"},
+             }}
+    state.update(overrides)
+    return state
+
+
+def test_yes_to_the_typo_question_takes_the_SUGGESTION_not_the_typo():
+    """The citizen is asked 'you sent "nithya@gmaill.com"; did you mean
+    "nithya@gmail.com"?' — so "yes" means TAKE THE SUGGESTION. Reading it the
+    other way round would re-introduce, on the single most likely reply, the
+    exact typo this whole feature exists to catch."""
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="tkt-16", channel="whatsapp", channelIdentity=_WHATSAPP_ID,
+               rawText="yes that is correct")
+    state = _queried_email_state()
+
+    with patch("app.conversation.agent.IdentityResolver") as resolver_cls, \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})):
+        resolver_cls.return_value.resolve = AsyncMock(
+            return_value={"masterId": "m-1", "identityStatus": "confirmed"})
+        result = _run(agent._tool_confirm_identity(
+            req, state,
+            {"declaredAnonymous": False, "identityType": "email", "identityValue": "nithya@gmaill.com"},
+            DEFAULT_INTAKE_FIELDS["whatsapp"], catalog_for_tenant(None)))
+
+    assert result["missingFields"] == []
+    assert state["intake"]["email"]["value"] == "nithya@gmail.com"
+    assert resolver_cls.return_value.resolve.await_args.args[0].confirmedEmail == "nithya@gmail.com"
+    assert state["queried_intake"]["email"]["resolved"] == "nithya@gmail.com"
+
+
+def test_resending_the_same_address_keeps_it_even_though_the_validator_refused_it():
+    """The other half of "confirm or correct": the domain list is a heuristic
+    and the citizen is the authority on their own address, so sending it again
+    unchanged overrules us. Without this an unusual-but-real domain would be
+    re-asked forever — a worse failure than the typo."""
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="tkt-16", channel="whatsapp", channelIdentity=_WHATSAPP_ID,
+               rawText="no, it really is nithya@gmaill.com")
+    state = _queried_email_state()
+
+    with patch("app.conversation.agent.IdentityResolver") as resolver_cls, \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})):
+        resolver_cls.return_value.resolve = AsyncMock(
+            return_value={"masterId": "m-1", "identityStatus": "confirmed"})
+        result = _run(agent._tool_confirm_identity(
+            req, state,
+            {"declaredAnonymous": False, "identityType": "email", "identityValue": "nithya@gmaill.com"},
+            DEFAULT_INTAKE_FIELDS["whatsapp"], catalog_for_tenant(None)))
+
+    assert result["missingFields"] == []
+    assert state["intake"]["email"]["value"] == "nithya@gmaill.com"
+    assert resolver_cls.return_value.resolve.await_args.args[0].confirmedEmail == "nithya@gmaill.com"
+
+
+def test_an_affirmation_word_inside_ordinary_complaint_prose_settles_nothing():
+    """"right"/"same"/"it is" turn up constantly in complaint text, and
+    `queried_intake` persists across turns — so the affirmation check is
+    narrow AND only consulted on a short message. A later, unrelated turn must
+    not silently promote a refused address."""
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="tkt-16", channel="whatsapp", channelIdentity=_WHATSAPP_ID,
+               rawText="the transformer on the right side is sparking and it is still not fixed")
+    state = _queried_email_state()
+
+    with patch("app.conversation.agent.IdentityResolver") as resolver_cls, \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})):
+        resolver_cls.return_value.resolve = AsyncMock(
+            return_value={"masterId": "m-1", "identityStatus": "confirmed"})
+        result = _run(agent._tool_confirm_identity(
+            req, state, {"declaredAnonymous": False},
+            DEFAULT_INTAKE_FIELDS["whatsapp"], catalog_for_tenant(None)))
+
+    assert state["intake"]["email"]["valid"] is False
+    assert len(result["missingFields"]) == 1
+    assert resolver_cls.return_value.resolve.await_args.args[0].confirmedEmail is None
+
+
+def test_a_refused_identity_value_email_is_recorded_so_the_citizen_is_told_why():
+    """The reported transcript's shape: the model reports the address as the
+    IDENTITY value rather than via providedFields. It used to be validated,
+    dropped, and never written anywhere — so the citizen was told only "we
+    still need: Email", with no hint that the address they had just sent was
+    the problem, and retyped the same typo indefinitely."""
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="tkt-16", channel="whatsapp", channelIdentity=_WHATSAPP_ID,
+               rawText="Nithya@gmaill.com")
+    state = {"identity_status": "pending", "master_id": None,
+             "intake": {"name": {"value": "Nithya", "valid": True, "source": "extracted"}}}
+
+    with patch("app.conversation.agent.IdentityResolver") as resolver_cls, \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})):
+        resolver_cls.return_value.resolve = AsyncMock(
+            return_value={"masterId": "m-1", "identityStatus": "confirmed"})
+        result = _run(agent._tool_confirm_identity(
+            req, state,
+            {"declaredAnonymous": False, "identityType": "email", "identityValue": "Nithya@gmaill.com"},
+            DEFAULT_INTAKE_FIELDS["whatsapp"], catalog_for_tenant(None)))
+
+    assert state["intake"]["email"] == {"value": "Nithya@gmaill.com", "valid": False, "source": "extracted"}
+    assert len(result["missingFields"]) == 1
+    assert "Nithya@gmail.com" in result["missingFields"][0]
+    assert state["queried_intake"] == {"email": {"asked": "Nithya@gmaill.com"}}
+
+
+def test_confirm_identity_keeps_asking_when_the_model_merely_resends_a_queried_value():
+    """The model is instructed to resend every value it knows on every
+    confirm_identity call, so a bare resend is not evidence of anything — only
+    the CITIZEN's own words (an affirmation, or retyping the address) count."""
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="tkt-16", channel="whatsapp", channelIdentity=_WHATSAPP_ID,
+               rawText="my service id is 56784567")
+    state = {"identity_status": "pending", "master_id": "m-1",
+             "queried_intake": {"email": {"asked": "nithya@gmaill.com"}},
+             "intake": {
+                 "name": {"value": "Nithya", "valid": True, "source": "extracted"},
+                 "email": {"value": "nithya@gmaill.com", "valid": False, "source": "extracted"},
+             }}
+
+    with patch("app.conversation.agent.IdentityResolver") as resolver_cls, \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})):
+        resolver_cls.return_value.resolve = AsyncMock(
+            return_value={"masterId": "m-1", "identityStatus": "confirmed"})
+        result = _run(agent._tool_confirm_identity(
+            req, state,
+            {"declaredAnonymous": False, "providedFields": {"Email": "nithya@gmaill.com"}},
+            DEFAULT_INTAKE_FIELDS["whatsapp"], catalog_for_tenant(None)))
+
+    assert len(result["missingFields"]) == 1
+    assert "nithya@gmail.com" in result["missingFields"][0]
+    assert state["identity_status"] == "pending"
+    assert resolver_cls.return_value.resolve.await_args.args[0].confirmedEmail is None
+
+
+def test_confirm_identity_records_which_values_it_queried():
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="tkt-16", channel="whatsapp", channelIdentity=_WHATSAPP_ID,
+               rawText="Nithya nithya@gmaill.com")
+    state = {"identity_status": "pending", "master_id": None, "intake": {}}
+
+    with patch("app.conversation.agent.IdentityResolver") as resolver_cls, \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})):
+        resolver_cls.return_value.resolve = AsyncMock(
+            return_value={"masterId": "m-1", "identityStatus": "confirmed"})
+        _run(agent._tool_confirm_identity(
+            req, state,
+            {"declaredAnonymous": False,
+             "providedFields": {"Name": "Nithya", "Email": "nithya@gmaill.com"}},
+            DEFAULT_INTAKE_FIELDS["whatsapp"], catalog_for_tenant(None)))
+
+    assert state["queried_intake"] == {"email": {"asked": "nithya@gmaill.com"}}
+
+
+def test_the_correction_survives_the_model_resending_the_original_later_in_the_turn():
+    """Ordering regression. `_update_intake_and_get_missing` runs at the top of
+    a turn and settles the citizen's "yes"; a few lines later the model's
+    confirm_identity call resends the ORIGINAL address (it is told to resend
+    everything it knows). Without remembering the decision, that merge quietly
+    undoes the correction and the typo is what gets stored."""
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="tkt-16", channel="whatsapp", channelIdentity=_WHATSAPP_ID, rawText="yes")
+    state = _queried_email_state()
+
+    with patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)):
+        missing = _run(agent._update_intake_and_get_missing(
+            req, state, DEFAULT_INTAKE_FIELDS["whatsapp"], catalog_for_tenant(None)))
+    assert missing == []
+    assert state["intake"]["email"]["value"] == "nithya@gmail.com"
+
+    with patch("app.conversation.agent.IdentityResolver") as resolver_cls, \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})):
+        resolver_cls.return_value.resolve = AsyncMock(
+            return_value={"masterId": "m-1", "identityStatus": "confirmed"})
+        result = _run(agent._tool_confirm_identity(
+            req, state,
+            {"declaredAnonymous": False, "providedFields": {"Email": "nithya@gmaill.com"}},
+            DEFAULT_INTAKE_FIELDS["whatsapp"], catalog_for_tenant(None)))
+
+    assert state["intake"]["email"]["value"] == "nithya@gmail.com"   # the correction held
+    assert result["missingFields"] == []
+    assert resolver_cls.return_value.resolve.await_args.args[0].confirmedEmail == "nithya@gmail.com"
+
+
+def test_a_second_bad_address_gets_its_own_question():
+    """A settled decision must not shadow the next attempt: if the citizen
+    later sends a different address that is also refused, that one has to be
+    queried in its own right, or their answer to it goes nowhere."""
+    agent = ConversationAgent("t1")
+    state = {"identity_status": "pending", "master_id": "m-1",
+             "queried_intake": {"email": {"asked": "nithya@gmaill.com", "resolved": "nithya@gmail.com"}},
+             "intake": {"name": {"value": "Nithya", "valid": True, "source": "extracted"},
+                        "email": {"value": "nithya@yahooo.com", "valid": False, "source": "extracted"}}}
+
+    from app.conversation.agent import _remember_queried_values
+    _remember_queried_values(state, ["a confirmed Email ..."])
+
+    assert state["queried_intake"]["email"] == {"asked": "nithya@yahooo.com"}

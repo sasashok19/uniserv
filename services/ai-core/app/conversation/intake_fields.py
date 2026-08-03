@@ -61,6 +61,151 @@ def _extract_pincode(text: str) -> Optional[str]:
     return _digits_only(match.group(1)) or None if match else None
 
 
+# --- Email validation (Feature 20) -----------------------------------------
+# The old validator was `bool(v)`: ANY non-empty string passed, so a mistyped
+# consumer domain ("nithya@gmaill.com") sailed through the intake gate, was
+# written onto the identity profile, and the citizen never got a chance to
+# correct it — every future notification then bounced silently. Two levels of
+# check now:
+#   1. Syntax — a deliberately permissive, RFC-lite shape check (one @, a
+#      sane local part, a dotted domain with a 2+ letter TLD). Anything
+#      exotic-but-legal still passes; the goal is catching obvious garbage,
+#      not policing the RFC.
+#   2. Likely-typo domains — a Damerau-Levenshtein-distance-1 match against
+#      the consumer domains citizens actually use (the "mailcheck"
+#      heuristic; see `_is_one_typo_away` for why transposition counts). A domain
+#      that IS one of them is always accepted; only a domain that is one
+#      character away from one, and isn't itself known-good, is flagged, so a
+#      legitimate corporate domain can never be rejected by this rule.
+# A flagged address is NOT silently dropped: it comes back through
+# `missing_fields` as an actionable correction request naming the suggestion,
+# which the assistant relays so the citizen can confirm or correct it.
+
+_EMAIL_SYNTAX_RE = re.compile(
+    r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~\-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~\-]+)*"
+    r"@(?:[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,24}$"
+)
+
+# Consumer domains common in this deployment's citizen base (India-weighted),
+# plus the global majors. Membership here means "always valid"; proximity to a
+# member means "probably a typo of it".
+KNOWN_EMAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "yahoo.com", "yahoo.in", "yahoo.co.in", "yahoo.co.uk",
+    "hotmail.com", "hotmail.co.uk", "outlook.com", "outlook.in", "live.com", "msn.com",
+    "icloud.com", "me.com", "mac.com", "aol.com", "gmx.com", "zoho.com", "zohomail.in",
+    "protonmail.com", "proton.me", "yandex.com", "rediffmail.com", "rediff.com",
+    # Real providers that are themselves one keystroke from one of the above —
+    # listed so they're accepted outright instead of being "corrected" at their
+    # own users (mail.com/email.com/mailo.com are all genuinely in use).
+    "mail.com", "email.com", "mailo.com", "inbox.com", "ymail.com", "rocketmail.com",
+}
+
+
+def _is_one_typo_away(a: str, b: str) -> bool:
+    """True when `a` can be turned into `b` by a single insert, delete,
+    substitution, or swap of two adjacent characters (Damerau-Levenshtein
+    distance 1). Cheap prefix/suffix walk rather than a full DP matrix — this
+    runs on every intake turn and only ever needs the "is it 1?" answer.
+
+    The transposition case is not an optional extra here: "gmial.com" and
+    "hotmial.com" are two of the most common real-world mistypings, and both
+    are distance TWO under plain Levenshtein — a substitutions-only check
+    waves them straight through."""
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    start = 0
+    while start < min(la, lb) and a[start] == b[start]:
+        start += 1
+    end = 0
+    while end < min(la, lb) - start and a[la - 1 - end] == b[lb - 1 - end]:
+        end += 1
+    if (la - start - end) <= 1 and (lb - start - end) <= 1:
+        return True
+    # Two same-length characters left over on each side, mirrored -> a swap.
+    return (la == lb and la - start - end == 2
+            and a[start] == b[start + 1] and a[start + 1] == b[start])
+
+
+# When more than one known domain is a single keystroke away, the tie is
+# broken towards the ones citizens overwhelmingly use, so "amail.com" is
+# offered "gmail.com" rather than an equally-close but far rarer neighbour.
+_DOMAIN_PREFERENCE = ("gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com", "rediffmail.com")
+
+
+def _common_prefix_len(a: str, b: str) -> int:
+    n = 0
+    while n < min(len(a), len(b)) and a[n] == b[n]:
+        n += 1
+    return n
+
+
+def suggest_email_correction(value: Optional[str]) -> Optional[str]:
+    """The address the citizen most likely MEANT, when theirs is one keystroke
+    away from a well-known consumer domain ("gmaill.com" -> "gmail.com",
+    "yahooo.com" -> "yahoo.com", "hotmial.com" -> "hotmail.com"). ``None``
+    when the domain is already known-good, or is nothing like any of them
+    (i.e. an ordinary corporate/other domain — never second-guessed).
+
+    Whitespace is stripped first: without that, a trailing newline (WhatsApp
+    and copy-paste both produce them) makes the domain differ from the real
+    one by exactly one character, so the citizen would be asked whether they
+    meant an address that looks CHARACTER-FOR-CHARACTER identical to the one
+    they sent — a question with no answerable form.
+
+    When more than one known domain is a single keystroke away, the one
+    sharing the longest prefix wins, so "ail.com" suggests "mail.com" rather
+    than whichever candidate happens to sort first.
+    """
+    if not value:
+        return None
+    value = value.strip()
+    if "@" not in value:
+        return None
+    local, _, domain = value.rpartition("@")
+    domain = domain.lower()
+    if not local or not domain or domain in KNOWN_EMAIL_DOMAINS:
+        return None
+    matches = [c for c in KNOWN_EMAIL_DOMAINS if _is_one_typo_away(domain, c)]
+    if not matches:
+        return None
+
+    def rank(candidate: str) -> tuple:
+        preference = (len(_DOMAIN_PREFERENCE) - _DOMAIN_PREFERENCE.index(candidate)
+                      if candidate in _DOMAIN_PREFERENCE else 0)
+        return (_common_prefix_len(domain, candidate), preference, candidate)
+
+    return f"{local}@{max(matches, key=rank)}"
+
+
+def is_email_syntax_valid(value: Optional[str]) -> bool:
+    return bool(value) and bool(_EMAIL_SYNTAX_RE.match(value.strip()))
+
+
+def validate_email(value: Optional[str]) -> bool:
+    """An email is accepted only when it parses AND isn't an obvious typo of a
+    common consumer domain — see the module note above."""
+    return is_email_syntax_valid(value) and suggest_email_correction(value) is None
+
+
+def _email_invalid_hint(value: Optional[str]) -> str:
+    """What to tell the citizen about an email we refused, phrased as a
+    question they can answer — a bare "that's invalid" gives them nothing to
+    act on, and a wrong domain is far more often a typo than a real address.
+
+    Both branches spell out the "no" path explicitly (send the address again),
+    because the domain list is a heuristic and some citizens really do have an
+    address it doesn't recognise — they must always have a way to overrule it
+    rather than be asked the same question forever."""
+    suggestion = suggest_email_correction(value)
+    if suggestion:
+        return (f'a confirmed Email — you sent "{value}"; did you mean "{suggestion}"? '
+                f'(reply yes to use "{suggestion}", or send the correct address)')
+    return f'a valid Email — "{value}" doesn\'t look like a working address; please send it again'
+
+
 FIELD_CATALOG = {
     "name": {
         "label": "Name",
@@ -75,7 +220,8 @@ FIELD_CATALOG = {
     "email": {
         "label": "Email",
         "extract": _extract_email,
-        "validate": lambda v: bool(v),
+        "validate": validate_email,
+        "hint": _email_invalid_hint,
     },
     "serviceId": {
         "label": "Service/Customer ID",
@@ -251,7 +397,12 @@ def extract_configured_fields(
 def missing_fields(extracted: dict, field_configs: list[dict], declared_anonymous: bool,
                    catalog: Optional[dict] = None) -> list[str]:
     """Human-readable list of what's missing or invalid, empty when every
-    mandatory (or mandatory-if-anonymous) field is present and valid."""
+    mandatory (or mandatory-if-anonymous) field is present and valid.
+
+    A field spec may carry an optional ``hint(value) -> str`` describing WHY a
+    supplied value was refused and what to do about it (Feature 20 — e.g. the
+    likely-correct spelling of a mistyped email domain). Without one, the
+    generic "doesn't look right" wording is used, exactly as before."""
     spec_by_key = catalog if catalog is not None else FIELD_CATALOG
     missing = []
     for fc in field_configs:
@@ -265,7 +416,9 @@ def missing_fields(extracted: dict, field_configs: list[dict], declared_anonymou
             if required:
                 missing.append(spec_by_key[key]["label"])
         elif not entry.get("valid", True):
-            missing.append(f"a valid {spec_by_key[key]['label']} (the one you sent doesn't look right)")
+            hint = spec_by_key[key].get("hint")
+            missing.append(hint(value) if hint
+                           else f"a valid {spec_by_key[key]['label']} (the one you sent doesn't look right)")
     return missing
 
 

@@ -213,3 +213,15 @@ HTTP/1.1 200 OK
   the README's "Subject-line ticket threading & dedup" section for the
   live-tested bug this fixes (a swipe-reply follow-up with no topical
   overlap to its parent message was creating a duplicate ticket).
+- **Intake answers stay on the same ticket (Feature 20).** WhatsApp's
+  identity gate is a multi-message exchange, and the citizen's reply to it
+  ("Nithya", "nithya@gmail.com", "56784567") describes no problem at all —
+  so the Feature 18 same-topic check, asked whether it continues the open
+  complaint, said "no" and each reply became its own ticket (live-tested:
+  `+918939014142` → TKT-00016, TKT-00017, TKT-00018 for one complaint).
+  ai-core's `ensure_ticket_stub` now routes a message that is purely
+  intake-form data (`looks_like_intake_answer`, deterministic — no LLM) to
+  the citizen's one still-in-intake stub, before any topic reasoning. This
+  is channel-agnostic code but WhatsApp-only in effect: email never reaches
+  the identity/open-count branch, since it has subject-line matching. See
+  the README's "Intake answers are not new complaints" section.

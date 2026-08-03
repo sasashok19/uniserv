@@ -84,6 +84,28 @@ even an explicit ticket-number-in-text match. Requires a new
 `originMessageId` filter on db-writer's `GET /api/v1/db/tickets`
 (`TicketService.buildWhere`), since routing needs to look a message up by
 what it's a reply to, not just by ticket number/thread/identity.
+
+Feature 20: Features 17-19 all tuned "is this a NEW complaint or a
+continuation" for messages that are, one way or another, ABOUT a complaint.
+They never considered the other half of every WhatsApp conversation — the
+citizen answering the intake form we just sent them ("Nithya",
+"nithya@gmail.com", "56784567"). That text names no subject, location, or
+problem, so Feature 18's `is_same_topic` correctly (by its own definition)
+answers "different topic", and the router turned each answer into its own
+brand-new ticket. Live-tested: one citizen, three messages, three tickets
+(TKT-00016 stub, then TKT-00017 and TKT-00018 for the two intake replies) —
+and because conversation state is keyed on the ticket
+(`ConversationAgent._conv_key`), each new ticket also reset the assistant's
+memory of the original complaint, so the third message's "complaint" was
+recorded as the citizen's own email address.
+
+The fix is a guard ahead of the topic judgment rather than a change to it:
+a ticket that has no `category` yet has never had a complaint filed on it —
+it is a stub still IN the intake back-and-forth — and a message that is
+purely intake data (`looks_like_intake_answer`) is by definition an answer
+to that back-and-forth, not a new complaint. Both conditions must hold, so
+a genuine second complaint (which reads as prose, not form data) still
+splits off its own ticket exactly as Feature 18 intended.
 """
 
 import logging
@@ -97,6 +119,154 @@ from app.identity.db_client import DbWriterClient
 logger = logging.getLogger("ai-core")
 
 TICKET_NUMBER_RE = re.compile(r"TKT-\d{4,}")
+
+# --- "Is this message just intake-form data?" (Feature 20) ------------------
+# Deliberately deterministic (no LLM): this guard decides whether to even ASK
+# the LLM topic question, so routing an identity answer must not itself depend
+# on an LLM being reachable. The rules are structural — an address, a label, a
+# bare identifier — never semantic, so they can't drift the way a prompt can.
+
+_EMAIL_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._%+\-]*@[A-Za-z0-9][A-Za-z0-9.\-]*\.[A-Za-z]{2,24}")
+# Field labels the intake form actually prints. Matched per-token and counted
+# as a POSITIVE signal, so the set is kept to words that essentially only
+# appear when someone is naming a form field. ("area" is deliberately absent:
+# "no power in my area" is a complaint, not a pin-code answer.)
+_LABEL_TOKEN_RE = re.compile(
+    r"^(?:name|e-?mail|mobile|service|customer|consumer|id|pin|pincode|anonymous)$", re.IGNORECASE)
+# Words that carry no signal either way — skipped without counting, so that a
+# message consisting of "Name: Nithya" and one consisting of "Nithya" are
+# judged the same way.
+_FILLER_TOKEN_RE = re.compile(
+    r"^(?:is|are|am|my|the|a|an|and|it|its|it's|this|that|here|number|no\.|code|for|to|of|sir|madam"
+    r"|thanks|thank|you|hi|hello|ok|okay|yes)$", re.IGNORECASE)
+# A bare identifier the citizen was asked for: service/customer id, mobile,
+# pin code. 4+ characters so an ordinary numeral in prose ("11PM", "2 days")
+# never qualifies.
+_IDENTIFIER_TOKEN_RE = re.compile(r"^[+#]?[\d][\d\-/]{0,19}$")
+_MIN_IDENTIFIER_DIGITS = 4
+# Emoji, stray punctuation, a lone "-" — carries no meaning either way, and a
+# 🙏 at the end of "Thanks 🙏 Nithya" must not make the message unreadable.
+_NO_LETTERS_OR_DIGITS_RE = re.compile(r"^[^\w]+$", re.UNICODE)
+
+
+def _is_name_like(token: str) -> bool:
+    """A token that could be part of somebody's name: has a letter, has no
+    digit. Written as a predicate rather than a character class because a
+    class can't express "any script" in Python's `re` — `\\w` excludes the
+    combining vowel marks that Tamil, Devanagari and most Indic scripts are
+    built from, so "சித்ரா" would be rejected as unreadable by any pattern
+    that spells out its allowed characters."""
+    return any(ch.isalpha() for ch in token) and not any(ch.isdigit() for ch in token)
+# The decisive negative check. Anything a citizen writes to DESCRIBE something
+# — a negation, a state, a utility, a request — disqualifies the message from
+# being "just form data", however short it is and whatever labels it happens
+# to contain. Without this, "my phone is not working" reads as a Mobile-field
+# answer ("phone" is a label, the rest is short and alphabetic); with it, the
+# leftover "not"/"working" settles the question. Erring here is one-directional
+# by design: a missed intake answer only costs the Feature-18 topic check
+# being consulted, which is the pre-Feature-20 behaviour.
+_STATEMENT_WORD_RE = re.compile(
+    r"^(?:not|n't|isn't|don't|doesn't|didn't|can't|won't|cannot|no|none|never|still|again|yet|but"
+    r"|work|works|working|worked|broke|broken|break|down|out|off|dead|fail|failed|failure"
+    r"|issue|issues|problem|problems|complaint|complain|fix|fixed|repair|resolve|resolved|help"
+    r"|since|yesterday|today|tomorrow|days|hours|weeks|months|morning|night|evening"
+    r"|power|electricity|water|light|lights|meter|bill|billing|supply|voltage|current|line|wire"
+    r"|streetlight|streetlamp|transformer|blackout|sewage|sewer|drainage|drain|garbage|waste"
+    r"|pipeline|pipe|connection|refund|overcharge|overcharged|reading|tariff|deposit|arrears"
+    r"|leak|leaking|outage|cut|low|high|slow|bad|wrong|poor|delay|delayed|pending|open|closed"
+    r"|update|status|why|when|where|how|what)$",
+    re.IGNORECASE)
+
+# Negations and affirmations are statement words on their own ("no power") but
+# ordinary punctuation in a correction ("no, it's dharshini@gmail.com" — the
+# literal shape of the reply the Feature 20 email-typo question asks for).
+# They're only forgiven alongside a concrete value in the same message, which
+# is exactly what makes it a correction rather than a statement.
+_CORRECTION_PARTICLE_RE = re.compile(
+    r"^(?:no|nope|yes|yeah|yep|not|correct|incorrect|right|wrong|actually|sorry|instead|rather"
+    r"|change|changed|typo|mistake|use|should|be)$",
+    re.IGNORECASE)
+
+_MAX_INTAKE_ANSWER_WORDS = 25
+_MAX_RESIDUAL_NAME_TOKENS = 4
+_MAX_BARE_NAME_TOKENS = 3
+
+
+def looks_like_intake_answer(text: Optional[str]) -> bool:
+    """True when a message is (only) the citizen answering the intake form —
+    name / email / service id / pin code — with no complaint content of its
+    own.
+
+    Everything left over after removing the structural parts (an email
+    address, a form label, a bare identifier) must read like a name fragment
+    rather than a statement, and any statement word anywhere disqualifies the
+    message outright (bar a negation/affirmation sitting next to a concrete
+    value — that's a correction, see `_CORRECTION_PARTICLE_RE`). With no
+    structural part at all, only a one-or-two-word
+    bare name qualifies — see the note at the end. Long messages are rejected
+    up front: a form answer is short, and anything discursive enough to run
+    past a dozen words is making a point, not filling in a field.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    if len(stripped.split()) > _MAX_INTAKE_ANSWER_WORDS:
+        return False
+
+    has_email = bool(_EMAIL_TOKEN_RE.search(stripped))
+    residue = _EMAIL_TOKEN_RE.sub(" ", stripped)
+    tokens = [t for t in (raw.strip(".,;:!?()[]-") for raw in re.split(r"[\s,;:/|]+", residue))
+              if t and not _NO_LETTERS_OR_DIGITS_RE.match(t)]
+    if not tokens:
+        # Nothing but an email address (or nothing but emoji) — the former is
+        # the commonest intake answer of all, the latter answers nothing.
+        return has_email
+
+    # A pure yes/no. Nothing else it can be: an unprompted message is never
+    # just "yes", whereas the reply to "did you mean x@gmail.com?" invariably
+    # is — and if this doesn't route back to the stub that asked, the
+    # correction turn spawns the duplicate ticket the whole guard prevents.
+    if all(_CORRECTION_PARTICLE_RE.match(t) or _FILLER_TOKEN_RE.match(t) for t in tokens):
+        return True
+
+    # Identifiers are often typed in groups ("600 042", "+91 89390 14142"), so
+    # digits are counted across the whole message rather than per token.
+    digits = sum(len(re.sub(r"\D", "", t)) for t in tokens if _IDENTIFIER_TOKEN_RE.match(t))
+    has_identifier = digits >= _MIN_IDENTIFIER_DIGITS
+    # A concrete value in the message is what licenses reading "no"/"yes" as
+    # correction punctuation rather than as complaint content.
+    correcting = has_email or has_identifier
+
+    has_label = False
+    leftover = []
+    for token in tokens:
+        if correcting and _CORRECTION_PARTICLE_RE.match(token):
+            continue
+        if _STATEMENT_WORD_RE.match(token):
+            return False
+        if _LABEL_TOKEN_RE.match(token):
+            has_label = True
+            continue
+        if _FILLER_TOKEN_RE.match(token) or _IDENTIFIER_TOKEN_RE.match(token):
+            continue
+        leftover.append(token)
+
+    if not all(_is_name_like(token) for token in leftover):
+        return False
+    if has_email or has_label or has_identifier:
+        return len(leftover) <= _MAX_RESIDUAL_NAME_TOKENS
+    # No structural marker at all: the only remaining thing this can be is a
+    # bare name typed on its own ("Nithya", "Ravi Kumar Sharma") — exactly how
+    # citizens answer "what's your name?", and unrecognisable as intake data
+    # by any other means. This is the loosest rule here and it does misread a
+    # terse noun-phrase complaint ("stray dogs") as a name; the utility and
+    # service nouns citizens actually use that way are named in
+    # `_STATEMENT_WORD_RE` above, but that list can never be complete. The
+    # trade is deliberate and one-sided: a false positive appends to a stub
+    # whose intake is still unfinished (the assistant carries both messages in
+    # one conversation, and an agent can split them), whereas a false negative
+    # is the reported bug itself — a duplicate ticket AND a wiped conversation.
+    return 1 <= len(leftover) <= _MAX_BARE_NAME_TOKENS
 
 
 def extract_ticket_number(text: Optional[str]) -> Optional[str]:
@@ -154,7 +324,10 @@ async def ensure_ticket_stub(
        and is what lets a reply to an old ticket resolve to that exact
        ticket even if `in_reply_to` isn't available (or the citizen
        re-quotes an old message in a new one rather than replying to it).
-    3. Identity + open-ticket-count/topic heuristic, then thread_key — see
+    3. The identity's one still-in-intake stub, when this message is nothing
+       but intake-form data (Feature 20) — the citizen is answering the
+       question that stub asked, so no count or topic reasoning applies.
+    4. Identity + open-ticket-count/topic heuristic, then thread_key — see
        below and the module docstring. `thread_key` itself is unique per
        email when there's no real In-Reply-To (see
        `ConversationAgent._thread_key`), so the threadId lookup is a
@@ -187,6 +360,22 @@ async def ensure_ticket_stub(
             open_tickets = await db.list_tickets(
                 tenant_id, identityId=identity["master_id"], status=OPEN_STATUSES,
                 sortBy="createdAt", sortDir="desc", trace_id=trace_id)
+            # Feature 20: an intake answer belongs to the stub that ASKED for
+            # it, full stop — before any count or topic reasoning. A stub with
+            # no category has never had a complaint filed on it, so it is by
+            # definition still mid-intake; when exactly one such stub is open,
+            # there is no ambiguity about which conversation this answers.
+            # Checked even when several tickets are open, so a thread already
+            # split by this bug self-heals on the citizen's next reply instead
+            # of shedding another ticket per message.
+            intake_stubs = [t for t in open_tickets if not t.get("category")]
+            if len(intake_stubs) == 1 and looks_like_intake_answer(raw_text):
+                logger.info(
+                    "ticket resolved via in-intake stub (message is intake-form data, not a new "
+                    "complaint) traceId=%s ticketId=%s openTickets=%d",
+                    trace_id, intake_stubs[0]["id"], len(open_tickets),
+                )
+                return {"id": intake_stubs[0]["id"], "ticketNumber": intake_stubs[0].get("ticket_number")}
             if len(open_tickets) == 1:
                 candidate = open_tickets[0]
                 existing_text = await _existing_complaint_text(db, candidate["id"], trace_id)
@@ -255,14 +444,24 @@ async def _create_stub(
 
 async def update_ticket_identity(
     db: DbWriterClient, ticket_id: str, master_id: Optional[str], identity_status: str,
-    trace_id: Optional[str] = None,
+    trace_id: Optional[str] = None, extra_fields: Optional[dict] = None,
 ) -> None:
     """Reflect identity resolution onto the stub immediately — this is what
     moves a ticket out of the Unconfirmed queue as soon as identity confirms,
-    independent of whether complaint details are ready yet."""
-    await db.update_ticket(ticket_id, {
+    independent of whether complaint details are ready yet.
+
+    `extra_fields` carries any other ticket column the same turn has learned
+    (Feature 20: the Service/Customer ID). Those used to be written only when
+    the complaint was finally submitted, so a citizen stuck on one bad field
+    — a mistyped email, say — left an intake reply whose other, perfectly
+    good answers were visible nowhere: not on the ticket, not to an agent
+    looking at the Unconfirmed queue, and gone entirely if conversation state
+    expired before they replied again."""
+    payload = {
         "identityId": master_id,
         "identityStatus": identity_status,
-    }, trace_id=trace_id)
-    logger.info("ticket identity updated traceId=%s ticketId=%s identityStatus=%s masterId=%s",
-                trace_id, ticket_id, identity_status, master_id)
+        **(extra_fields or {}),
+    }
+    await db.update_ticket(ticket_id, payload, trace_id=trace_id)
+    logger.info("ticket identity updated traceId=%s ticketId=%s identityStatus=%s masterId=%s extra=%s",
+                trace_id, ticket_id, identity_status, master_id, sorted(extra_fields or {}))

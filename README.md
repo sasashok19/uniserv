@@ -708,10 +708,12 @@ than an inferred one, and a citizen on any channel typing "following up on
 TKT-00042" gets the same precise resolution. `ensure_ticket_stub` resolves
 in this order:
 
-1. An explicit `TKT-XXXXX` reference (subject or message body) → that exact ticket, regardless of thread/category/status.
-2. Otherwise, the existing thread (`threadId` — via In-Reply-To/References headers for email; a stable per-phone key for WhatsApp), but **only if that ticket is still open** (Feature 17 — see below).
-3. Otherwise, for a channel with no subject line (WhatsApp): identity + open-ticket-count (see below).
-4. Otherwise, a brand-new stub ticket — this is what a genuinely new complaint gets.
+1. A swipe-reply / `In-Reply-To` quoted-message id matching a ticket's own `origin_message_id` (Feature 19 — see below).
+2. An explicit `TKT-XXXXX` reference (subject or message body) → that exact ticket, regardless of thread/category/status.
+3. Otherwise, for a channel with no subject line (WhatsApp), when the message is nothing but intake-form data and the citizen has exactly one still-in-intake stub → that stub (Feature 20 — see below).
+4. Otherwise, for a channel with no subject line (WhatsApp): identity + open-ticket-count/topic (see below).
+5. Otherwise, the existing thread (`threadId` — via In-Reply-To/References headers for email; a stable per-phone key for WhatsApp), but **only if that ticket is still open** (Feature 17 — see below).
+6. Otherwise, a brand-new stub ticket — this is what a genuinely new complaint gets.
 
 Because of this, `create_ticket_from_complaint` (`app/tickets/service.py`)
 no longer runs the identity+category dedup for any message that already
@@ -781,6 +783,8 @@ resolved ticket instead of starting a new one. Fixed in `ensure_ticket_stub`
   message like "Put not closed" gives no signal either way). Closed with a
   real content-level judgment — see "Message quality" below.
 - **Fixed (swipe-reply resolves directly) — Feature 19, see below.**
+- **Fixed (the message is an intake ANSWER, not a complaint) — Feature 20,
+  see below.**
 - **Not implemented:** an interactive "which of your N open complaints is
   this?" back-and-forth for the 2+-open-tickets case — today it just
   creates a new ticket, which an agent can merge manually via the
@@ -885,6 +889,133 @@ by ticket number/thread/identity. Works for email too (an
 already has robust subject-line matching — this is an extra safety net
 there (e.g. a mail client that strips the `[Ticket TKT-XXXXX]` tag from
 "Re:" subjects).
+
+**Intake answers are not new complaints — and email typo detection (Feature
+20).** Features 17–19 each tuned the question "is this a NEW complaint or a
+continuation?" for messages that are, one way or another, *about* a
+complaint. None of them considered the other half of every WhatsApp
+conversation: the citizen answering the intake form UniServe just sent them.
+Live-tested failure (`+918939014142`, three messages, three tickets):
+
+| # | Citizen sent | What happened | What should have happened |
+|---|---|---|---|
+| 1 | "No power in my area" | stub **TKT-00016**, AI asks for name/email/service ID | ✔ correct |
+| 2 | "Nithya", "Nithya@gmaill.com", "56784567" | **new ticket TKT-00017**, marked confirmed, typo email accepted onto the identity profile | stay on TKT-00016, save the name + service ID, query the `gmaill.com` typo |
+| 3 | "dharshini.s.raj@gmail.com" | **new ticket TKT-00018**, whose recorded "complaint" was the citizen's own email address | update TKT-00016's identity and move it to the confirmed queue |
+
+Four distinct defects, fixed together:
+
+- **Root cause — the topic check was asked a question it cannot answer.**
+  An intake answer names no subject, location, or problem, so Feature 18's
+  `is_same_topic` answers "different topic" *correctly by its own
+  definition*, and `ensure_ticket_stub` turned each answer into its own
+  ticket. Fixed with a guard *ahead of* the topic judgment rather than a
+  change to it (`app/tickets/intake.py`): a ticket with **no `category`**
+  has never had a complaint filed on it — it is a stub still mid-intake —
+  and `looks_like_intake_answer(raw_text)` decides whether this message is
+  purely form data. Both conditions must hold, so genuine complaint prose
+  still splits off its own ticket exactly as Feature 18 intended. Checked
+  even when several tickets are open (as long as exactly one is still in
+  intake), so a thread this bug already split self-heals on the next reply
+  instead of shedding another ticket per message.
+- **`looks_like_intake_answer` is deliberately deterministic — no LLM.** It
+  decides whether to even *ask* the LLM topic question, so routing an
+  identity answer must not itself depend on an LLM being reachable. It
+  requires a structural signal (an email address, a form label, a bare 4+
+  digit identifier, or a one-to-two-word bare name) AND rejects the message
+  outright if any token is a statement/complaint word (`not`, `still`,
+  `working`, `broken`, `power`, `bill`, `leak`, `update`, …). That negative
+  check is what stops "my phone is not working" reading as a Mobile-field
+  answer just because "phone" is a field label. Erring is one-directional
+  by design: a missed intake answer only costs the Feature-18 topic check
+  being consulted, i.e. the pre-Feature-20 behaviour.
+- **Cascade — a split ticket also wipes the conversation.** Because Valkey
+  state and the OpenAI thread are keyed on the ticket
+  (`ConversationAgent._conv_key` → `ticket:<id>`), each spurious ticket also
+  reset the assistant's memory of the original complaint — which is why
+  message 3's ticket recorded the citizen's own email address as the
+  complaint text. Fixing the routing fixes this; no state-keying change was
+  needed.
+- **Email validation (`app/conversation/intake_fields.py`).** The `email`
+  field's validator was literally `lambda v: bool(v)` — any non-empty string
+  passed, so `gmaill.com` was accepted, written onto the identity profile,
+  and every future notification to that citizen would have bounced into
+  nothing. Now two levels: a permissive RFC-lite syntax check
+  (`is_email_syntax_valid`), plus `suggest_email_correction` — a
+  **Damerau**-Levenshtein-distance-1 match against the consumer domains
+  citizens actually use (`KNOWN_EMAIL_DOMAINS`, India-weighted). Transposition
+  is not an optional extra: `gmial.com` and `hotmial.com` are two of the
+  commonest real mistypings and both are distance **two** under plain
+  Levenshtein. A domain that IS in the set is always accepted (so
+  `mail.com`, one character from `gmail.com`, is never questioned), and a
+  domain nothing like any of them is never second-guessed — an ordinary
+  corporate or `.gov.in` address passes untouched.
+- **The refusal is actionable, not a dead end.** A rejected value comes back
+  through `missing_fields` as a question naming *both* spellings — `a
+  confirmed Email — did you mean "Nithya@gmail.com" rather than
+  "Nithya@gmaill.com"?` — via a new optional `hint(value)` callable on a
+  field's catalog spec (fields without one keep the generic wording).
+  `ASSISTANT_INSTRUCTIONS` tells the model to put that exact question to the
+  citizen keeping both spellings intact, and *never* to substitute the
+  suggestion itself — only the citizen can say which is right.
+  `_tool_confirm_identity` additionally refuses to pass an unvalidated
+  address to the identity resolver, so the typo never reaches the profile
+  while the correction is pending.
+- **"Confirm or correct" means both — and each has to mean the right thing.**
+  The question is *'you sent "x@gmaill.com"; did you mean "x@gmail.com"?'*, so
+  **"yes" takes the suggestion**; reading it as "keep what I typed" would
+  re-introduce the exact typo on the single most likely reply. Standing by the
+  original therefore means sending it again, which the wording explicitly
+  invites — that path matters because the domain list is a heuristic and a
+  real, unusual address must never be re-asked forever. The queried value is
+  held in `state["queried_intake"]` and cleared as soon as it's settled; the
+  affirmation check is deliberately narrow and only consulted on a *short*
+  message, since words like "right" and "same" are everywhere in ordinary
+  complaint prose ("the transformer on the right side"). A bare resend by the
+  model never counts — it's told to resend every value it knows on every call,
+  so only the citizen's own words decide.
+- **The correction turn routes home too.** Because the question invites a
+  reply shaped like *"no, it's dharshini@gmail.com"* — or simply *"Yes"* —
+  `looks_like_intake_answer` accepts a pure yes/no message outright, and
+  forgives a leading negation/affirmation **when the message also carries a
+  concrete value**. Otherwise the correction turn would spawn the very
+  duplicate ticket this fix exists to prevent. On its own, a negation is still
+  complaint content: "no water at 600042" is not an intake answer.
+- **An address the model reports as the identity value is recorded too.** The
+  `confirm_identity` schema lets the model state an email either as
+  `identityValue` or via `providedFields`; only the latter used to reach the
+  intake state, so an address refused on the `identityValue` path was
+  validated, dropped, and never written anywhere — the citizen saw a bare "we
+  still need: Email" with no indication what was wrong with the address they
+  had just sent, and retyped the same typo indefinitely. Both routes now merge
+  identically.
+- **Partial intake is no longer lost.** The Service/Customer ID used to be
+  written onto the ticket *only* at complaint-creation time, so a citizen
+  stuck on one bad field left an intake reply whose other, perfectly good
+  answers were visible nowhere — and gone entirely if conversation state
+  expired before they replied again. `update_ticket_identity` now takes
+  `extra_fields`, and `_ticket_fields_from_intake` stamps validated,
+  citizen-written values onto the stub on the turn they're given (name and
+  email are identity attributes and continue to reach the database through
+  the resolver). No schema change — db-writer's ticket PATCH already
+  accepted `serviceId`.
+- **Known limits, stated plainly.** (a) The bare-name rule is the loosest
+  part of `looks_like_intake_answer` and does misread a terse noun-phrase
+  complaint ("stray dogs") as a name; the utility/service nouns citizens
+  actually use that way are listed as statement words, but that list can never
+  be complete. The trade is deliberate and one-sided — a false positive
+  appends to a stub whose intake is unfinished (both messages stay in one
+  conversation, and an agent can split them), while a false negative *is* the
+  reported bug. (b) The self-heal for already-split threads needs exactly one
+  of the open tickets to still be in intake; if a split left two categoryless
+  stubs, the older ">1 open, don't guess" rule applies and an agent merges by
+  hand. (c) The confirm/correct round-trip lives in the assistant path only —
+  the rule-based fallback keeps no cross-turn intake state at all, so with no
+  `OPENAI_API_KEY` configured a flagged-but-real domain is re-asked each turn.
+- **Operational note:** `ASSISTANT_INSTRUCTIONS` changed, so run
+  `python scripts/update_assistant.py` once (from `services/ai-core`) against
+  the live `OPENAI_ASSISTANT_ID` for the intake-answer and email-correction
+  guidance to take effect — see the Feature 17 note above for why.
 
 **Duplicate "complaint registered" acknowledgement (also live-tested).**
 Independently of the above, the SAME conversation surfaced a second bug:

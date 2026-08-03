@@ -60,6 +60,18 @@ def normalise_email(raw: str) -> str:
 #     return base64.b64encode(hmac.new(pepper, value.encode(), sha256).digest()).decode()
 ```
 
+**Validation happens upstream, not here (Feature 20).** Normalisation assumes
+the value is already a real address — it will happily lowercase a typo. The
+gate that decides whether an email is trustworthy enough to store is the
+intake validator (`app/conversation/intake_fields.validate_email`: RFC-lite
+syntax plus a Damerau-distance-1 check against common consumer domains), and
+`ConversationAgent._tool_confirm_identity` refuses to pass a refused address
+to `resolve()` as `confirmedEmail`. Without that, a mistyped domain
+(`nithya@gmaill.com`, live-tested) was written straight onto the profile and
+every notification to that citizen would have bounced silently. The citizen
+is asked to confirm or correct instead; the value is only resolved once they
+do.
+
 ---
 
 ## Merge Logic

@@ -34,12 +34,102 @@ channel.message.received consumed
         → STOP
 ```
 
+### Intake answers never start a new ticket (Feature 20)
+
+Every branch above that says "proceed" assumes the message is *about* the
+complaint. The reply to the identity request is not — it is a name, an email,
+a service ID, a pin code, and nothing else. Ticket routing has to know that
+before it reasons about topics at all, or each answer becomes its own ticket
+(live-tested: one citizen, three messages, tickets TKT-00016/17/18).
+
+`ensure_ticket_stub` (`app/tickets/intake.py`) therefore checks, ahead of the
+Feature 18 same-topic judgment:
+
+```
+message is purely intake-form data  (looks_like_intake_answer, deterministic — no LLM)
+  AND the citizen has exactly ONE open ticket with no category set
+      (i.e. one stub still mid-intake, whatever else is open)
+        → route to that stub, do not ask is_same_topic at all
+```
+
+`looks_like_intake_answer` requires a structural signal (an email address, a
+form label, a bare 4+ digit identifier, or a one-to-two-word bare name) and
+rejects the message if ANY token is a statement/complaint word — which is
+what keeps "my phone is not working" from reading as a Mobile-field answer.
+It is deliberately LLM-free: it gates whether the LLM check runs, so it must
+not itself depend on the LLM being reachable.
+
 ## Identity Request Message (per channel)
 
 WhatsApp/Email:
 > "Thanks for reaching out. To help you better, could you share your
 > email address or mobile number? If you'd prefer to stay anonymous,
 > just reply 'anonymous' and we'll still register your complaint."
+
+### Field validation and correction (Feature 20)
+
+Each catalog field (`app/conversation/intake_fields.py`) carries
+`extract`/`validate`, and optionally `hint(value)` — what to tell the citizen
+when a value is refused. Email uses all three:
+
+- `is_email_syntax_valid` — permissive RFC-lite shape check.
+- `suggest_email_correction` — Damerau-Levenshtein-distance-1 match against
+  `KNOWN_EMAIL_DOMAINS` (transposition included: `gmial.com`/`hotmial.com`
+  are distance **two** under plain Levenshtein and would otherwise pass). A
+  domain in the set is always accepted; a domain unlike any of them is never
+  second-guessed, so corporate/`.gov.in` addresses pass untouched.
+- `hint` → `a confirmed Email — did you mean "x@gmail.com" rather than
+  "x@gmaill.com"?`, surfaced through `missing_fields` so the gate stays
+  blocked and the assistant asks the citizen to confirm or correct. The
+  suggestion is never substituted automatically.
+
+A refused address is also kept out of `IdentityResolver`
+(`_tool_confirm_identity`), so a typo never lands on the identity profile
+while the correction is pending. Partial intake that IS valid is not held
+hostage to it: `update_ticket_identity(..., extra_fields=...)` stamps the
+Service/Customer ID onto the stub on the turn it's given, rather than only at
+ticket-creation time.
+
+The round-trip, in the order it actually happens:
+
+```
+citizen: nithya@gmaill.com
+  -> validate_email False, recorded in state["intake"] as invalid
+  -> state["queried_intake"]["email"] = "nithya@gmaill.com"
+  -> missing_fields emits the hint; the assistant relays it verbatim
+citizen: "yes"            -> take the SUGGESTION  (nithya@gmail.com)
+citizen: "nithya@gmaill.com" (again) -> keep THEIRS; validator overruled
+anything else                        -> still outstanding, ask again
+```
+
+"Yes" meaning *the suggestion* is the whole point: the question names the
+suggestion, so the opposite reading would re-introduce the typo on the most
+likely reply of all. The affirmation check is narrow and only consulted on a
+short message — "right"/"same"/"it is" are everywhere in complaint prose — and
+`queried_intake` is cleared as soon as the value is settled. A bare resend by
+the model never counts; it is told to resend everything it knows on every
+call, so only the citizen's own words decide.
+
+`looks_like_intake_answer` correspondingly accepts a pure yes/no message, and
+forgives a leading "no"/"yes" **when the message also carries a concrete
+value**, so the correction turn itself routes back to the same stub.
+
+Both ways the model can state an email — `identityValue` and
+`providedFields` — merge into the intake state identically. Previously only
+the latter did, so an address refused on the `identityValue` path vanished
+without the citizen ever being told what was wrong with it.
+
+Two ordering rules keep the round-trip intact across a turn:
+- A turn that extracts NOTHING for a field no longer overwrites what the
+  citizen sent on an earlier turn. Otherwise the refused address is erased at
+  the top of the very next turn and the ask degrades to a bare "we still need:
+  Email", with nothing for their answer to attach to.
+- Each decision is stored (`{"asked": ..., "resolved": ...}`) and re-applied,
+  because the model resends every value it knows on every `confirm_identity`
+  call — without that, a correction settled at the top of the turn is quietly
+  undone when the resent original is merged back in a few lines later. A
+  record for a different value is stale and gets replaced, so a second bad
+  address is queried in its own right.
 
 ---
 

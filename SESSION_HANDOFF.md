@@ -1,102 +1,107 @@
-# Session handoff — demo video task (2026-07-21) — DONE
+# Session handoff — WhatsApp intake-answer bug (Feature 20), 2026-08-03
 
-## Deliverable
-`UniServe_Demo_Video.mp4` at the repo root. 3:03, 1600x900 h264 + aac audio
-(Microsoft Ravi TTS narration), verified by extracting frames at ~12
-timestamps and checking each against the expected scene. Script/storyboard:
-`marketing/deck-assets/demo_video_script.md` (delivered regardless, per the
-user's own stated fallback).
+## Task
+Fix the bug described in `Big_Fix_Prompt.md` (repo root), with `Gateway.log`
+and `ai-core.log` as the live evidence. Then commit and push. User stepped
+away and authorised finishing without stage-by-stage confirmation, and
+authorised OpenAI-Assistant-side changes too.
 
-Story shown: complaint #1 (email, digiaim_group1@iimcal.ac.in) arrives with
-no name/mobile → AI holds the ticket and asks → citizen replies with
-details → ticket appears, confirmed, scored. Complaint #2 (WhatsApp, same
-phone number, brand-new topic, no name/email given) → identity resolves
-INSTANTLY and the ticket's Citizen Details show the email carried over from
-complaint #1 automatically — this is the verified, real payoff (confirmed
-both via direct API testing and by inspecting the actual recorded frame at
-~105s: TKT-00052's citizen details show both digiaim_group1@iimcal.ac.in and
-+919845011223 populated on a WhatsApp-origin ticket). Bonus flows also
-shown: admin adds a live custom intake field and a fresh complaint
-immediately asks for it; lead/agent ticket workflow with audit trail;
-analytics close.
+## Status: fix implemented, 240/240 ai-core tests pass, docs updated
+Two review agents (code review + solution review) ran against the diff; every
+defect they raised is fixed and covered by a test — see "Review findings"
+below.
 
-## Known limitation (disclosed to user)
-Because several recording attempts were needed (see "what went wrong"
-below) and the script is resumable-by-design (to avoid corrupting the
-identity narrative on retry), the WhatsApp ticket used in the "agent
-workflow" bonus scene (scene 11) had already been advanced to Resolved by
-an earlier attempt's side effects. So scene 11 shows the final
-already-resolved state with a real, accurate audit trail, rather than a
-fresh live transition happening in that exact moment. The core ask (identity
-resolution across channels) is unaffected and fully verified.
+## The bug
+WhatsApp `+918939014142`, three messages, three tickets:
+1. "No power in my area" → stub TKT-00016 (correct)
+2. "Nithya" / "Nithya@gmaill.com" / "56784567" → NEW ticket TKT-00017, and
+   the `gmaill.com` typo was accepted onto the identity profile
+3. "dharshini.s.raj@gmail.com" → NEW ticket TKT-00018, whose recorded
+   "complaint" was the citizen's own email address
 
-## Real side effect (disclosed to user)
-digiaim_group1@iimcal.ac.in is a real address and EMAIL_SMTP_MOCK is not
-set, so the AI's automatic acknowledgment/follow-up emails were genuinely
-sent to that real inbox during testing/recording (confirmed via
-scripts/api-gateway.log): 3 emails — two "Update on your message" and one
-"Your complaint has been registered — Ticket TKT-00051". Not harmful, just
-worth knowing. The fabricated "digiaim_group1_followup@iimcal.ac.in"
-address used for the admin-cascade scene doesn't exist; any send attempts
-to it simply fail/bounce silently.
+## Root cause
+`ensure_ticket_stub` (`services/ai-core/app/tickets/intake.py`) routes a
+WhatsApp message by identity + open-ticket count, and (Feature 18) asks
+`is_same_topic` when exactly one ticket is open. An intake-form ANSWER names
+no problem, so `is_same_topic` answers "different topic" — correctly by its
+own definition — and each answer became its own ticket. Cascade: conversation
+state and the OpenAI thread are keyed on the ticket (`_conv_key` →
+`ticket:<id>`), so every split also wiped the assistant's memory of the
+original complaint, which is why message 3's ticket recorded an email address
+as the complaint text. Separately, the `email` field's validator was literally
+`lambda v: bool(v)`.
 
-## What went wrong along the way (for future reference / if redoing this)
-1. Playwright's `recordVideo` context option is unreliable in this
-   environment: silently produces NO file with the system Chrome channel;
-   crashes the renderer with Playwright's bundled headless-shell build on
-   this app's heavier pages. WORKAROUND USED: abandoned `recordVideo`
-   entirely; capture frames manually via CDP screencast
-   (`page.context().newCDPSession(page)` → `Page.startScreencast` /
-   `Page.screencastFrame` / `Page.screencastFrameAck`), saving numbered
-   JPEGs + an elapsed-ms manifest.
-2. The dashboard's Next.js DEV SERVER crashed into a Jest-worker EPIPE loop
-   partway through (a documented gotcha in this repo after heavy use) —
-   looked exactly like a browser/login bug until `scripts/dashboard.log`
-   was checked. Fixed by killing the port-3000 process and restarting
-   `npm run dev` — no app code touched.
-3. CDP screencast only emits a frame on repaint, so long static holds would
-   freeze the video — fixed with a harmless net-zero mouse-wheel jiggle
-   every ~400ms during waits to keep frames flowing.
-4. A single global speed-up ratio (to match the video's real recorded
-   length to the narration's total length) caused scene-by-scene drift,
-   because scenes with page reloads/navigations have disproportionately
-   more real overhead than pure-overlay scenes. Fixed by adding scene
-   boundary markers (`mark(id)` in the recording script →
-   `scenes_manifest.json`) and rescaling each scene's own frames to its own
-   narration hold duration individually before one final ffmpeg concat pass
-   (`assemble_video2.py`, NOT the earlier `assemble_video.py`).
-5. Several run attempts were externally `killed` (not failed — no error,
-   just terminated) when run via `run_in_background: true`, at
-   increasingly early points. Root cause not fully diagnosed; worked around
-   by running the final successful attempt in the FOREGROUND instead.
+## Changes (all in services/ai-core)
+- `app/tickets/intake.py` — new deterministic `looks_like_intake_answer()`
+  (structural signal + statement-word rejection, no LLM); new branch in
+  `ensure_ticket_stub` routing an intake answer to the citizen's one
+  still-in-intake stub (no `category`) BEFORE the same-topic check, working
+  even when several tickets are open so already-split threads self-heal;
+  `update_ticket_identity(..., extra_fields=)`.
+- `app/conversation/intake_fields.py` — `validate_email`,
+  `is_email_syntax_valid`, `suggest_email_correction` (Damerau distance 1 vs
+  `KNOWN_EMAIL_DOMAINS` — transposition matters: `gmial`/`hotmial` are
+  distance 2 under plain Levenshtein), optional `hint(value)` on a catalog
+  spec, surfaced by `missing_fields`.
+- `app/conversation/agent.py` — `_ticket_fields_from_intake` (stamps a
+  validated Service/Customer ID onto the stub on the turn it's given, both
+  paths); `_tool_confirm_identity` refuses to pass an unvalidated email to the
+  resolver and falls back to the merged intake state for a valid one;
+  `_accept_values_the_citizen_reaffirmed` / `_remember_queried_values` so
+  "confirm or correct" actually allows confirming (no infinite re-ask for a
+  real-but-unusual domain).
+- `app/conversation/tools.py` — `ASSISTANT_INSTRUCTIONS`: intake answers are
+  never new complaints; relay the email-correction question verbatim with
+  both spellings and never substitute the suggestion.
+- Tests: `test_tickets_intake.py` (+13, incl. a 3-message end-to-end
+  simulation asserting one ticket), `test_intake_fields.py` (+9),
+  `test_conversation.py` (+3).
+- Docs: README "Subject-line ticket threading & dedup" (Feature 20 section +
+  updated resolution order), `docs/06_to_10_AI_PIPELINE.md`,
+  `docs/02b_ADAPTER_WHATSAPP.md`, `docs/03_IDENTITY_RESOLVER.md`.
 
-## Reusable artifacts (in `$CLAUDE_JOB_DIR/tmp`, may not survive a fresh job)
-- `record_demo.js` — the 12-scene resumable recording script (CDP
-  screencast, scene markers, resumability guards on scenes 3/5/7/10).
-- `gen_narration.py` — Windows SAPI TTS generator (voice "Microsoft Ravi"),
-  produces `narration/master_narration.wav` + `narration/manifest.json`.
-- `assemble_video2.py` — the CORRECT assembly script (per-scene timing
-  correction). `assemble_video.py` (global speed ratio) is superseded/buggy,
-  kept only for reference.
-- `frames/` — 1560 captured JPEGs + `frames_manifest.json` +
-  `scenes_manifest.json` from the successful run.
+## Review findings (all fixed)
+1. **"Yes" meant the wrong thing.** The question names the suggestion, so
+   "yes" must TAKE it; the first cut kept the typo — re-introducing the bug on
+   the likeliest reply. Now: yes -> suggestion, resend -> keep theirs.
+2. **The correction turn spawned a duplicate.** "no, it's x@gmail.com" and a
+   bare "Yes"/"No" were rejected by `looks_like_intake_answer`. Negation is
+   now forgiven alongside a concrete value, and a pure yes/no routes home.
+3. **A refused `identityValue` email was never recorded**, so the citizen saw
+   only "we still need: Email" and retyped the same typo. Both tool routes now
+   merge identically.
+4. **Ordering hole (found while fixing 1–3):** the model resends every value
+   each turn, so a settled correction was undone mid-turn; and an
+   extracts-nothing turn erased the refused value entirely. Decisions are now
+   remembered and re-applied, and an empty extraction no longer clobbers.
+5. **Real domains flagged** (`email.com`, `mailo.com`): added to the known
+   set; suggestion ranking now prefers longest-prefix then the common majors.
+6. **Trailing whitespace** made `x@gmail.com\n` "a typo of" `x@gmail.com` —
+   an unanswerable question. `suggest_email_correction` strips first.
+7. **Non-ASCII names, emoji, spaced identifiers** ("சித்ரா", "Thanks 🙏 Nithya",
+   "600 042", "Ravi Kumar Sharma", 14-word replies) were all rejected — each
+   would have reproduced the original bug. Fixed; word cap raised to 25.
+8. **Terse one-word complaints** ("Transformer", "Sewage overflow") read as
+   bare names. Utility/service nouns added to the statement-word list; the
+   residual risk is documented in the README as a deliberate one-sided trade.
 
-## Standing state
-Full stack running: gw 8080, dbw 8090, ai 8001 (OpenAI live), dashboard 3000
-(RESTARTED once this session — fresh process, healthy), Memurai 6379.
-Tenant `t1` intake-fields config now has: Mobile mandatory on Email (was
-Optional), plus a "connectionType" custom field mandatory on Email (added
-live during the recording's admin-cascade scene) — this is now the LIVE
-config; revert via `PUT /api/v1/tenant/intake-fields` if the user wants
-different defaults for their own testing going forward.
-Logins unchanged: admin@tneb.demo/Admin@123, agent@tneb.demo/Agent@123,
-lead@uniserv.com/Lead@1234.
+## Constraints honoured
+No schema/Flyway change (db-writer's ticket PATCH already accepts
+`serviceId`, `TicketService.java:322`; `category` is already in the list
+projection, `LIST_COLUMNS`). Email adapter threading, cross-channel merge,
+dashboard, RBAC, status transitions and Phase 2 stubs untouched. All 204
+pre-existing tests still pass.
 
-Everything from the EARLIER deck/IMC-strategy task this session
-(`UniServe_Product_Demo_v1.pptx`, `marketing/UniServe_IMC_Strategy.md`,
-`marketing/UniServe_Digital_Campaign_Brief.md`) is complete and untouched by
-this video work — see git status / repo root for those files.
+## ACTION REQUIRED AFTER DEPLOY
+`ASSISTANT_INSTRUCTIONS` changed, so from `services/ai-core` run once:
+`python scripts/update_assistant.py`
+against the live `OPENAI_ASSISTANT_ID`. Without it the deployed Assistant
+keeps the old instructions (the code-side gates still work; only the model's
+phrasing/behaviour guidance is stale).
 
-Nothing has been committed to git or pushed this session (4 unpushed
-commits predate this session; per earlier instruction the user pushes
-manually due to an interactive credential prompt).
+## Test command
+`cd services/ai-core && ./.venv/Scripts/python.exe -m pytest -q`
+
+## Untracked files at repo root
+`Big_Fix_Prompt.md`, `Gateway.log`, `ai-core.log` — inputs for this task,
+deliberately NOT committed.

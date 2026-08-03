@@ -4,7 +4,12 @@ import asyncio
 from unittest.mock import AsyncMock, patch
 
 from app.dedup.service import OPEN_STATUSES
-from app.tickets.intake import ensure_ticket_stub, extract_ticket_number, update_ticket_identity
+from app.tickets.intake import (
+    ensure_ticket_stub,
+    extract_ticket_number,
+    looks_like_intake_answer,
+    update_ticket_identity,
+)
 
 
 def _run(coro):
@@ -326,6 +331,270 @@ def test_ensure_ticket_stub_explicit_reference_in_whatsapp_body_wins_over_open_c
     db.create_ticket.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# Feature 20: an intake ANSWER (name / email / service id / pin code) is not a
+# complaint at all, so Feature 18's same-topic judgment — which asks "does
+# this describe the same problem?" — can only ever answer "no" for it, and did:
+# live-tested, +918939014142 sent "No power in my area" (stub TKT-00016) and
+# then two intake replies, which became TKT-00017 and TKT-00018.
+# ---------------------------------------------------------------------------
+
+def _intake_stub_db(open_tickets, new_ticket=None):
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(return_value=open_tickets)
+    db.find_by_phone = AsyncMock(return_value={"master_id": "m-nithya"})
+    db.get_messages = AsyncMock(return_value=[{"direction": "inbound", "content": "No power in my area"}])
+    db.create_ticket = AsyncMock(return_value=new_ticket or {"id": "t-new", "ticketNumber": "TKT-99999"})
+    return db
+
+
+# The stub TKT-00016 as db-writer returns it while intake is still in
+# progress: identity linked, but no category (no complaint filed on it yet).
+_OPEN_STUB = {"id": "t-16", "ticket_number": "TKT-00016", "category": None}
+
+
+def test_whatsapp_intake_answer_stays_on_the_in_intake_stub():
+    """Message 2 of the reported transcript: name + email + service id. It
+    names no problem, so the topic check would (correctly, by its own
+    definition) say "different topic" — the guard must stop it being asked."""
+    db = _intake_stub_db([_OPEN_STUB])
+
+    with patch("app.tickets.intake.is_same_topic", new=AsyncMock(return_value=False)) as same_topic:
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+918939014142", "whatsapp",
+            raw_text="Nithya\nNithya@gmaill.com\n56784567",
+            channel_identity_type="phone", channel_identity_value="+918939014142", trace_id="tr-20a"))
+
+    assert stub == {"id": "t-16", "ticketNumber": "TKT-00016"}
+    db.create_ticket.assert_not_called()
+    same_topic.assert_not_called()
+
+
+def test_whatsapp_bare_email_retry_stays_on_the_in_intake_stub():
+    """Message 3 of the same transcript: just the corrected email address."""
+    db = _intake_stub_db([_OPEN_STUB])
+
+    with patch("app.tickets.intake.is_same_topic", new=AsyncMock(return_value=False)):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+918939014142", "whatsapp",
+            raw_text="dharshini.s.raj@gmail.com",
+            channel_identity_type="phone", channel_identity_value="+918939014142", trace_id="tr-20b"))
+
+    assert stub == {"id": "t-16", "ticketNumber": "TKT-00016"}
+    db.create_ticket.assert_not_called()
+
+
+def test_whatsapp_intake_answer_finds_the_sole_in_intake_stub_among_several_open_tickets():
+    """Self-healing for threads this bug already split: with TKT-00017 open
+    alongside the stub, the old code took the ">1 open, don't guess" branch
+    and shed yet another ticket per reply. Exactly one ticket is still in
+    intake, so there is nothing to guess between."""
+    db = _intake_stub_db([
+        {"id": "t-17", "ticket_number": "TKT-00017", "category": "other"},
+        _OPEN_STUB,
+    ])
+
+    stub = _run(ensure_ticket_stub(
+        db, "t1", "whatsapp:+918939014142", "whatsapp",
+        raw_text="dharshini.s.raj@gmail.com",
+        channel_identity_type="phone", channel_identity_value="+918939014142", trace_id="tr-20c"))
+
+    assert stub == {"id": "t-16", "ticketNumber": "TKT-00016"}
+    db.create_ticket.assert_not_called()
+
+
+def test_whatsapp_new_complaint_still_creates_a_new_ticket_when_a_stub_is_open():
+    """The Feature 18 behaviour this guard must not swallow: real complaint
+    prose is not intake data, so the topic check still runs and still splits."""
+    db = _intake_stub_db([_OPEN_STUB], new_ticket={"id": "t-new", "ticketNumber": "TKT-00019"})
+
+    with patch("app.tickets.intake.is_same_topic", new=AsyncMock(return_value=False)) as same_topic:
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+918939014142", "whatsapp",
+            raw_text="Now my water heater is broken too",
+            channel_identity_type="phone", channel_identity_value="+918939014142", trace_id="tr-20d"))
+
+    assert stub == {"id": "t-new", "ticketNumber": "TKT-00019"}
+    same_topic.assert_awaited_once()
+
+
+def test_whatsapp_intake_answer_does_not_hijack_a_categorised_ticket():
+    """The guard is scoped to stubs that never had a complaint filed. Once a
+    ticket HAS a category, the intake it was created from is finished, so an
+    intake-looking message goes back through the normal topic judgment."""
+    db = _intake_stub_db(
+        [{"id": "t-done", "ticket_number": "TKT-00030", "category": "billing"}],
+        new_ticket={"id": "t-new", "ticketNumber": "TKT-00031"})
+
+    with patch("app.tickets.intake.is_same_topic", new=AsyncMock(return_value=False)) as same_topic:
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+918939014142", "whatsapp",
+            raw_text="ravi@example.com",
+            channel_identity_type="phone", channel_identity_value="+918939014142", trace_id="tr-20e"))
+
+    assert stub == {"id": "t-new", "ticketNumber": "TKT-00031"}
+    same_topic.assert_awaited_once()
+
+
+def test_whatsapp_intake_answer_with_two_open_stubs_falls_through_to_the_old_logic():
+    """Two in-intake stubs is genuinely ambiguous — which one is this answer
+    for? — so the guard declines and the existing ">1 open, create new rather
+    than guess" rule applies unchanged."""
+    db = _intake_stub_db(
+        [_OPEN_STUB, {"id": "t-16b", "ticket_number": "TKT-00016B", "category": None}],
+        new_ticket={"id": "t-new", "ticketNumber": "TKT-00032"})
+
+    stub = _run(ensure_ticket_stub(
+        db, "t1", "whatsapp:+918939014142", "whatsapp",
+        raw_text="ravi@example.com",
+        channel_identity_type="phone", channel_identity_value="+918939014142", trace_id="tr-20f"))
+
+    assert stub == {"id": "t-new", "ticketNumber": "TKT-00032"}
+
+
+def test_email_channel_is_untouched_by_the_intake_answer_guard():
+    """Regression guard for the constraint that email threading is a separate
+    code path: the whole identity branch (and therefore this guard) is
+    WhatsApp-side only."""
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(return_value=[])
+    db.find_by_email = AsyncMock()
+    db.create_ticket = AsyncMock(return_value={"id": "t-email", "ticketNumber": "TKT-00040"})
+
+    stub = _run(ensure_ticket_stub(
+        db, "t1", "email:msg-abc", "email", raw_text="Name: Nithya",
+        channel_identity_type="email", channel_identity_value="nithya@example.com", trace_id="tr-20g"))
+
+    assert stub == {"id": "t-email", "ticketNumber": "TKT-00040"}
+    db.find_by_email.assert_not_called()
+
+
+def test_three_message_whatsapp_intake_produces_exactly_one_ticket():
+    """The whole reported transcript end to end, against one simulated ticket
+    store: complaint, then two intake replies. Before the fix this produced
+    TKT-00016/17/18; it must produce one ticket and route both replies to it."""
+    tickets = []
+
+    async def list_tickets(tenant_id, trace_id=None, **filters):
+        if "originMessageId" in filters or "ticketNumber" in filters:
+            return []
+        if "identityId" in filters:
+            return [t for t in tickets if t["identity_id"] == filters["identityId"]
+                    and t["status"] in OPEN_STATUSES]
+        return [t for t in tickets if t["thread_id"] == filters.get("threadId")
+                and t["status"] in OPEN_STATUSES]
+
+    async def create_ticket(payload, trace_id=None):
+        ticket = {"id": f"t-{len(tickets)}", "ticketNumber": f"TKT-{16 + len(tickets):05d}",
+                  "ticket_number": f"TKT-{16 + len(tickets):05d}", "thread_id": payload["threadId"],
+                  "status": "open", "category": None, "identity_id": None}
+        tickets.append(ticket)
+        return ticket
+
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(side_effect=list_tickets)
+    db.create_ticket = AsyncMock(side_effect=create_ticket)
+    db.get_messages = AsyncMock(return_value=[{"direction": "inbound", "content": "No power in my area"}])
+    # Message 1 arrives before any identity exists; the stub is linked to one
+    # by the conversation turn that follows it (update_ticket_identity), which
+    # is what the two later lookups then find.
+    db.find_by_phone = AsyncMock(side_effect=[None, {"master_id": "m-1"}, {"master_id": "m-1"}])
+
+    async def route(text):
+        return await ensure_ticket_stub(
+            db, "t1", "whatsapp:+918939014142", "whatsapp", raw_text=text,
+            channel_identity_type="phone", channel_identity_value="+918939014142", trace_id="tr-20i")
+
+    with patch("app.tickets.intake.is_same_topic", new=AsyncMock(return_value=False)):
+        first = _run(route("No power in my area"))
+        tickets[0]["identity_id"] = "m-1"                      # the conversation turn links it
+        second = _run(route("Nithya\nNithya@gmaill.com\n56784567"))
+        third = _run(route("dharshini.s.raj@gmail.com"))
+
+    assert len(tickets) == 1
+    assert first == second == third == {"id": "t-0", "ticketNumber": "TKT-00016"}
+
+
+def test_looks_like_intake_answer_accepts_form_data_in_any_phrasing():
+    assert looks_like_intake_answer("Nithya\nNithya@gmaill.com\n56784567") is True
+    assert looks_like_intake_answer("dharshini.s.raj@gmail.com") is True
+    assert looks_like_intake_answer("Name: Nithya") is True
+    assert looks_like_intake_answer("My name is Ravi Kumar") is True
+    assert looks_like_intake_answer("Nithya") is True          # bare name, no label at all
+    assert looks_like_intake_answer("Service ID 56784567") is True
+    assert looks_like_intake_answer("Pin code 600001") is True
+    assert looks_like_intake_answer("anonymous") is True
+
+
+def test_looks_like_intake_answer_accepts_a_reply_to_the_email_typo_question():
+    """Feature 20 asks the citizen "did you mean x@gmail.com?" — so the shape
+    of the reply it invites ("no, it's ...") has to be recognised, or the
+    correction turn itself would spawn the very duplicate ticket this whole
+    fix exists to prevent. A negation is only forgiven alongside a concrete
+    value; on its own it still reads as complaint content (next test)."""
+    assert looks_like_intake_answer("no, dharshini.s.raj@gmail.com") is True
+    assert looks_like_intake_answer("No - it is dharshini.s.raj@gmail.com") is True
+    assert looks_like_intake_answer("sorry, typo. nithya@gmail.com") is True
+    assert looks_like_intake_answer("no its 56784567") is True
+    assert looks_like_intake_answer("yes that's correct") is True
+
+
+def test_negation_alongside_a_value_is_still_rejected_when_it_describes_a_problem():
+    """The forgiveness above is scoped to the negation itself — a real
+    complaint that happens to contain a number is still a complaint."""
+    assert looks_like_intake_answer("no water at 600042") is False
+    assert looks_like_intake_answer("no bill received for 12345678") is False
+    assert looks_like_intake_answer("no power since 2 days") is False
+
+
+def test_looks_like_intake_answer_rejects_anything_describing_a_problem():
+    """Every one of these is a real message from this repo's own live-testing
+    history — the guard must not capture any of them."""
+    assert looks_like_intake_answer("No power in my area") is False
+    assert looks_like_intake_answer("Put not closed") is False
+    assert looks_like_intake_answer("It happens around 11PM") is False
+    assert looks_like_intake_answer("Meter not working") is False
+    assert looks_like_intake_answer("my phone is not working") is False   # "phone" is a field label
+    assert looks_like_intake_answer("Now my new water heater is broken too") is False
+    assert looks_like_intake_answer("My bill is wrong, contact me at x@y.com") is False
+    assert looks_like_intake_answer("any update?") is False
+    assert looks_like_intake_answer("") is False
+    assert looks_like_intake_answer(None) is False
+
+
+def test_looks_like_intake_answer_accepts_a_bare_yes_or_no():
+    """The reply to Feature 20's own "did you mean x@gmail.com?" is usually
+    one word. If that doesn't route back to the stub that asked, the
+    correction turn spawns the duplicate ticket the guard exists to prevent —
+    and nobody opens a conversation by texting "yes"."""
+    for message in ("Yes", "yes", "No", "ok", "yes please"):
+        assert looks_like_intake_answer(message) is True, message
+
+
+def test_looks_like_intake_answer_handles_real_world_name_and_id_formatting():
+    """Names are not ASCII, WhatsApp messages carry emoji, and identifiers get
+    typed with spaces in them — each of these was rejected outright by an
+    earlier, tidier version of this check."""
+    assert looks_like_intake_answer("Ravi Kumar Sharma") is True       # three-part name
+    assert looks_like_intake_answer("சித்ரா") is True                    # Tamil (combining marks)
+    assert looks_like_intake_answer("José Fernandes") is True          # accented Latin
+    assert looks_like_intake_answer("Thanks 🙏 Nithya") is True         # emoji token
+    assert looks_like_intake_answer("600 042") is True                 # pin code with a space
+    assert looks_like_intake_answer("+91 89390 14142") is True         # grouped phone number
+    # The intake form's own numbered prompt invites a long-ish single reply.
+    assert looks_like_intake_answer(
+        "My name is Nithya and my email is nithya@gmail.com and my id is 56784567") is True
+
+
+def test_looks_like_intake_answer_rejects_a_terse_one_word_complaint():
+    """The bare-name path is the loosest rule here, so the utility/service
+    nouns a citizen would use as a one-word complaint are named explicitly as
+    statement words — otherwise "Transformer" reads exactly like "Nithya"."""
+    for message in ("Streetlight", "Transformer", "Blackout", "Sewage overflow",
+                    "Garbage", "Refund", "Wrong reading", "Drainage block"):
+        assert looks_like_intake_answer(message) is False, message
+
+
 def test_update_ticket_identity_patches_identity_fields():
     db = AsyncMock()
     db.update_ticket = AsyncMock(return_value={})
@@ -334,6 +603,19 @@ def test_update_ticket_identity_patches_identity_fields():
 
     db.update_ticket.assert_awaited_once_with(
         "t-1", {"identityId": "m-1", "identityStatus": "confirmed"}, trace_id="tr-3")
+
+
+def test_update_ticket_identity_writes_extra_fields_alongside_identity():
+    """Feature 20: partial intake (a Service/Customer ID) lands on the ticket
+    on the turn it's given, not only if/when the complaint is submitted."""
+    db = AsyncMock()
+    db.update_ticket = AsyncMock(return_value={})
+
+    _run(update_ticket_identity(
+        db, "t-16", "m-1", "pending", trace_id="tr-20h", extra_fields={"serviceId": "56784567"}))
+
+    db.update_ticket.assert_awaited_once_with(
+        "t-16", {"identityId": "m-1", "identityStatus": "pending", "serviceId": "56784567"}, trace_id="tr-20h")
 
 
 def test_ensure_ticket_stub_in_reply_to_resolves_directly():

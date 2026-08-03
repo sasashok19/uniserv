@@ -24,6 +24,8 @@ from app.conversation.intake_fields import (
     fields_for_channel,
     is_native_field,
     missing_fields,
+    suggest_email_correction,
+    validate_email,
 )
 from app.conversation.openai_gateway import OpenAIAssistantGateway
 from app.conversation.status_lookup import summarize_recent_tickets
@@ -93,6 +95,29 @@ def _flatten_intake(intake: dict) -> dict:
     return {k: v["value"] for k, v in intake.items() if v.get("source") == "extracted"}
 
 
+# Intake keys that map onto a column of the TICKET itself rather than onto the
+# citizen's identity profile. Name/email/mobile are identity attributes and
+# reach the database through the resolver; the Service/Customer ID is
+# complaint-specific and has nowhere else to go (Feature 20).
+_TICKET_COLUMN_FOR_INTAKE_KEY = {"serviceId": "serviceId"}
+
+
+def _ticket_fields_from_intake(intake: dict) -> dict:
+    """Ticket columns derivable from what the citizen has supplied so far.
+
+    Written on every confirm_identity turn, not only once the whole gate
+    passes, so a partially-completed intake is still visible on the ticket
+    (Feature 20). Only values the citizen actually wrote and that passed their
+    field's validator are included — a "known" value is already on file, and
+    an invalid one is about to be queried, not recorded."""
+    fields = {}
+    for key, column in _TICKET_COLUMN_FOR_INTAKE_KEY.items():
+        entry = (intake or {}).get(key) or {}
+        if entry.get("value") and entry.get("valid", True) and entry.get("source") == "extracted":
+            fields[column] = entry["value"]
+    return fields
+
+
 def _merge_provided_fields(state: dict, provided_fields: dict, catalog: dict) -> None:
     """Merge the assistant's explicit `confirm_identity(providedFields=...)`
     argument (label -> value) into the tracked intake state (Feature 17).
@@ -118,6 +143,89 @@ def _merge_provided_fields(state: dict, provided_fields: dict, catalog: dict) ->
             continue
         value = value.strip()
         intake[key] = {"value": value, "valid": catalog[key]["validate"](value), "source": "extracted"}
+
+
+# Feature 20: "ask to confirm OR correct" has to mean both, and the two have
+# to mean the RIGHT things. The question the citizen is asked is *'you sent
+# "x@gmaill.com"; did you mean "x@gmail.com"?'* — so "yes" means **take the
+# suggestion**, not "keep what I typed". (Reading it the other way round is
+# the single most likely reply re-introducing the exact typo this feature
+# exists to catch.) Standing by the original therefore requires the citizen to
+# send it again, which the wording explicitly invites; that path matters
+# because the domain list is a heuristic and a real, unusual address must
+# never be re-asked forever.
+#
+# Deliberately narrow, and only consulted on a SHORT message: an answer to a
+# yes/no question is short, whereas words like "right" or "same" turn up
+# constantly in ordinary complaint prose ("the transformer on the right side",
+# "same problem again") and must not be read as answers to a question asked
+# several turns ago.
+_AFFIRMATION_RE = re.compile(
+    r"\b(yes|yeah|yep|yup|ok(ay)?|correct|confirm(ed|ing)?"
+    r"|that'?s (right|correct|it)|thats (right|correct|it))\b",
+    re.IGNORECASE)
+_MAX_AFFIRMATION_WORDS = 6
+
+
+def _resolve_queried_values(state: dict, raw_text: Optional[str]) -> None:
+    """Settle any value the citizen was asked to confirm or correct, using
+    their own words this turn (see the note above). Mutates `state["intake"]`.
+
+    - They sent the same value again -> accept it as-is (they overrule us).
+    - They said yes and we offered a correction -> apply the correction.
+    - They said yes and we offered none -> accept the value as-is.
+    Anything else leaves it outstanding, and the question is asked again.
+
+    Each decision is REMEMBERED (``{"asked": ..., "resolved": ...}``) and
+    re-applied, because the model resends every value it knows on every
+    ``confirm_identity`` call: without that, the citizen's own correction is
+    settled at the top of the turn and then quietly undone a few lines later
+    when the model's resent copy of the original is merged back in.
+    """
+    queried = state.get("queried_intake") or {}
+    if not queried:
+        return
+    intake = state.get("intake") or {}
+    text = raw_text or ""
+    affirmed = bool(_AFFIRMATION_RE.search(text)) and len(text.split()) <= _MAX_AFFIRMATION_WORDS
+    for key, record in list(queried.items()):
+        asked, resolved = record.get("asked"), record.get("resolved")
+        entry = intake.get(key) or {}
+        if resolved:
+            if entry.get("value") == asked:
+                entry["value"], entry["valid"] = resolved, True
+            continue
+        if entry.get("value") != asked or entry.get("valid", True):
+            # They've moved on to a different value for this field (or it was
+            # accepted some other way) — the question no longer applies.
+            queried.pop(key, None)
+            continue
+        if asked.lower() in text.lower():
+            entry["valid"], record["resolved"] = True, asked
+            logger.info("intake value accepted: citizen sent it again unchanged field=%s", key)
+        elif affirmed:
+            suggestion = suggest_email_correction(asked) if key == "email" else None
+            entry["value"] = record["resolved"] = suggestion or asked
+            entry["valid"] = True
+            logger.info("intake value settled on citizen's confirmation field=%s corrected=%s",
+                        key, bool(suggestion))
+
+
+def _remember_queried_values(state: dict, missing: list[str]) -> None:
+    """Record which supplied-but-refused values the citizen is about to be
+    asked about, so the next turn can interpret their answer."""
+    if not missing:
+        return
+    queried = state.setdefault("queried_intake", {})
+    for key, entry in (state.get("intake") or {}).items():
+        if not entry.get("value") or entry.get("valid", True):
+            continue
+        # A record for a DIFFERENT value is stale — the citizen has since sent
+        # something else for this field, and that is what they're now being
+        # asked about. Replacing it (rather than keeping the first one forever)
+        # is what lets a second attempt be confirmed or corrected in its turn.
+        if (queried.get(key) or {}).get("asked") != entry["value"]:
+            queried[key] = {"asked": entry["value"]}
 
 
 class ChannelIdentityIn(BaseModel):
@@ -254,7 +362,8 @@ class ConversationAgent:
         # identity resolves, independent of whether the complaint itself is
         # ready yet (e.g. a still-vague complaint on this same turn).
         if req.ticketId:
-            await update_ticket_identity(self._db, req.ticketId, master_id, identity_status, trace_id=req.traceId)
+            await update_ticket_identity(self._db, req.ticketId, master_id, identity_status, trace_id=req.traceId,
+                                         extra_fields=_ticket_fields_from_intake(intake))
 
         # --- Info gathering ---
         summary = (summary_source or "").strip()
@@ -428,9 +537,22 @@ class ConversationAgent:
         intake = state.setdefault("intake", {})
         for key, entry in extracted.items():
             existing = intake.get(key)
-            already_satisfied = bool(existing) and existing.get("value") is not None and existing.get("valid", True)
-            if not already_satisfied:
-                intake[key] = entry
+            has_existing_value = bool(existing) and existing.get("value") is not None
+            if has_existing_value and existing.get("valid", True):
+                continue                      # satisfied on an earlier turn — never re-ask
+            if entry.get("value") is None and has_existing_value:
+                # Nothing new for this field this turn. Keeping what the
+                # citizen already sent matters even though it was refused
+                # (Feature 20): overwriting it with an empty extraction loses
+                # the very value the correction question is about, so the next
+                # ask degrades to a bare "we still need: Email" and their
+                # answer has nothing left to attach to.
+                continue
+            intake[key] = entry
+        # Applied here too (not only in `_tool_confirm_identity`) so the
+        # per-turn instructions and the tool result agree about what is still
+        # outstanding on the turn a citizen stands by a queried value.
+        _resolve_queried_values(state, req.rawText)
         return missing_fields(intake, field_configs, declared_anonymous, catalog=catalog)
 
     async def _process_via_assistant(self, req: TestEventRequest) -> dict:
@@ -562,12 +684,51 @@ class ConversationAgent:
         _merge_provided_fields(state, args.get("providedFields") or {}, catalog)
         identity_type = args.get("identityType") or req.channelIdentity.type
         identity_value = args.get("identityValue") or req.channelIdentity.value
+        # An email the model reports as the IDENTITY value is the same citizen
+        # statement as one it reports via providedFields — the tool schema just
+        # offers two ways to say it — so it is merged into the tracked intake
+        # the same way (Feature 20). Without this, an address supplied as
+        # identityValue was validated but never recorded, so a refused one
+        # produced only a bare "we still need: Email" and the citizen was never
+        # told what was wrong with the address they had just sent.
+        if identity_type == "email" and identity_value and "email" in catalog:
+            _merge_provided_fields(state, {catalog["email"]["label"]: identity_value}, catalog)
+        _resolve_queried_values(state, req.rawText)
         # Only trust "verified" when the model is confirming the channel's own native
         # identity (unchanged value); a value the citizen typed in chat is not.
         verified = req.channelIdentity.verified and identity_value == req.channelIdentity.value
 
         confirmed_email = identity_value if (identity_type == "email" and not declared_anonymous) else None
         confirmed_phone = identity_value if (identity_type == "phone" and not declared_anonymous) else None
+        # Feature 20: an address the intake validator refused (bad syntax, or a
+        # one-keystroke miss like "gmaill.com") must not be written onto the
+        # citizen's identity profile — the gate below is already going to ask
+        # them to confirm or correct it, and a profile silently carrying the
+        # typo would send every future notification into a black hole. The
+        # value is not discarded, just not yet trusted: it stays in the intake
+        # state so `missing_fields` can quote it back in the correction ask.
+        intake_email = (state.get("intake", {}) or {}).get("email") or {}
+        email_accepted = validate_email(confirmed_email) or (
+            # ...or the citizen has already settled this exact address (stood
+            # by it after being asked), which overrules the validator.
+            intake_email.get("value") == confirmed_email and bool(intake_email.get("valid"))
+        )
+        if confirmed_email and not email_accepted:
+            logger.info(
+                "confirm_identity: not accepting an unvalidated email onto the identity profile "
+                "traceId=%s ticketId=%s suggestion=%s",
+                req.traceId, req.ticketId, suggest_email_correction(confirmed_email),
+            )
+            confirmed_email = None
+        if confirmed_email is None and not declared_anonymous:
+            # The model can also hand the email over as a providedFields entry
+            # rather than as identityType/identityValue (it does exactly that
+            # when confirming a verified WhatsApp number as the identity while
+            # relaying the citizen's email as one more requested field) — take
+            # it from the merged intake state, which has already validated it.
+            if (intake_email.get("value") and intake_email.get("valid")
+                    and intake_email.get("source") in ("native", "extracted")):
+                confirmed_email = intake_email["value"]
         # Sourced from the SAME merged intake state the gate checks below —
         # not a separate "name" tool argument (the schema never declared
         # one, so it was always None) — guaranteeing the identity profile
@@ -609,6 +770,7 @@ class ConversationAgent:
         missing = missing_fields(
             state.get("intake", {}), field_configs, bool(state.get("declared_anonymous", False)), catalog=catalog,
         )
+        _remember_queried_values(state, missing)
         resolved_status = result.get("identityStatus", state["identity_status"])
         # Feature 15/16: a verified channel (e.g. WhatsApp) resolves identity
         # trivially, but that's a different question from "is this ticket
@@ -622,7 +784,8 @@ class ConversationAgent:
         state["master_id"] = result.get("masterId", state.get("master_id"))
         if req.ticketId:
             await update_ticket_identity(
-                self._db, req.ticketId, state["master_id"], state["identity_status"], trace_id=req.traceId)
+                self._db, req.ticketId, state["master_id"], state["identity_status"], trace_id=req.traceId,
+                extra_fields=_ticket_fields_from_intake(state.get("intake", {})))
         return {**result, "identityStatus": state["identity_status"], "missingFields": missing}
 
     async def _tool_submit_complaint(self, req: TestEventRequest, thread_key: str, state: dict, args: dict) -> dict:
