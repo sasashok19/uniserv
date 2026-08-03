@@ -1713,9 +1713,14 @@ def test_confirmed_duplicate_merges_appends_and_records_an_audit_event():
     assert update_ticket.await_args.args[0] == "t-new"
     assert update_ticket.await_args.args[1] == {
         "isDuplicate": 1, "parentTicketId": "t-42", "status": "closed"}
-    # ...and the original carries an audit line saying so.
-    assert add_event.await_args.args[0] == "t-42"
-    assert add_event.await_args.args[1]["eventType"] == "ticket.duplicate_merged"
+    # ...and BOTH trails record it: the original says what it absorbed, and
+    # this ticket says where it went (otherwise its trail shows an
+    # unexplained close).
+    written = {c.args[0]: c.args[1] for c in add_event.await_args_list}
+    assert written["t-42"]["eventType"] == "ticket.duplicate_merged"
+    assert written["t-42"]["meta"]["mergedFromId"] == "t-new"
+    assert written["t-new"]["eventType"] == "ticket.duplicate_confirmed"
+    assert written["t-new"]["meta"]["duplicateOfNumber"] == "TKT-00042"
 
 
 def test_rejected_duplicate_leaves_both_tickets_alone():

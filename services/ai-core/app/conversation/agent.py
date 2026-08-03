@@ -837,6 +837,15 @@ class ConversationAgent:
         if not args.get("isDuplicate"):
             logger.info("citizen says this is NOT a duplicate traceId=%s ticketId=%s of=%s",
                         req.traceId, req.ticketId, parent_number)
+            # Clears the flag an agent would otherwise still see on this ticket.
+            try:
+                await self._db.add_event(req.ticketId, {
+                    "eventType": "ticket.duplicate_dismissed",
+                    "actorType": "ai",
+                    "meta": {"duplicateOfId": parent_id, "duplicateOfNumber": parent_number},
+                }, trace_id=req.traceId)
+            except Exception:  # noqa: BLE001 - best-effort audit
+                logger.warning("failed to record duplicate-dismissed event traceId=%s", req.traceId)
             return {"isDuplicate": False, "message": "Understood — treated as a separate complaint."}
         if parent_id == req.ticketId:
             return {"error": "same_ticket", "message": "That is this ticket."}
@@ -860,6 +869,14 @@ class ConversationAgent:
             await self._db.add_event(parent_id, {
                 "eventType": "ticket.duplicate_merged",
                 "actorType": "ai",
+                "meta": {"mergedFromId": req.ticketId, "mergedFromNumber": req.ticketNumber},
+            }, trace_id=req.traceId)
+            # ...and on the ticket that WAS the duplicate, so its own trail says
+            # where it went rather than just showing an unexplained close.
+            await self._db.add_event(req.ticketId, {
+                "eventType": "ticket.duplicate_confirmed",
+                "actorType": "ai",
+                "meta": {"duplicateOfId": parent_id, "duplicateOfNumber": parent_number},
             }, trace_id=req.traceId)
         except Exception:  # noqa: BLE001 - the merge itself is done; the audit line is best-effort
             logger.warning("failed to record duplicate-merge audit event traceId=%s parentId=%s",

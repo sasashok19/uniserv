@@ -46,8 +46,30 @@ type AuditEvent = {
   actorType: string | null;
   actorName: string | null;
   assignedToName?: string;
+  duplicateOfId?: string;
+  duplicateOfNumber?: string;
+  mergedFromNumber?: string;
+  reason?: string;
   createdAt: string;
 };
+
+/**
+ * Feature 22: routing can flag "this might be a duplicate of TKT-xxxxx" and
+ * the AI asks the citizen — but citizens frequently never answer, and the
+ * flag would then sit on the ticket with nobody able to clear it. The audit
+ * trail is the source of truth: a `possible_duplicate` counts as outstanding
+ * only while no later event has settled it.
+ */
+function outstandingDuplicate(events: AuditEvent[]): AuditEvent | null {
+  let pending: AuditEvent | null = null;
+  for (const e of events) {
+    if (e.eventType === "ticket.possible_duplicate") pending = e;
+    else if (e.eventType === "ticket.duplicate_confirmed" || e.eventType === "ticket.duplicate_dismissed") {
+      pending = null;
+    }
+  }
+  return pending;
+}
 
 /** Human-readable audit line: "Status → resolved — by Admin User". */
 function describeEvent(e: AuditEvent): string {
@@ -58,6 +80,16 @@ function describeEvent(e: AuditEvent): string {
   if (e.eventType === "ticket.unassigned") return `Unassigned${by}`;
   if (e.eventType === "ticket.archived") return `Archived${by}`;
   if (e.eventType === "ticket.auto_closed") return `Auto-closed (no citizen response)${by}`;
+  if (e.eventType === "ticket.possible_duplicate") {
+    return `Flagged as a possible duplicate of ${e.duplicateOfNumber ?? "another ticket"}${by}`;
+  }
+  if (e.eventType === "ticket.duplicate_confirmed") {
+    return `Confirmed duplicate of ${e.duplicateOfNumber ?? "another ticket"}${by}`;
+  }
+  if (e.eventType === "ticket.duplicate_dismissed") return `Not a duplicate${by}`;
+  if (e.eventType === "ticket.duplicate_merged") {
+    return `${e.mergedFromNumber ?? "Another ticket"} merged into this one as a duplicate${by}`;
+  }
   return `${e.eventType}${by}`;
 }
 
@@ -115,6 +147,7 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [transitioning, setTransitioning] = useState<string | null>(null);
   const [savingNote, setSavingNote] = useState(false);
+  const [resolvingDuplicate, setResolvingDuplicate] = useState(false);
   // Follow-up send lifecycle: the agent must SEE whether the message reached
   // the citizen or failed (e.g. connection issue) — busy spinner, then an
   // explicit sent/failed confirmation.
@@ -165,6 +198,27 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
   // to a role the server has already said may do it.
   const cancellable = ticket.canCancel && CANCELLABLE_FROM.has(ticket.status);
   const statusActions = cancellable ? [...nextStatuses, "cancelled"] : nextStatuses;
+  const pendingDuplicate = outstandingDuplicate(events);
+
+  async function resolveDuplicate(isDuplicate: boolean) {
+    if (!pendingDuplicate) return;
+    setResolvingDuplicate(true);
+    const resp = await fetch(`/api/tickets/${params.id}/duplicate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ isDuplicate, duplicateOfId: pendingDuplicate.duplicateOfId }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    setResolvingDuplicate(false);
+    setStatusMsg(
+      resp.ok
+        ? isDuplicate
+          ? `Merged into ${pendingDuplicate.duplicateOfNumber ?? "the original ticket"}.`
+          : "Marked as a separate complaint."
+        : data?.error?.message ?? "Could not update the duplicate status.",
+    );
+    await load();
+  }
 
   /** Save the typed note WITHOUT a status change (small affordance, no big button). */
   async function saveNoteOnly() {
@@ -345,6 +399,45 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
               </div>
             </div>
           </div>
+
+          {/* Feature 22: an unanswered duplicate question. Shown until an agent
+              settles it, because the citizen often never will. */}
+          {pendingDuplicate && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 shadow-sm">
+              <h3 className="text-base font-semibold text-amber-900">Possible duplicate</h3>
+              <p className="mt-1 text-sm text-amber-900">
+                This may be the same complaint as{" "}
+                <span className="font-semibold">{pendingDuplicate.duplicateOfNumber ?? "another open ticket"}</span>
+                {pendingDuplicate.reason ? ` — ${pendingDuplicate.reason}` : ""}. The citizen was asked and
+                hasn&apos;t settled it.
+              </p>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => resolveDuplicate(true)}
+                  disabled={resolvingDuplicate}
+                  className="inline-flex items-center gap-1.5 rounded bg-amber-700 px-3 py-2 text-sm font-medium text-white hover:bg-amber-800 active:scale-[0.97] disabled:opacity-50"
+                >
+                  {resolvingDuplicate && <Loader2 className="h-4 w-4 animate-spin" />}
+                  Yes — merge into {pendingDuplicate.duplicateOfNumber ?? "it"}
+                </button>
+                <button
+                  onClick={() => resolveDuplicate(false)}
+                  disabled={resolvingDuplicate}
+                  className="rounded border border-amber-400 bg-white px-3 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100 active:scale-[0.97] disabled:opacity-50"
+                >
+                  No — separate complaint
+                </button>
+                {pendingDuplicate.duplicateOfId && (
+                  <a
+                    href={`/dashboard/tickets/${pendingDuplicate.duplicateOfId}`}
+                    className="text-sm text-amber-900 underline hover:no-underline"
+                  >
+                    Open {pendingDuplicate.duplicateOfNumber ?? "the other ticket"}
+                  </a>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Status transition with the internal note inline: type a note (grey
               placeholder), click a transition — the note rides along. */}

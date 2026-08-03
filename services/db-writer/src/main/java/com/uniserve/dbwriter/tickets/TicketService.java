@@ -602,6 +602,16 @@ public class TicketService {
         event.eventType = eventType;
         event.actorType = actorType;
         event.actorId = str(body, "actorId");
+        // Small structured payload (e.g. which ticket a duplicate points at) —
+        // stored as-is in the existing meta_json column, no schema change.
+        Object meta = body.get("meta");
+        if (meta instanceof Map<?, ?> metaMap && !metaMap.isEmpty()) {
+            try {
+                event.metaJson = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(metaMap);
+            } catch (Exception e) {
+                throw new ApiException(422, "INVALID_META", "meta must be a JSON object");
+            }
+        }
         event.persistAndFlush();
         return event.toMap();
     }

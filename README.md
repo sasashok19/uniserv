@@ -1728,3 +1728,36 @@ readability).
   Phase 2 onward; Phase 1 stores them in plaintext SQLite columns.
 - Never commit `.env`/`.env.local` files (gitignored); only `.env.example`/
   `.env.local.example` templates are tracked.
+
+**Suspected duplicates are settleable by an agent (Feature 22b).** The
+`unclear` verdict asks the citizen — but citizens frequently never answer, and
+the flag lived only in Valkey conversation state, which expires in two hours.
+An agent was left looking at two tickets with nothing to say they might be the
+same complaint. The suspicion is now recorded on the ticket as a
+`ticket.possible_duplicate` audit event (with the ticket it points at in
+`meta_json` — no schema change), the ticket page shows a banner for as long as
+no later event has settled it, and **Yes, merge / No, separate** call
+`POST /api/v1/tickets/{id}/duplicate`. That endpoint applies the *same*
+treatment `resolve_duplicate` does in the conversation
+(`isDuplicate`/`parentTicketId`/closed), so "duplicate" means one thing in the
+system rather than two. Both trails are written: the original records what it
+absorbed, the duplicate records where it went — otherwise its history showed an
+unexplained close.
+
+**The auto-close sweep had never once run (Feature 22b).** Production logged
+`auto-close-unconfirmed call failed: status=502 ... HTTP connect timed out` on
+a loop, which looked like db-writer being down. It wasn't. The timestamps
+settle it — the failure lands **3.7 s** and **6.0 s** after each `started in
+23.0s`: Quarkus fires an `every="1h"` trigger *immediately at startup*, so the
+first tick ran while the instance was still coming up, and since instances
+restart often that boot-time tick was in practice the only one that ever ran.
+Fixed with `delayed=2m` (the job closes tickets idle for 14 days, so the delay
+costs nothing), plus a 20 s connect timeout and a retry limited to *connect*
+failures — those prove the request never arrived, so replaying a POST cannot
+double-apply it, whereas a read timeout gets no retry.
+
+The same logs exposed a second, latent defect on that path: `DbWriterClient`'s
+failure handler built its error body with `Map.of(..., e.getMessage())`, and
+`Map.of` throws on a null value. Several transport exceptions (`ConnectException`
+among them) carry no message — so the handler for an unreachable db-writer
+threw an NPE instead of returning its 502, taking the caller down with it.

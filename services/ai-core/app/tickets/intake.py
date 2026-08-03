@@ -479,6 +479,25 @@ async def _match_against_open_tickets(
         "ticketNumber": chosen.get("ticket_number"),
         "summary": candidates[index]["text"][:300],
     }
+    # Record the suspicion on the ticket itself, not just in the conversation
+    # turn. The citizen may never answer the question — they often don't — and
+    # without this the flag would live only in Valkey state that expires in two
+    # hours, leaving an agent looking at two tickets with no indication they
+    # might be the same complaint. Best-effort: routing must not fail over an
+    # audit write.
+    try:
+        await db.add_event(stub["id"], {
+            "eventType": "ticket.possible_duplicate",
+            "actorType": "ai",
+            "meta": {
+                "duplicateOfId": chosen["id"],
+                "duplicateOfNumber": chosen.get("ticket_number"),
+                "reason": match.get("reason"),
+            },
+        }, trace_id=trace_id)
+    except Exception:  # noqa: BLE001 - see above
+        logger.warning("failed to record possible-duplicate event traceId=%s ticketId=%s",
+                        trace_id, stub["id"])
     return stub
 
 

@@ -300,11 +300,92 @@ public class TicketsResource {
                         String assignee = metaStr.substring(idx + 14, metaStr.indexOf('"', idx + 14));
                         e.put("assignedToName", agentNames.getOrDefault(assignee, assignee));
                     }
+                    // Feature 22 duplicate events carry the ticket they point
+                    // at. Parsed properly rather than by string index — this
+                    // one drives a UI action, so a mangled value would send an
+                    // agent to the wrong ticket.
+                    e.putAll(duplicateMeta(metaStr));
                 }
                 events.add(e);
             }
         }
         return Response.ok(Map.of("events", events)).build();
+    }
+
+    /** Pull the duplicate-reference fields out of a ticket_event's meta_json. */
+    private Map<String, Object> duplicateMeta(String metaJson) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        try {
+            Map<String, Object> parsed = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .readValue(metaJson, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {
+                    });
+            for (String key : List.of("duplicateOfId", "duplicateOfNumber",
+                    "mergedFromId", "mergedFromNumber", "reason")) {
+                if (parsed.get(key) != null) {
+                    out.put(key, parsed.get(key));
+                }
+            }
+        } catch (Exception e) {
+            // A malformed meta_json must not break the audit trail render.
+            LOG.debugf("unparseable ticket_event meta_json: %s", metaJson);
+        }
+        return out;
+    }
+
+    /**
+     * Feature 22: an agent's verdict on a suspected duplicate. Routing flags
+     * the suspicion and the AI asks the citizen — but citizens often never
+     * answer, and the flag would otherwise sit on the ticket forever with no
+     * way to clear it. This is the same decision `resolve_duplicate` makes in
+     * the conversation, taken by an agent instead, and it deliberately reuses
+     * the identical treatment (`isDuplicate`/`parentTicketId`/closed) so there
+     * is one meaning of "duplicate" in the system rather than two.
+     */
+    @POST
+    @Path("/{id}/duplicate")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response resolveDuplicate(@PathParam("id") String id, Map<String, Object> input) {
+        if (!user.can("ticket.edit")) {
+            return forbidden("INSUFFICIENT_ROLE", "Your role cannot resolve duplicates");
+        }
+        Object flag = input == null ? null : input.get("isDuplicate");
+        if (!(flag instanceof Boolean isDuplicate)) {
+            return Response.status(422).entity(Map.of("error", Map.of(
+                    "code", "IS_DUPLICATE_REQUIRED", "message", "isDuplicate (true/false) is required"))).build();
+        }
+        String parentId = str(input, "duplicateOfId");
+        if (Boolean.TRUE.equals(isDuplicate) && (parentId == null || parentId.isBlank())) {
+            return Response.status(422).entity(Map.of("error", Map.of(
+                    "code", "DUPLICATE_OF_REQUIRED", "message", "duplicateOfId is required to confirm"))).build();
+        }
+        if (id.equals(parentId)) {
+            return Response.status(422).entity(Map.of("error", Map.of(
+                    "code", "SAME_TICKET", "message", "A ticket cannot be a duplicate of itself"))).build();
+        }
+
+        Map<String, Object> meta = new LinkedHashMap<>();
+        if (parentId != null) {
+            meta.put("duplicateOfId", parentId);
+        }
+        if (!isDuplicate) {
+            db.call("POST", "/api/v1/db/tickets/" + id + "/events", Map.of(
+                    "eventType", "ticket.duplicate_dismissed", "actorType", "agent",
+                    "actorId", user.agentId(), "meta", meta));
+            return Response.ok(Map.of("isDuplicate", false)).build();
+        }
+
+        DbWriterClient.ApiResult patched = db.call("PATCH", "/api/v1/db/tickets/" + id, Map.of(
+                "isDuplicate", 1, "parentTicketId", parentId, "status", "closed"));
+        if (patched.status() >= 400) {
+            return Response.status(patched.status()).entity(patched.body()).build();
+        }
+        db.call("POST", "/api/v1/db/tickets/" + id + "/events", Map.of(
+                "eventType", "ticket.duplicate_confirmed", "actorType", "agent",
+                "actorId", user.agentId(), "meta", meta));
+        db.call("POST", "/api/v1/db/tickets/" + parentId + "/events", Map.of(
+                "eventType", "ticket.duplicate_merged", "actorType", "agent",
+                "actorId", user.agentId(), "meta", Map.of("mergedFromId", id)));
+        return Response.ok(Map.of("isDuplicate", true, "parentTicketId", parentId)).build();
     }
 
     /** id -> name for every agent/lead/admin in the tenant, for the assign-to dropdown and queue display. */

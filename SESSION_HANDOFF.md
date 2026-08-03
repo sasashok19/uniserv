@@ -175,3 +175,50 @@ and verified by re-fetching: 4 tools registered (confirm_identity,
 submit_complaint, check_complaint_status, **resolve_duplicate**) and
 instructions byte-identical to the repo (7018 chars). `tests/test_tools.py`
 guards the duplicate clauses against a silent revert.
+
+---
+
+# Follow-ups (Feature 22b) — both items I had flagged as outstanding
+
+## 1. Auto-close sweep had NEVER run — and it was not db-writer being down
+User pushed back on the cold-start theory; they were right. Timestamps from
+`api.log` settle it:
+  started 14:56:19.999 -> failed 14:56:23.697  (3.7s)
+  started 15:07:46.231 -> failed 15:07:52.229  (6.0s)
+Quarkus fires an `every="1h"` trigger IMMEDIATELY at startup. This app boots in
+~23s, so the first tick ran before the instance was really up and the outbound
+connect timed out at 5s. Instances restart often, so that boot tick was in
+practice the ONLY tick that ever ran => the sweep had never succeeded.
+
+Fixes: `@Scheduled(delayed="{ticket.auto-close.startup-delay}")` default 2m;
+connect timeout 5s -> 20s; retry ONLY connect-phase failures (they prove the
+request never arrived, so replaying a POST can't double-apply — a read timeout
+deliberately gets no retry).
+
+**Second bug found in the same path:** `DbWriterClient` built its error body
+with `Map.of("message", e.getMessage())`, and `Map.of` throws on a null value.
+`ConnectException` often has no message, so the handler for an unreachable
+db-writer threw an NPE instead of returning 502. That is the NPE that was
+escaping the scheduler in the test logs. Covered by
+`DbWriterClientRetryTest`.
+
+## 2. Suspected duplicates are now settleable by an agent
+The `unclear` flag lived only in Valkey conv state (2h TTL), so if the citizen
+never answered, nobody could clear it. Now recorded as a
+`ticket.possible_duplicate` event with the target in `meta_json` (no schema
+change); the ticket page derives an amber banner from the audit trail
+(`outstandingDuplicate`) and Yes/No post to
+`POST /api/v1/tickets/{id}/duplicate` (`ticket.edit`), which reuses the exact
+same merge treatment as the conversation path. Both trails written.
+
+## Tests after these follow-ups
+ai-core 262, api-gateway 59, db-writer 8. Dashboard `tsc --noEmit` clean.
+
+## OpenAI Assistant
+NOT re-synced for 22b, and correctly so — `app/conversation/tools.py` is
+byte-identical to the version already pushed to
+`asst_FX75qlIQVJohreLhh2ugyFKm` (verified with `git diff HEAD`). Re-run
+`scripts/update_assistant.py` only when that file changes.
+
+## Deployment for 22b
+ai-core, db-writer, api-gateway, dashboard — all four again.

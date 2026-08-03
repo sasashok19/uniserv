@@ -609,3 +609,24 @@ When `APP_ENV=development`, the seed data provides:
 - **Intake Fields: admin-defined custom fields.** "Add field" on the Intake Fields panel creates a tenant-defined field (label, free-text or numeric validation, optional exact digits; key auto-derived from the label). Saved via `PUT /api/v1/tenant/intake-fields/catalog` into `intakeFieldCatalog`; ai-core's `catalog_for_tenant()` merges customs into the runtime catalog with generic extractors/validators, so the new field cascades to the bot with no code change. Custom rows show a ✕ to remove (which also strips the key from all channel configs).
 - **Settings: login-page news feed URL.** `generalSettings.newsFeedUrl` (validated http(s)) is editable in Administration → Settings; the public `GET /api/v1/public/news-config` serves it to the dashboard's `/api/news` route, which prefers it over the `NEWS_RSS_URL` env and the BBC Tamil default. Blank restores the default.
 - **Administration sub-tabs added: Priority Rules and Settings.** `PriorityRulesPanel.tsx` edits the tenant's free-text AI priority rubric (`GET|PUT /api/v1/tenant/priority-rubric`, pre-filled with the backend's default writeup of the current scoring engine); `GeneralSettingsPanel.tsx` edits tenant general settings — currently `maxFollowupQuestions` 0–5 (`GET|PUT /api/v1/tenant/general-settings`). Both proxy through Next.js routes under `src/app/api/tenant/` and are admin-only (enforced at the gateway via `admin.tenant.config`). See the README's *Configurable priority rubric & general settings* section.
+
+## Possible-duplicate banner (Feature 22)
+
+When routing cannot tell whether a new message continues an existing complaint
+(`match_open_ticket` -> `unclear`), it creates the ticket and records a
+`ticket.possible_duplicate` event on it, carrying the other ticket's id/number
+in `meta_json`. The AI asks the citizen in the conversation, but citizens
+often never answer — so the ticket page shows an amber banner until an agent
+settles it.
+
+`outstandingDuplicate(events)` derives the state from the audit trail: a
+`possible_duplicate` counts as outstanding only while no later
+`duplicate_confirmed` / `duplicate_dismissed` follows it. There is no extra
+ticket column and no polling — the page already fetches its own audit trail.
+
+**Yes, merge** / **No, separate** post to
+`POST /api/v1/tickets/{id}/duplicate` (`ticket.edit`, i.e. admin/lead), which
+applies the identical `isDuplicate`/`parentTicketId`/closed treatment the
+conversation path uses and writes both audit trails. The citizen answering in
+the conversation and an agent clicking here are the same decision, taken by
+whichever gets there first.

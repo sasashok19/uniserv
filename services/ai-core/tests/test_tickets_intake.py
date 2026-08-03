@@ -842,3 +842,53 @@ def test_ensure_ticket_stub_falls_back_when_in_reply_to_does_not_match_any_ticke
     assert db.list_tickets.await_count == 2
     db.list_tickets.assert_any_await("t1", originMessageId="wamid.UNKNOWN", trace_id="tr-19c")
     db.list_tickets.assert_any_await("t1", ticketNumber="TKT-00001", trace_id="tr-19c")
+
+
+def test_unclear_verdict_records_the_suspicion_on_the_ticket_itself():
+    """Feature 22: the citizen often never answers the duplicate question, so
+    the flag cannot live only in conversation state (which expires in two
+    hours) — an agent has to be able to see and settle it later."""
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(side_effect=[
+        [{"id": "t-mdk", "ticket_number": "TKT-00042", "category": "water"}],
+        [],
+    ])
+    db.find_by_phone = AsyncMock(return_value={"master_id": "m-9"})
+    db.get_messages = AsyncMock(
+        return_value=[{"direction": "inbound", "content": "Water logging in Madambakkam"}])
+    db.create_ticket = AsyncMock(return_value={"id": "t-new", "ticketNumber": "TKT-00043"})
+    db.add_event = AsyncMock(return_value={})
+
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock(return_value=_UNCLEAR)):
+        _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+919876543212", "whatsapp", raw_text="Water logging",
+            channel_identity_type="phone", channel_identity_value="+919876543212", trace_id="tr-22d"))
+
+    assert db.add_event.await_args.args[0] == "t-new"
+    payload = db.add_event.await_args.args[1]
+    assert payload["eventType"] == "ticket.possible_duplicate"
+    assert payload["meta"]["duplicateOfId"] == "t-mdk"
+    assert payload["meta"]["duplicateOfNumber"] == "TKT-00042"
+
+
+def test_routing_survives_a_failed_suspicion_write():
+    """Best-effort: the ticket is already created by then, and routing must
+    not fail over an audit write."""
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(side_effect=[
+        [{"id": "t-mdk", "ticket_number": "TKT-00042", "category": "water"}],
+        [],
+    ])
+    db.find_by_phone = AsyncMock(return_value={"master_id": "m-9"})
+    db.get_messages = AsyncMock(
+        return_value=[{"direction": "inbound", "content": "Water logging in Madambakkam"}])
+    db.create_ticket = AsyncMock(return_value={"id": "t-new", "ticketNumber": "TKT-00043"})
+    db.add_event = AsyncMock(side_effect=RuntimeError("db down"))
+
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock(return_value=_UNCLEAR)):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+919876543212", "whatsapp", raw_text="Water logging",
+            channel_identity_type="phone", channel_identity_value="+919876543212", trace_id="tr-22e"))
+
+    assert stub["id"] == "t-new"
+    assert stub["suspectedDuplicateOf"]["ticketNumber"] == "TKT-00042"
