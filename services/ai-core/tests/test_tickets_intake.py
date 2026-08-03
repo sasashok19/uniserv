@@ -16,6 +16,15 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+# `match_open_ticket` verdicts (Feature 22). It replaced Feature 18's boolean
+# `is_same_topic`: one call judges the new message against ALL of the citizen's
+# open tickets and names which one it concerns, so the result carries an index
+# as well as a verdict, and can say "unclear" rather than being forced to guess.
+_SAME = {"index": 0, "verdict": "same", "reason": "same problem, same place"}
+_DIFFERENT = {"index": None, "verdict": "different", "reason": "different problem"}
+_UNCLEAR = {"index": 0, "verdict": "unclear", "reason": "new message omits the location"}
+
+
 def test_ensure_ticket_stub_reuses_existing_ticket_for_thread():
     db = AsyncMock()
     db.list_tickets = AsyncMock(return_value=[{"id": "t-1", "ticket_number": "TKT-00001"}])
@@ -171,8 +180,9 @@ def test_ensure_ticket_stub_creates_new_when_sole_open_ticket_is_a_different_top
     "Put not closed" (new message) — same identity, one open ticket, but a
     different complaint."""
     db = AsyncMock()
-    db.list_tickets = AsyncMock(return_value=[
-        {"id": "t-power", "ticket_number": "TKT-00090", "category": "outage"},
+    db.list_tickets = AsyncMock(side_effect=[
+        [{"id": "t-power", "ticket_number": "TKT-00090", "category": "outage"}],
+        [],  # thread-key lookup after the judgment says "different"
     ])
     db.find_by_phone = AsyncMock(return_value={"master_id": "m-ashok"})
     db.get_messages = AsyncMock(return_value=[
@@ -180,14 +190,16 @@ def test_ensure_ticket_stub_creates_new_when_sole_open_ticket_is_a_different_top
     ])
     db.create_ticket = AsyncMock(return_value={"id": "t-new", "ticketNumber": "TKT-00091"})
 
-    with patch("app.tickets.intake.is_same_topic", new=AsyncMock(return_value=False)) as same_topic:
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock(return_value=_DIFFERENT)) as match:
         stub = _run(ensure_ticket_stub(
             db, "t1", "whatsapp:+918939012727", "whatsapp",
             raw_text="Put not closed", channel_identity_type="phone",
             channel_identity_value="+918939012727", trace_id="tr-18a"))
 
     assert stub == {"id": "t-new", "ticketNumber": "TKT-00091"}
-    same_topic.assert_awaited_once_with("No power", "outage", "Put not closed")
+    candidates, new_text = match.await_args.args
+    assert new_text == "Put not closed"
+    assert candidates == [{"ticketNumber": "TKT-00090", "text": "No power", "category": "outage"}]
 
 
 def test_ensure_ticket_stub_appends_when_sole_open_ticket_is_the_same_topic():
@@ -201,7 +213,7 @@ def test_ensure_ticket_stub_appends_when_sole_open_ticket_is_the_same_topic():
     ])
     db.create_ticket = AsyncMock()
 
-    with patch("app.tickets.intake.is_same_topic", new=AsyncMock(return_value=True)):
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock(return_value=_SAME)):
         stub = _run(ensure_ticket_stub(
             db, "t1", "whatsapp:+918939012727", "whatsapp",
             raw_text="Still no power, any update?", channel_identity_type="phone",
@@ -223,7 +235,7 @@ def test_ensure_ticket_stub_appends_when_same_topic_check_unavailable():
     db.get_messages = AsyncMock(return_value=[{"direction": "inbound", "content": "No power"}])
     db.create_ticket = AsyncMock()
 
-    with patch("app.tickets.intake.is_same_topic", new=AsyncMock(return_value=None)):
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock(return_value=None)):
         stub = _run(ensure_ticket_stub(
             db, "t1", "whatsapp:+918939012727", "whatsapp",
             raw_text="Put not closed", channel_identity_type="phone",
@@ -245,34 +257,94 @@ def test_ensure_ticket_stub_skips_same_topic_check_when_no_message_history():
     db.get_messages = AsyncMock(return_value=[])
     db.create_ticket = AsyncMock()
 
-    with patch("app.tickets.intake.is_same_topic", new=AsyncMock()) as same_topic:
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock()) as match:
         stub = _run(ensure_ticket_stub(
             db, "t1", "whatsapp:+918939012727", "whatsapp",
             raw_text="Put not closed", channel_identity_type="phone",
             channel_identity_value="+918939012727", trace_id="tr-18d"))
 
     assert stub == {"id": "t-power", "ticketNumber": "TKT-00090"}
-    same_topic.assert_not_called()
+    match.assert_not_called()
 
 
-def test_ensure_ticket_stub_whatsapp_creates_new_when_multiple_open_tickets():
-    """Genuinely ambiguous (2+ open tickets, no explicit reference) — the
-    safe default is a NEW ticket, never a silent guess-merge. Resolved
-    entirely via identity — the threadId fallback is never consulted, since
-    that would just pick one of the very tickets just judged ambiguous."""
+def test_ensure_ticket_stub_multiple_open_tickets_are_all_judged_not_given_up_on():
+    """Feature 22 replaces Feature 17's "2+ open tickets, don't guess -> always
+    a new ticket". That rule is what let the reported email case through: a
+    stale unconfirmed stub was open alongside the real one, so the second
+    email never reached any topic check at all. Every open ticket is now put
+    to the SAME single judgment, and a "different" verdict still means a new
+    ticket — the safe outcome is preserved, it is just now a decision rather
+    than a refusal to decide."""
     db = AsyncMock()
-    db.list_tickets = AsyncMock(
-        return_value=[{"id": "t-open-1", "ticket_number": "TKT-00061"}, {"id": "t-open-2", "ticket_number": "TKT-00062"}])
+    db.list_tickets = AsyncMock(side_effect=[
+        [{"id": "t-open-1", "ticket_number": "TKT-00061"}, {"id": "t-open-2", "ticket_number": "TKT-00062"}],
+        [],  # thread-key lookup after the judgment says "different"
+    ])
     db.find_by_phone = AsyncMock(return_value={"master_id": "m-3"})
+    db.get_messages = AsyncMock(return_value=[{"direction": "inbound", "content": "No power"}])
     db.create_ticket = AsyncMock(return_value={"id": "t-new-2", "ticketNumber": "TKT-00070"})
 
-    stub = _run(ensure_ticket_stub(
-        db, "t1", "whatsapp:+919876543212", "whatsapp",
-        raw_text="A completely different issue", channel_identity_type="phone",
-        channel_identity_value="+919876543212", trace_id="tr-8"))
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock(return_value=_DIFFERENT)) as match:
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+919876543212", "whatsapp",
+            raw_text="A completely different issue", channel_identity_type="phone",
+            channel_identity_value="+919876543212", trace_id="tr-8"))
 
     assert stub == {"id": "t-new-2", "ticketNumber": "TKT-00070"}
-    db.list_tickets.assert_awaited_once()
+    # BOTH open tickets were offered to the model, in one call — not one call each.
+    candidates = match.await_args.args[0]
+    assert [c["ticketNumber"] for c in candidates] == ["TKT-00061", "TKT-00062"]
+    match.assert_awaited_once()
+
+
+def test_ensure_ticket_stub_routes_to_the_matched_ticket_among_several_open():
+    """The reported email case, generalised: the citizen has two open tickets
+    and the new message continues the SECOND one."""
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(return_value=[
+        {"id": "t-power", "ticket_number": "TKT-00061", "category": "outage"},
+        {"id": "t-water", "ticket_number": "TKT-00062", "category": "water"},
+    ])
+    db.find_by_phone = AsyncMock(return_value={"master_id": "m-3"})
+    db.get_messages = AsyncMock(return_value=[{"direction": "inbound", "content": "some complaint"}])
+    db.create_ticket = AsyncMock()
+
+    picked = {"index": 1, "verdict": "same", "reason": "same water logging"}
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock(return_value=picked)):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+919876543212", "whatsapp",
+            raw_text="Still water logging, no action taken", channel_identity_type="phone",
+            channel_identity_value="+919876543212", trace_id="tr-8b"))
+
+    assert stub == {"id": "t-water", "ticketNumber": "TKT-00062"}
+    db.create_ticket.assert_not_called()
+
+
+def test_ensure_ticket_stub_unclear_creates_a_ticket_and_flags_the_suspicion():
+    """The scenario that decided this design: "water logging" arriving while
+    "water logging in Madambakkam" is open. Merging would be a guess, so a
+    ticket IS created — but flagged, so the conversation asks the citizen
+    instead of a heuristic deciding for them. Nothing is merged until they
+    answer, so the cost of being wrong here is one extra question."""
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(return_value=[
+        {"id": "t-mdk", "ticket_number": "TKT-00042", "category": "water"},
+    ])
+    db.find_by_phone = AsyncMock(return_value={"master_id": "m-9"})
+    db.get_messages = AsyncMock(
+        return_value=[{"direction": "inbound", "content": "Water logging in Madambakkam"}])
+    db.create_ticket = AsyncMock(return_value={"id": "t-new", "ticketNumber": "TKT-00043"})
+
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock(return_value=_UNCLEAR)):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+919876543212", "whatsapp",
+            raw_text="Water logging", channel_identity_type="phone",
+            channel_identity_value="+919876543212", trace_id="tr-8c"))
+
+    assert stub["id"] == "t-new"
+    assert stub["suspectedDuplicateOf"]["ticketNumber"] == "TKT-00042"
+    assert stub["suspectedDuplicateOf"]["summary"] == "Water logging in Madambakkam"
+    db.create_ticket.assert_awaited_once()
 
 
 def test_ensure_ticket_stub_whatsapp_brand_new_number_creates_new_without_identity_lookup_crash():
@@ -292,13 +364,14 @@ def test_ensure_ticket_stub_whatsapp_brand_new_number_creates_new_without_identi
     db.list_tickets.assert_awaited_once()  # only the threadId lookup — no identityId lookup possible
 
 
-def test_ensure_ticket_stub_email_channel_never_uses_identity_fallback():
-    """Regression guard: email already has its own (better) subject-based
-    mechanism — the identity+open-count fallback is WhatsApp-specific and
-    must not kick in for email even when a channel identity value is passed."""
+def test_email_with_no_open_tickets_still_creates_a_new_one():
+    """Email now DOES consult the identity branch (Feature 22 — see the two
+    tests below for why), so this guards the ordinary case: nothing open for
+    this sender means nothing to match against, and a new ticket is created
+    exactly as before."""
     db = AsyncMock()
     db.list_tickets = AsyncMock(return_value=[])
-    db.find_by_email = AsyncMock()
+    db.find_by_email = AsyncMock(return_value={"master_id": "m-email"})
     db.create_ticket = AsyncMock(return_value={"id": "t-email-new", "ticketNumber": "TKT-00080"})
 
     stub = _run(ensure_ticket_stub(
@@ -307,7 +380,86 @@ def test_ensure_ticket_stub_email_channel_never_uses_identity_fallback():
         channel_identity_value="citizen@example.com", trace_id="tr-10"))
 
     assert stub == {"id": "t-email-new", "ticketNumber": "TKT-00080"}
-    db.find_by_email.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Feature 22: the reported EMAIL case. Two separately-composed emails, minutes
+# apart, both "water logging in my area" -> two tickets (TKT-00020/21) on top
+# of a stale unconfirmed stub (TKT-00019). Root cause: email skipped the
+# identity branch entirely (`if channel != "email"`), so no dedup of any kind
+# ran on it — every unthreaded email was a new complaint by construction.
+# ---------------------------------------------------------------------------
+
+def test_second_email_on_the_same_topic_merges_instead_of_creating_a_ticket():
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(return_value=[
+        {"id": "t-20", "ticket_number": "TKT-00020", "category": "other"},
+    ])
+    db.find_by_email = AsyncMock(return_value={"master_id": "m-sasashok"})
+    db.get_messages = AsyncMock(return_value=[{
+        "direction": "inbound",
+        "content": "Water logging in my area. No proper response event after complaining "
+                   "multiple times. Waste of time and pathetic service.",
+    }])
+    db.create_ticket = AsyncMock()
+
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock(return_value=_SAME)):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "email:<msg-B@mail.gmail.com>", "email",
+            raw_text="Water logging in my area. Please address it.",
+            channel_identity_type="email", channel_identity_value="sasashok19@gmail.com",
+            trace_id="tr-22a"))
+
+    assert stub == {"id": "t-20", "ticketNumber": "TKT-00020"}
+    db.create_ticket.assert_not_called()
+
+
+def test_a_genuinely_new_email_complaint_still_gets_its_own_ticket():
+    """The Feature 15 property this must not break: a brand-new email is a new
+    complaint unless the content says otherwise. It is now the MODEL saying
+    otherwise, rather than a shared thread key — which is what made the old
+    `email:<address>` fallback collapse unrelated complaints together."""
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(side_effect=[
+        [{"id": "t-20", "ticket_number": "TKT-00020", "category": "other"}],
+        [],  # thread-key lookup after the judgment says "different"
+    ])
+    db.find_by_email = AsyncMock(return_value={"master_id": "m-sasashok"})
+    db.get_messages = AsyncMock(return_value=[{"direction": "inbound", "content": "Water logging in my area"}])
+    db.create_ticket = AsyncMock(return_value={"id": "t-new", "ticketNumber": "TKT-00022"})
+
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock(return_value=_DIFFERENT)):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "email:<msg-C@mail.gmail.com>", "email",
+            raw_text="My electricity bill for March is double the usual amount",
+            channel_identity_type="email", channel_identity_value="sasashok19@gmail.com",
+            trace_id="tr-22b"))
+
+    assert stub == {"id": "t-new", "ticketNumber": "TKT-00022"}
+
+
+def test_email_falls_back_to_a_new_ticket_when_the_judgment_is_unavailable():
+    """Best-effort, but the safe direction is channel-specific: an LLM outage
+    must not start merging a citizen's separate emails together, so email
+    keeps its long-standing "new email = new complaint" default. (WhatsApp's
+    default stays "append" — its thread key really is per-conversation.)"""
+    db = AsyncMock()
+    db.list_tickets = AsyncMock(side_effect=[
+        [{"id": "t-20", "ticket_number": "TKT-00020", "category": "other"}],
+        [],
+    ])
+    db.find_by_email = AsyncMock(return_value={"master_id": "m-sasashok"})
+    db.get_messages = AsyncMock(return_value=[{"direction": "inbound", "content": "Water logging in my area"}])
+    db.create_ticket = AsyncMock(return_value={"id": "t-new", "ticketNumber": "TKT-00023"})
+
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock(return_value=None)):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "email:<msg-D@mail.gmail.com>", "email",
+            raw_text="Water logging in my area. Please address it.",
+            channel_identity_type="email", channel_identity_value="sasashok19@gmail.com",
+            trace_id="tr-22c"))
+
+    assert stub == {"id": "t-new", "ticketNumber": "TKT-00023"}
 
 
 def test_ensure_ticket_stub_explicit_reference_in_whatsapp_body_wins_over_open_count():
@@ -340,8 +492,15 @@ def test_ensure_ticket_stub_explicit_reference_in_whatsapp_body_wins_over_open_c
 # ---------------------------------------------------------------------------
 
 def _intake_stub_db(open_tickets, new_ticket=None):
+    """A db stub that answers the identity lookup with `open_tickets` and the
+    thread-key lookup with nothing. Distinguishing the two matters: a single
+    `return_value` is replayed for BOTH, so a test expecting a new ticket would
+    silently resolve to the very ticket the judgment just rejected."""
+    async def list_tickets(tenant_id, trace_id=None, **filters):
+        return list(open_tickets) if "identityId" in filters else []
+
     db = AsyncMock()
-    db.list_tickets = AsyncMock(return_value=open_tickets)
+    db.list_tickets = AsyncMock(side_effect=list_tickets)
     db.find_by_phone = AsyncMock(return_value={"master_id": "m-nithya"})
     db.get_messages = AsyncMock(return_value=[{"direction": "inbound", "content": "No power in my area"}])
     db.create_ticket = AsyncMock(return_value=new_ticket or {"id": "t-new", "ticketNumber": "TKT-99999"})
@@ -359,7 +518,7 @@ def test_whatsapp_intake_answer_stays_on_the_in_intake_stub():
     definition) say "different topic" — the guard must stop it being asked."""
     db = _intake_stub_db([_OPEN_STUB])
 
-    with patch("app.tickets.intake.is_same_topic", new=AsyncMock(return_value=False)) as same_topic:
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock(return_value=_DIFFERENT)) as match:
         stub = _run(ensure_ticket_stub(
             db, "t1", "whatsapp:+918939014142", "whatsapp",
             raw_text="Nithya\nNithya@gmaill.com\n56784567",
@@ -367,14 +526,14 @@ def test_whatsapp_intake_answer_stays_on_the_in_intake_stub():
 
     assert stub == {"id": "t-16", "ticketNumber": "TKT-00016"}
     db.create_ticket.assert_not_called()
-    same_topic.assert_not_called()
+    match.assert_not_called()
 
 
 def test_whatsapp_bare_email_retry_stays_on_the_in_intake_stub():
     """Message 3 of the same transcript: just the corrected email address."""
     db = _intake_stub_db([_OPEN_STUB])
 
-    with patch("app.tickets.intake.is_same_topic", new=AsyncMock(return_value=False)):
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock(return_value=_DIFFERENT)):
         stub = _run(ensure_ticket_stub(
             db, "t1", "whatsapp:+918939014142", "whatsapp",
             raw_text="dharshini.s.raj@gmail.com",
@@ -408,14 +567,14 @@ def test_whatsapp_new_complaint_still_creates_a_new_ticket_when_a_stub_is_open()
     prose is not intake data, so the topic check still runs and still splits."""
     db = _intake_stub_db([_OPEN_STUB], new_ticket={"id": "t-new", "ticketNumber": "TKT-00019"})
 
-    with patch("app.tickets.intake.is_same_topic", new=AsyncMock(return_value=False)) as same_topic:
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock(return_value=_DIFFERENT)) as match:
         stub = _run(ensure_ticket_stub(
             db, "t1", "whatsapp:+918939014142", "whatsapp",
             raw_text="Now my water heater is broken too",
             channel_identity_type="phone", channel_identity_value="+918939014142", trace_id="tr-20d"))
 
     assert stub == {"id": "t-new", "ticketNumber": "TKT-00019"}
-    same_topic.assert_awaited_once()
+    match.assert_awaited_once()
 
 
 def test_whatsapp_intake_answer_does_not_hijack_a_categorised_ticket():
@@ -426,47 +585,58 @@ def test_whatsapp_intake_answer_does_not_hijack_a_categorised_ticket():
         [{"id": "t-done", "ticket_number": "TKT-00030", "category": "billing"}],
         new_ticket={"id": "t-new", "ticketNumber": "TKT-00031"})
 
-    with patch("app.tickets.intake.is_same_topic", new=AsyncMock(return_value=False)) as same_topic:
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock(return_value=_DIFFERENT)) as match:
         stub = _run(ensure_ticket_stub(
             db, "t1", "whatsapp:+918939014142", "whatsapp",
             raw_text="ravi@example.com",
             channel_identity_type="phone", channel_identity_value="+918939014142", trace_id="tr-20e"))
 
     assert stub == {"id": "t-new", "ticketNumber": "TKT-00031"}
-    same_topic.assert_awaited_once()
+    match.assert_awaited_once()
 
 
-def test_whatsapp_intake_answer_with_two_open_stubs_falls_through_to_the_old_logic():
+def test_whatsapp_intake_answer_with_two_open_stubs_defers_to_the_judgment():
     """Two in-intake stubs is genuinely ambiguous — which one is this answer
-    for? — so the guard declines and the existing ">1 open, create new rather
-    than guess" rule applies unchanged."""
+    for? — so the structural guard declines and hands the question to the
+    Feature 22 judgment rather than picking. Here it says "different", so a new
+    ticket is created; the point of the test is that the guard steps aside
+    rather than guessing between the two."""
     db = _intake_stub_db(
         [_OPEN_STUB, {"id": "t-16b", "ticket_number": "TKT-00016B", "category": None}],
         new_ticket={"id": "t-new", "ticketNumber": "TKT-00032"})
 
-    stub = _run(ensure_ticket_stub(
-        db, "t1", "whatsapp:+918939014142", "whatsapp",
-        raw_text="ravi@example.com",
-        channel_identity_type="phone", channel_identity_value="+918939014142", trace_id="tr-20f"))
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock(return_value=_DIFFERENT)) as match:
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+918939014142", "whatsapp",
+            raw_text="ravi@example.com",
+            channel_identity_type="phone", channel_identity_value="+918939014142", trace_id="tr-20f"))
 
     assert stub == {"id": "t-new", "ticketNumber": "TKT-00032"}
+    match.assert_awaited_once()
 
 
-def test_email_channel_is_untouched_by_the_intake_answer_guard():
-    """Regression guard for the constraint that email threading is a separate
-    code path: the whole identity branch (and therefore this guard) is
-    WhatsApp-side only."""
+def test_email_intake_answer_also_stays_on_its_in_intake_stub():
+    """Feature 22 opened the identity branch to email, so the Feature 20 guard
+    now protects email intake replies too — an emailed "Name: Nithya" answering
+    our identity request must not become its own ticket either."""
+    async def list_tickets(tenant_id, trace_id=None, **filters):
+        if "identityId" in filters:
+            return [{"id": "t-email-stub", "ticket_number": "TKT-00040", "category": None}]
+        return []
+
     db = AsyncMock()
-    db.list_tickets = AsyncMock(return_value=[])
-    db.find_by_email = AsyncMock()
-    db.create_ticket = AsyncMock(return_value={"id": "t-email", "ticketNumber": "TKT-00040"})
+    db.list_tickets = AsyncMock(side_effect=list_tickets)
+    db.find_by_email = AsyncMock(return_value={"master_id": "m-email"})
+    db.create_ticket = AsyncMock()
 
-    stub = _run(ensure_ticket_stub(
-        db, "t1", "email:msg-abc", "email", raw_text="Name: Nithya",
-        channel_identity_type="email", channel_identity_value="nithya@example.com", trace_id="tr-20g"))
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock()) as match:
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "email:msg-abc", "email", raw_text="Name: Nithya",
+            channel_identity_type="email", channel_identity_value="nithya@example.com", trace_id="tr-20g"))
 
-    assert stub == {"id": "t-email", "ticketNumber": "TKT-00040"}
-    db.find_by_email.assert_not_called()
+    assert stub == {"id": "t-email-stub", "ticketNumber": "TKT-00040"}
+    db.create_ticket.assert_not_called()
+    match.assert_not_called()  # settled structurally; no LLM call needed
 
 
 def test_three_message_whatsapp_intake_produces_exactly_one_ticket():
@@ -505,7 +675,7 @@ def test_three_message_whatsapp_intake_produces_exactly_one_ticket():
             db, "t1", "whatsapp:+918939014142", "whatsapp", raw_text=text,
             channel_identity_type="phone", channel_identity_value="+918939014142", trace_id="tr-20i")
 
-    with patch("app.tickets.intake.is_same_topic", new=AsyncMock(return_value=False)):
+    with patch("app.tickets.intake.match_open_ticket", new=AsyncMock(return_value=_DIFFERENT)):
         first = _run(route("No power in my area"))
         tickets[0]["identity_id"] = "m-1"                      # the conversation turn links it
         second = _run(route("Nithya\nNithya@gmaill.com\n56784567"))

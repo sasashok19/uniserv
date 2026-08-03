@@ -108,7 +108,35 @@ CHECK_COMPLAINT_STATUS_TOOL = {
     },
 }
 
-ASSISTANT_TOOLS = [CONFIRM_IDENTITY_TOOL, SUBMIT_COMPLAINT_TOOL, CHECK_COMPLAINT_STATUS_TOOL]
+RESOLVE_DUPLICATE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "resolve_duplicate",
+        "description": (
+            "Record the citizen's answer to the 'is this the same complaint you already "
+            "reported?' question. Call this ONLY when this turn's instructions told you a "
+            "possible duplicate exists AND the citizen has now answered. Pass isDuplicate=true "
+            "if they confirmed it is the same issue (their message is then added to the "
+            "existing complaint and this one is closed as a duplicate), or false if they said "
+            "it is a different issue (this one continues as its own complaint). Never guess "
+            "the answer yourself — ask them first."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "isDuplicate": {
+                    "type": "boolean",
+                    "description": "True if the citizen confirmed it is the same complaint.",
+                },
+            },
+            "required": ["isDuplicate"],
+        },
+    },
+}
+
+ASSISTANT_TOOLS = [
+    CONFIRM_IDENTITY_TOOL, SUBMIT_COMPLAINT_TOOL, CHECK_COMPLAINT_STATUS_TOOL, RESOLVE_DUPLICATE_TOOL,
+]
 
 ASSISTANT_NAME = "UniServe Complaint Intake Agent"
 
@@ -178,6 +206,20 @@ ORIGINAL complaint from earlier in this thread as the complaint_summary.
 yet, do not invent one from them — never submit a name, an email address or an \
 ID as the complaint_summary. Thank them and ask what problem they are \
 reporting.
+
+Possible duplicate of an existing complaint:
+- This turn's instructions may tell you the citizen has an open complaint that \
+THIS message might be continuing, and show you that complaint's text. That \
+means the system could not tell them apart — usually because this message \
+doesn't say WHERE the problem is while the existing one does.
+- Ask the citizen one short, specific question naming the existing complaint's \
+detail — e.g. "Is this about the same water logging in Madambakkam you \
+reported (TKT-00042), or a different location?" Do not call submit_complaint \
+and do not decide it yourself.
+- When they answer, call resolve_duplicate with isDuplicate=true (same issue) \
+or false (different issue). If true, tell them their message was added to the \
+existing complaint and do NOT call submit_complaint. If false, carry on \
+normally and submit this as its own complaint.
 
 Info gathering (after identity is resolved):
 - You need a complaint_summary (1-3 sentences on what happened) and a \

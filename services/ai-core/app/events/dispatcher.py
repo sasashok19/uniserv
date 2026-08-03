@@ -114,6 +114,10 @@ async def _handle_channel_message(tenant_id: str, event: dict) -> None:
         origin_message_id=req.messageId, in_reply_to=req.inReplyTo, trace_id=trace_id)
     req.ticketId = stub["id"]
     req.ticketNumber = stub.get("ticketNumber")
+    # Feature 22: routing judged this MIGHT continue an existing complaint but
+    # couldn't tell (typically the message omits the location the other one
+    # names). The conversation asks the citizen instead of guessing.
+    req.suspectedDuplicateOf = stub.get("suspectedDuplicateOf")
     try:
         result = await ConversationAgent(tenant_id).process(req)
     except Exception:

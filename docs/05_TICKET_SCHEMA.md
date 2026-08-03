@@ -304,3 +304,41 @@ INSERT INTO agents(id, tenant_id, name, email, password_hash, role) VALUES
   `UNIQUE(tenant_id, ticket_number)` constraint are preserved. Flow:
   `in_progress ⇄ pending_customer` and `pending_customer → resolved`; RBAC
   action `ticket.status.to_pending_customer` (all roles).
+
+## Status: `cancelled` (Feature 21)
+
+`tickets.status` gained `cancelled` in **V11** (SQLite cannot alter a CHECK
+constraint, so the table is rebuilt in place — same 12-step shape as V9).
+
+`cancelled` means *this was never real work*: a confirmed duplicate, a test
+row, a withdrawn complaint. It is deliberately distinct from `closed`, which
+means the work was done, because reporting must be able to tell them apart:
+
+- `closed_at` **is** stamped (queue and SLA queries already key off it).
+- `resolved_at` is deliberately left **NULL** — a cancelled ticket was never
+  resolved, and letting it count as one would inflate resolution rate and skew
+  MTTR (`AnalyticsResource` keys agent productivity off `resolved_at`).
+- The SLA query excludes `status = 'cancelled'` outright. Without that, a
+  cancelled ticket with a past `sla_due_at` and no `resolved_at` matches the
+  breach clause and counts as breached **forever**.
+
+Rules that are not the database's job:
+- Admin only (`ticket.status.to_cancelled` — the one status action a lead
+  cannot perform).
+- Allowed from any non-terminal status; refused from `closed`/`cancelled`
+  (`ALREADY_TERMINAL`).
+- Always requires a note of at least 20 characters — cancelling records no
+  resolution, so the note is the only account of why, and it is exactly what
+  an audit will ask about.
+
+## Writing to the audit trail from another service (Feature 22)
+
+`POST /api/v1/db/tickets/{id}/events` appends a `ticket_events` row.
+`ticket_events` was previously writable only from inside `TicketService`, so
+no other service could say anything about a ticket except by changing its
+status. ai-core uses this to record `ticket.duplicate_merged` on the ORIGINAL
+ticket when a citizen confirms another ticket was a duplicate of it.
+
+`actorType` is validated here against the table's own CHECK
+(`system`/`ai`/`agent`) so a bad value fails as a 422 rather than an opaque
+500 from the constraint. No schema change was needed.

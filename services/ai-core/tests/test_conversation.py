@@ -1682,3 +1682,101 @@ def test_a_second_bad_address_gets_its_own_question():
     _remember_queried_values(state, ["a confirmed Email ..."])
 
     assert state["queried_intake"]["email"] == {"asked": "nithya@yahooo.com"}
+
+
+# ---------------------------------------------------------------------------
+# Feature 22: suspected-duplicate resolution. Routing can flag "this MIGHT
+# continue TKT-000xx" when the message omits the detail that would settle it
+# (e.g. "water logging" while "water logging in Madambakkam" is open). Nothing
+# merges on that suspicion alone — the citizen is asked, and their answer is
+# what acts.
+# ---------------------------------------------------------------------------
+
+_SUSPECTED = {"id": "t-42", "ticketNumber": "TKT-00042", "summary": "Water logging in Madambakkam"}
+
+
+def test_confirmed_duplicate_merges_appends_and_records_an_audit_event():
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="t-new", channel="email", rawText="Yes, same one in Madambakkam",
+               suspectedDuplicateOf=_SUSPECTED)
+
+    with patch.object(agent._db, "add_message", new=AsyncMock(return_value={})) as add_message, \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})) as update_ticket, \
+         patch.object(agent._db, "add_event", new=AsyncMock(return_value={})) as add_event:
+        result = _run(agent._tool_resolve_duplicate(req, {"isDuplicate": True}))
+
+    assert result["isDuplicate"] is True
+    assert result["mergedInto"] == "TKT-00042"
+    # The citizen's message lands on the ORIGINAL, not just on the closed stub.
+    assert add_message.await_args.args[0] == "t-42"
+    # ...and this ticket takes the existing duplicate treatment.
+    assert update_ticket.await_args.args[0] == "t-new"
+    assert update_ticket.await_args.args[1] == {
+        "isDuplicate": 1, "parentTicketId": "t-42", "status": "closed"}
+    # ...and the original carries an audit line saying so.
+    assert add_event.await_args.args[0] == "t-42"
+    assert add_event.await_args.args[1]["eventType"] == "ticket.duplicate_merged"
+
+
+def test_rejected_duplicate_leaves_both_tickets_alone():
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="t-new", channel="email", rawText="No, this one is in Tambaram",
+               suspectedDuplicateOf=_SUSPECTED)
+
+    with patch.object(agent._db, "add_message", new=AsyncMock()) as add_message, \
+         patch.object(agent._db, "update_ticket", new=AsyncMock()) as update_ticket:
+        result = _run(agent._tool_resolve_duplicate(req, {"isDuplicate": False}))
+
+    assert result["isDuplicate"] is False
+    add_message.assert_not_called()
+    update_ticket.assert_not_called()
+
+
+def test_resolve_duplicate_refuses_when_nothing_was_flagged():
+    """The model must not be able to merge tickets on its own initiative — the
+    tool only acts on a suspicion routing actually raised."""
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="t-new", channel="email", rawText="merge these please")
+
+    with patch.object(agent._db, "update_ticket", new=AsyncMock()) as update_ticket:
+        result = _run(agent._tool_resolve_duplicate(req, {"isDuplicate": True}))
+
+    assert result["error"] == "no_suspected_duplicate"
+    update_ticket.assert_not_called()
+
+
+def test_merge_survives_a_failed_audit_write():
+    """The audit line is best-effort: the tickets are already merged by the
+    time it runs, and losing it must not fail the citizen's turn."""
+    agent = ConversationAgent("t1")
+    req = _req(ticketId="t-new", channel="email", rawText="yes same", suspectedDuplicateOf=_SUSPECTED)
+
+    with patch.object(agent._db, "add_message", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "update_ticket", new=AsyncMock(return_value={})), \
+         patch.object(agent._db, "add_event", new=AsyncMock(side_effect=RuntimeError("db down"))):
+        result = _run(agent._tool_resolve_duplicate(req, {"isDuplicate": True}))
+
+    assert result["isDuplicate"] is True
+
+
+def test_suspected_duplicate_reaches_the_models_per_turn_instructions():
+    """The model has to ask a SPECIFIC question ("...in Madambakkam?"), so it
+    is given the other complaint's own words, not just a ticket number."""
+    req = _req(suspectedDuplicateOf=_SUSPECTED)
+    state = {"identity_status": "confirmed", "questions_asked": 0, "complaint_ready": False}
+    rendered = ConversationAgent._render_additional_instructions(
+        req, state, DEFAULT_INTAKE_FIELDS["email"], 2, catalog_for_tenant(None), [])
+
+    assert "POSSIBLE DUPLICATE" in rendered
+    assert "TKT-00042" in rendered
+    assert "Water logging in Madambakkam" in rendered
+    assert "resolve_duplicate" in rendered
+
+
+def test_no_duplicate_hint_when_routing_did_not_flag_one():
+    req = _req()
+    state = {"identity_status": "confirmed", "questions_asked": 0, "complaint_ready": False}
+    rendered = ConversationAgent._render_additional_instructions(
+        req, state, DEFAULT_INTAKE_FIELDS["email"], 2, catalog_for_tenant(None), [])
+
+    assert "POSSIBLE DUPLICATE" not in rendered

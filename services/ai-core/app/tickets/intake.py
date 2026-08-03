@@ -112,13 +112,18 @@ import logging
 import re
 from typing import Optional
 
-from app.classify.message_quality import is_same_topic
+from app.classify.message_quality import match_open_ticket
 from app.dedup.service import OPEN_STATUSES
 from app.identity.db_client import DbWriterClient
 
 logger = logging.getLogger("ai-core")
 
 TICKET_NUMBER_RE = re.compile(r"TKT-\d{4,}")
+
+# How many of the citizen's open tickets are put to the model at once. They
+# arrive newest-first, so this bounds prompt size (and cost) on an account with
+# a long tail of stale open tickets without affecting the realistic cases.
+_MAX_MATCH_CANDIDATES = 8
 
 # --- "Is this message just intake-form data?" (Feature 20) ------------------
 # Deliberately deterministic (no LLM): this guard decides whether to even ASK
@@ -353,7 +358,7 @@ async def ensure_ticket_stub(
         logger.warning("message referenced unknown ticket traceId=%s ticketNumber=%s — treating as new",
                         trace_id, referenced)
 
-    if channel != "email" and channel_identity_value:
+    if channel_identity_value:
         identity = await _find_identity_for_channel(
             db, tenant_id, channel_identity_type, channel_identity_value, trace_id=trace_id)
         if identity and identity.get("master_id"):
@@ -376,29 +381,12 @@ async def ensure_ticket_stub(
                     trace_id, intake_stubs[0]["id"], len(open_tickets),
                 )
                 return {"id": intake_stubs[0]["id"], "ticketNumber": intake_stubs[0].get("ticket_number")}
-            if len(open_tickets) == 1:
-                candidate = open_tickets[0]
-                existing_text = await _existing_complaint_text(db, candidate["id"], trace_id)
-                same_topic = True
-                if existing_text:
-                    same_topic = await is_same_topic(existing_text, candidate.get("category"), raw_text or "")
-                if same_topic is False:
-                    logger.info(
-                        "identity's one open ticket looks like a different topic — creating a new "
-                        "ticket rather than appending traceId=%s existingTicketId=%s",
-                        trace_id, candidate["id"],
-                    )
-                    return await _create_stub(db, tenant_id, thread_key, channel, origin_message_id, trace_id)
-                logger.info("ticket resolved via identity's sole open ticket traceId=%s ticketId=%s",
-                            trace_id, candidate["id"])
-                return {"id": candidate["id"], "ticketNumber": candidate.get("ticket_number")}
-            if len(open_tickets) > 1:
-                logger.info(
-                    "identity has %d open tickets and no explicit reference — creating a new ticket "
-                    "rather than guessing which one this continues traceId=%s masterId=%s",
-                    len(open_tickets), trace_id, identity["master_id"],
-                )
-                return await _create_stub(db, tenant_id, thread_key, channel, origin_message_id, trace_id)
+            if open_tickets:
+                resolved = await _match_against_open_tickets(
+                    db, tenant_id, thread_key, channel, open_tickets, raw_text,
+                    origin_message_id, trace_id)
+                if resolved is not None:
+                    return resolved
             # Exactly zero open tickets linked to this identity — fall
             # through to the thread-key check below (safety net for a
             # ticket that hasn't been linked to the identity yet, e.g.
@@ -411,6 +399,89 @@ async def ensure_ticket_stub(
     return await _create_stub(db, tenant_id, thread_key, channel, origin_message_id, trace_id)
 
 
+async def _match_against_open_tickets(
+    db: DbWriterClient, tenant_id: str, thread_key: str, channel: str, open_tickets: list[dict],
+    raw_text: Optional[str], origin_message_id: Optional[str], trace_id: Optional[str],
+) -> Optional[dict]:
+    """Decide, in ONE judgment, which of the citizen's open tickets this
+    message continues (Feature 22).
+
+    Returns the resolved stub, or ``None`` to let the caller fall through to
+    the thread-key check and, ultimately, a fresh stub.
+
+    Replaces the Feature 17/18 count-based rules, which could only reason when
+    exactly ONE ticket was open and otherwise gave up ("2+ open, don't
+    guess" → always a new ticket). That gap is what produced the reported
+    email case: a stale unconfirmed stub was still open, so the second email
+    never reached the topic check at all. Asking the model to pick from the
+    citizen's open complaints handles one and many identically.
+
+    Three outcomes:
+    - ``same``    → route to that ticket; it is the same complaint.
+    - ``unclear`` → create a NEW stub, but carry `suspectedDuplicateOf` so the
+      conversation asks the citizen rather than a heuristic guessing. Nothing
+      is merged until they say so, so the wrong answer here costs an extra
+      question, never a swallowed complaint.
+    - ``different``/no match → ``None``; this is a new complaint.
+    """
+    candidates = []
+    for ticket in open_tickets[:_MAX_MATCH_CANDIDATES]:
+        text = await _existing_complaint_text(db, ticket["id"], trace_id)
+        if text:
+            candidates.append({"ticket": ticket, "ticketNumber": ticket.get("ticket_number"),
+                               "text": text, "category": ticket.get("category")})
+    if not candidates:
+        # No fetchable complaint text to compare against (a brand-new stub
+        # whose first message hasn't been persisted yet). Keep the pre-Feature
+        # 22 behaviour so the narrow first-turn window is unchanged: WhatsApp
+        # appends to a sole open ticket, email starts a new one.
+        if channel != "email" and len(open_tickets) == 1:
+            return {"id": open_tickets[0]["id"], "ticketNumber": open_tickets[0].get("ticket_number")}
+        return None
+
+    match = await match_open_ticket(
+        [{"ticketNumber": c["ticketNumber"], "text": c["text"], "category": c["category"]} for c in candidates],
+        raw_text or "")
+
+    if match is None:
+        # The judgment itself was unavailable (no key, timeout, bad response) —
+        # a network condition, not a decision about this message. Fall back to
+        # each channel's long-standing default rather than inventing one:
+        # WhatsApp's stable per-phone thread means "append" is safe there,
+        # while a fresh email has always been its own complaint.
+        logger.info("open-ticket match unavailable traceId=%s channel=%s — using channel default",
+                    trace_id, channel)
+        if channel != "email" and len(open_tickets) == 1:
+            return {"id": open_tickets[0]["id"], "ticketNumber": open_tickets[0].get("ticket_number")}
+        return None
+
+    verdict, index = match["verdict"], match["index"]
+    if index is None or verdict == "different":
+        logger.info("no open ticket matches this message traceId=%s verdict=%s reason=%s",
+                    trace_id, verdict, match.get("reason"))
+        return None
+
+    chosen = candidates[index]["ticket"]
+    if verdict == "same":
+        logger.info("ticket resolved via open-ticket match traceId=%s ticketId=%s reason=%s",
+                    trace_id, chosen["id"], match.get("reason"))
+        return {"id": chosen["id"], "ticketNumber": chosen.get("ticket_number")}
+
+    # unclear — create the ticket, flag the suspicion, and let the citizen settle it.
+    logger.info(
+        "possible duplicate of ticketId=%s but the message is ambiguous — creating a new ticket "
+        "and asking the citizen traceId=%s reason=%s",
+        chosen["id"], trace_id, match.get("reason"),
+    )
+    stub = await _create_stub(db, tenant_id, thread_key, channel, origin_message_id, trace_id)
+    stub["suspectedDuplicateOf"] = {
+        "id": chosen["id"],
+        "ticketNumber": chosen.get("ticket_number"),
+        "summary": candidates[index]["text"][:300],
+    }
+    return stub
+
+
 async def _existing_complaint_text(db: DbWriterClient, ticket_id: str, trace_id: Optional[str]) -> Optional[str]:
     """The ticket's ORIGINAL complaint text (its first inbound message) —
     the "existing complaint" side of the same-topic comparison above.
@@ -419,9 +490,9 @@ async def _existing_complaint_text(db: DbWriterClient, ticket_id: str, trace_id:
     ticket routing over a message-history fetch problem."""
     try:
         messages = await db.get_messages(ticket_id, trace_id=trace_id)
+        inbound = [m for m in messages if m.get("direction") == "inbound" and m.get("content")]
     except Exception:  # noqa: BLE001 - best-effort, see docstring
         return None
-    inbound = [m for m in messages if m.get("direction") == "inbound" and m.get("content")]
     return inbound[0]["content"] if inbound else None
 
 

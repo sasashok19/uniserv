@@ -151,6 +151,20 @@ public class TicketResource {
         return Map.of("data", tickets.events(id));
     }
 
+    /**
+     * Record an audit-trail entry from a service other than this one
+     * (Feature 22): ai-core needs to note on a ticket that another ticket was
+     * merged into it as a confirmed duplicate. The trail was previously
+     * write-only from inside {@link TicketService}, so there was no way to say
+     * anything about a ticket except by changing its status.
+     */
+    @POST
+    @Path("/{id}/events")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response addEvent(@PathParam("id") String id, Map<String, Object> body) {
+        return Response.status(Response.Status.CREATED).entity(tickets.addEvent(id, body)).build();
+    }
+
     @POST
     @Path("/{id}/generate-resolution-summary")
     public Map<String, Object> resolutionSummary(@PathParam("id") String id) {

@@ -116,6 +116,13 @@ class DbWriterClient:
         resp = await self._request("GET", f"/api/v1/db/tickets/{ticket_id}/messages", trace_id)
         return resp.json().get("data", [])
 
+    async def add_event(self, ticket_id: str, payload: dict, trace_id: Optional[str] = None) -> dict:
+        """Append an audit-trail entry to a ticket (Feature 22) — used to record
+        on the ORIGINAL ticket that another was merged into it as a confirmed
+        duplicate. The trail was read-only from here until now."""
+        resp = await self._request("POST", f"/api/v1/db/tickets/{ticket_id}/events", trace_id, json=payload)
+        return resp.json()
+
     async def get_notes(self, ticket_id: str, trace_id: Optional[str] = None) -> list[dict]:
         """A ticket's internal/transition notes, oldest first — the "last
         action taken" for the status-summary feature is the newest of these."""

@@ -112,6 +112,142 @@ public class TicketsResource {
         return Response.ok(body).build();
     }
 
+    /**
+     * Feature 21: full ticket export as CSV, honouring exactly the same
+     * filters as {@link #list} so "export" always means "what I am looking
+     * at". Restricted by the `ticket.export` permission (admin/lead), which
+     * has existed in {@link RbacPolicy} since Feature 11 but had no endpoint
+     * behind it until now.
+     *
+     * Paged internally at db-writer's maximum (100/request) rather than asking
+     * for everything at once: the queue query LEFT JOINs the identity table,
+     * so an unbounded page would be the slowest query in the system, and this
+     * keeps memory flat regardless of tenant size. Capped at
+     * {@value #EXPORT_MAX_ROWS} rows — an export that silently stopped short
+     * would be worse than one that says so, so the cap is reported in the
+     * response headers rather than being invisible.
+     */
+    @GET
+    @Path("/export.csv")
+    @Produces("text/csv")
+    public Response exportCsv(@QueryParam("assignedTo") String assignedTo,
+                              @QueryParam("status") String status,
+                              @QueryParam("channel") String channel,
+                              @QueryParam("category") String category,
+                              @QueryParam("identityStatus") String identityStatus,
+                              @QueryParam("sortBy") String sortBy,
+                              @QueryParam("sortDir") String sortDir) {
+        if (!user.can("ticket.export")) {
+            return forbidden("INSUFFICIENT_ROLE", "Your role cannot export tickets");
+        }
+        String resolvedAssignee = "me".equals(assignedTo) ? user.agentId() : assignedTo;
+        if ("none".equals(assignedTo)) {
+            resolvedAssignee = null;
+        }
+
+        Map<String, String> agentNames = agentDirectory();
+        StringBuilder csv = new StringBuilder();
+        csv.append(String.join(",", EXPORT_COLUMNS)).append("\r\n");
+
+        int page = 1;
+        int rows = 0;
+        boolean truncated = false;
+        while (rows < EXPORT_MAX_ROWS) {
+            StringBuilder q = new StringBuilder("tenantId=").append(enc(user.tenantId()));
+            append(q, "assignedTo", "none".equals(assignedTo) ? null : resolvedAssignee);
+            append(q, "status", status);
+            append(q, "channel", channel);
+            append(q, "category", category);
+            append(q, "identityStatus", identityStatus);
+            append(q, "sortBy", sortBy == null ? "createdAt" : sortBy);
+            append(q, "sortDir", sortDir == null ? "desc" : sortDir);
+            append(q, "page", String.valueOf(page));
+            append(q, "pageSize", String.valueOf(EXPORT_PAGE_SIZE));
+
+            DbWriterClient.ApiResult result = db.call("GET", "/api/v1/db/tickets?" + q, null);
+            if (result.status() >= 400) {
+                return Response.status(result.status()).entity(result.body()).build();
+            }
+            Object rawData = result.body() == null ? null : result.body().get("data");
+            if (!(rawData instanceof List<?> list) || list.isEmpty()) {
+                break;
+            }
+            for (Object o : list) {
+                if (!(o instanceof Map<?, ?> mm)) {
+                    continue;
+                }
+                @SuppressWarnings("unchecked")
+                Map<String, Object> t = (Map<String, Object>) mm;
+                if (rows >= EXPORT_MAX_ROWS) {
+                    truncated = true;
+                    break;
+                }
+                csv.append(csvRow(t, agentNames)).append("\r\n");
+                rows++;
+            }
+            if (list.size() < EXPORT_PAGE_SIZE) {
+                break;
+            }
+            page++;
+        }
+
+        String filename = "uniserve-tickets-" + java.time.LocalDate.now() + ".csv";
+        Response.ResponseBuilder response = Response.ok(csv.toString())
+                .header("Content-Disposition", "attachment; filename=\"" + filename + "\"")
+                .header("X-Export-Row-Count", rows);
+        if (truncated) {
+            response.header("X-Export-Truncated", "true");
+        }
+        return response.build();
+    }
+
+    private static final int EXPORT_PAGE_SIZE = 100;   // db-writer's own maximum
+    private static final int EXPORT_MAX_ROWS = 50_000;
+
+    private static final List<String> EXPORT_COLUMNS = List.of(
+            "ticket_number", "status", "identity_status", "category", "subcategory",
+            "priority_label", "priority_score", "sentiment_score", "channel_origin",
+            "citizen_name", "citizen_email", "citizen_phone", "service_id",
+            "assigned_to_name", "is_duplicate", "parent_ticket_id", "resolution",
+            "sla_due_at", "created_at", "updated_at", "resolved_at", "closed_at",
+            "reopened_count", "thread_id", "id");
+
+    static String csvRow(Map<String, Object> t, Map<String, String> agentNames) {
+        String assignedAgentId = str(t, "assigned_to");
+        StringBuilder row = new StringBuilder();
+        for (String column : EXPORT_COLUMNS) {
+            if (row.length() > 0) {
+                row.append(',');
+            }
+            Object value = "assigned_to_name".equals(column)
+                    ? (assignedAgentId == null ? null : agentNames.get(assignedAgentId))
+                    : t.get(column);
+            row.append(csvCell(value));
+        }
+        return row.toString();
+    }
+
+    /**
+     * RFC 4180 escaping. The leading-character guard is not cosmetic: a
+     * citizen-supplied field starting with = + - or @ is executed as a formula
+     * when the file is opened in Excel or Sheets (CSV injection), so it is
+     * prefixed with a single quote — the standard neutralisation, and these
+     * cells hold exactly the free text a citizen controls (names, resolutions).
+     */
+    static String csvCell(Object value) {
+        if (value == null) {
+            return "";
+        }
+        String s = String.valueOf(value);
+        if (!s.isEmpty() && "=+-@\t\r".indexOf(s.charAt(0)) >= 0) {
+            s = "'" + s;
+        }
+        if (s.indexOf('"') >= 0 || s.indexOf(',') >= 0 || s.indexOf('\n') >= 0 || s.indexOf('\r') >= 0) {
+            return '"' + s.replace("\"", "\"\"") + '"';
+        }
+        return s;
+    }
+
     /** Lead/Admin only — reassign (or unassign, with a null/blank body value) a ticket. */
     @PATCH
     @Path("/{id}/assign")
@@ -265,6 +401,11 @@ public class TicketsResource {
         body.put("assignedTo", assignedTo);
         body.put("assignedToName", assignedTo == null ? null : agentDirectory().get(assignedTo));
         body.put("canAssign", user.can("ticket.assignee.edit"));
+        // Feature 21: the dashboard offers Cancel only when the signed-in role
+        // may actually perform it, decided HERE rather than from a role string
+        // in the browser — same reasoning as canAssign, and the transition
+        // endpoint re-checks it regardless.
+        body.put("canCancel", user.can("ticket.status.to_cancelled"));
         body.put("notes", notes);
         body.put("messages", messages);
         return Response.ok(body).build();
@@ -431,7 +572,7 @@ public class TicketsResource {
         return m.find() ? m.group(1).trim() : null;
     }
 
-    private static String transitionAction(String toStatus) {
+    static String transitionAction(String toStatus) {
         return switch (toStatus == null ? "" : toStatus) {
             case "assigned" -> "ticket.status.open_to_assigned";
             case "in_progress" -> "ticket.status.assigned_to_inprogress";
@@ -440,6 +581,8 @@ public class TicketsResource {
             case "resolved" -> "ticket.status.inprogress_to_resolved";
             case "closed" -> "ticket.status.resolved_to_closed";
             case "reopened" -> "ticket.status.closed_to_reopened";
+            // Feature 21: admin-only, from any non-terminal status.
+            case "cancelled" -> "ticket.status.to_cancelled";
             default -> "ticket.edit";
         };
     }

@@ -1017,6 +1017,104 @@ Four distinct defects, fixed together:
   the live `OPENAI_ASSISTANT_ID` for the intake-answer and email-correction
   guidance to take effect — see the Feature 17 note above for why.
 
+**Cross-ticket duplicate detection, on every channel (Feature 22).** Features
+17–20 all improved *WhatsApp* routing. Email was deliberately excluded
+(`if channel != "email"`) on the grounds that it had a better signal — the
+subject-line ticket number. That holds for *replies*; it does nothing for a
+citizen who composes a **fresh** email about a complaint they already have
+open, and every unthreaded email gets a per-message thread key (Feature 15),
+so it was a new ticket by construction. Live-tested: `sasashok19@gmail.com`
+sent two emails 13 seconds apart, both "water logging in my area", and got
+TKT-00020 and TKT-00021 — on top of a stale TKT-00019 from that morning.
+Traced against the real code: `find_by_email` was called **0 times** for
+routing and `is_same_topic` was never reached.
+
+Two things were wrong, and the second is the more interesting one:
+
+- **Email never participated in dedup at all.** The identity branch is now
+  channel-agnostic.
+- **The count-based rules could only reason about ONE open ticket.** Feature
+  17's "2+ open tickets → don't guess → new ticket" is a refusal to decide,
+  and it is what let the second email through even after the first was
+  correctly created: a stale unconfirmed stub was open alongside it, so the
+  message never reached the topic check. This is also why Feature 20's fix
+  didn't cover it.
+
+`is_same_topic` (one boolean, one ticket) is replaced by
+**`match_open_ticket`** (`app/classify/message_quality.py`): the citizen's
+open complaints are presented as a numbered list and the model names which one
+this message concerns. **One call regardless of how many tickets are open** —
+per-ticket calls would cost N requests per message and then leave the caller
+reconciling N verdicts, including the awkward case where two say "same".
+
+The judgment is three-way, and the third value is the point:
+
+| Verdict | Meaning | Action |
+|---|---|---|
+| `same` | same problem **and** same place | Route to that ticket |
+| `different` | different problem, **or** same problem elsewhere | New standalone ticket |
+| `unclear` | the message omits the detail that would settle it | New ticket, **flagged**, and the AI **asks** |
+
+"Same place" is not decoration: *water logging in Madambakkam* vs *water
+logging in Tambaram* are different complaints, and so are *water logging* vs
+*no power* in the same locality. Verified against the live model (temp 0, 3
+runs each) on those cases plus the reported transcript — all stable.
+
+**`unclear` is what makes this safe.** A bare "water logging" arriving while
+"water logging in Madambakkam" is open is genuinely ambiguous; merging would
+be a guess. Instead the ticket is created and carries `suspectedDuplicateOf`,
+the per-turn instructions hand the model the other complaint's own words so it
+can ask a *specific* question ("…the water logging in Madambakkam you reported
+(TKT-00042), or a different location?"), and the new `resolve_duplicate` tool
+acts on the citizen's answer. Nothing merges until they say so, so being wrong
+here costs one extra question rather than a swallowed complaint.
+
+On a confirmed duplicate the citizen's message is appended to the **original**,
+this ticket takes the duplicate treatment that has always existed
+(`isDuplicate`/`parentTicketId`/closed), the citizen gets the existing
+duplicate-aware ack ("we've added your message to your existing complaint"),
+and a `ticket.duplicate_merged` entry is written to the **original's audit
+trail** — otherwise a ticket silently grows an extra message with no record of
+where it came from. That needed a new `POST /api/v1/db/tickets/{id}/events`
+(db-writer): the trail was previously writable only from inside
+`TicketService`, so no other service could say anything about a ticket except
+by changing its status. No schema change — `ticket_events` already permits an
+`ai` actor.
+
+**Failure behaviour stays channel-specific by design.** An unavailable
+judgment (no key, timeout, unparseable response) is a network condition, not a
+decision, so each channel keeps its long-standing default: WhatsApp appends to
+a sole open ticket (its thread key really is per-conversation), email creates a
+new one (a fresh email has always been its own complaint). An LLM outage must
+never start silently merging a citizen's separate emails.
+
+**Admin-only Cancel (Feature 21).** `cancelled` is a terminal status meaning
+"this was never real work" — a confirmed duplicate, a test row, a withdrawn
+complaint — as distinct from `closed`, which means the work was done. Reporting
+has to tell them apart, so `resolved_at` is deliberately left NULL (a cancelled
+ticket is not a resolution, and counting it as one would inflate resolution
+rate and skew MTTR) and the SLA query excludes cancelled outright — otherwise a
+cancelled ticket with a past due date and no `resolved_at` would count as a
+**breach forever**. Requires migration **V11** (SQLite can't alter a CHECK, so
+the table is rebuilt exactly as V9 did). It is the one status action a lead
+cannot perform (`ticket.status.to_cancelled` → admin only), it is available
+from any non-terminal status rather than as a step in the lifecycle chain, it
+always requires a ≥20-character note, and the dashboard offers it only when the
+server says the role may do it (`canCancel`, decided in the gateway rather than
+from a role string in the browser).
+
+**Ticket CSV export (Feature 21).** `GET /api/v1/tickets/export.csv`, honouring
+exactly the same filters as the queue so "export" always means "what I'm
+looking at". The `ticket.export` permission (admin/lead) had existed in
+`RbacPolicy` since Feature 11 with no endpoint behind it. Paged internally at
+db-writer's own maximum (100/request) rather than one unbounded query — the
+queue query LEFT JOINs the identity table, so memory and latency stay flat
+regardless of tenant size — and capped at 50,000 rows, with the cap reported in
+`X-Export-Truncated` rather than silently stopping short. Cells are RFC 4180
+escaped **and** formula-injection neutralised: these columns hold text the
+citizen controls (their name, a complaint resolution), and a value starting
+`=`, `+`, `-` or `@` executes when the file is opened in Excel or Sheets.
+
 **Duplicate "complaint registered" acknowledgement (also live-tested).**
 Independently of the above, the SAME conversation surfaced a second bug:
 citizens got two separate confirmation messages for one new ticket — the

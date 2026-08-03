@@ -34,6 +34,7 @@ type TicketDetail = {
   assignedTo: string | null;
   assignedToName: string | null;
   canAssign: boolean;
+  canCancel: boolean;
   notes: Note[];
   messages: Message[];
 };
@@ -75,8 +76,22 @@ const NEXT_STATUSES: Record<string, string[]> = {
   reopened: ["in_progress"],
 };
 
+/**
+ * Feature 21: cancelling is available from any non-terminal status rather than
+ * as one more step in the lifecycle — it says "this was never real work"
+ * (duplicate, test row, withdrawn complaint), which can become true at any
+ * point. Offered only when the server says this role may do it
+ * (`canCancel`, admin-only) and always requires a note.
+ */
+const CANCELLABLE_FROM = new Set(["open", "assigned", "in_progress", "pending_customer", "resolved", "reopened"]);
+
 /** Mirrors db-writer's MANDATORY_NOTE_TRANSITIONS — UI hint only, server enforces. */
 const MANDATORY_NOTE_TRANSITIONS = new Set(["in_progress->resolved", "resolved->closed", "closed->reopened"]);
+
+/** True when this transition needs a note — any cancel, plus the pairs above. */
+function needsNote(from: string, to: string): boolean {
+  return to === "cancelled" || MANDATORY_NOTE_TRANSITIONS.has(`${from}->${to}`);
+}
 
 const STATUS_LABEL = (s: string) => s.replace(/_/g, " ");
 
@@ -145,6 +160,11 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
   if (!ticket) return <p className="p-6 text-sm">Ticket not found.</p>;
 
   const nextStatuses = NEXT_STATUSES[ticket.status] ?? [];
+  // Cancel is not part of the lifecycle chain, so it's appended rather than
+  // listed in NEXT_STATUSES — available from any non-terminal status, and only
+  // to a role the server has already said may do it.
+  const cancellable = ticket.canCancel && CANCELLABLE_FROM.has(ticket.status);
+  const statusActions = cancellable ? [...nextStatuses, "cancelled"] : nextStatuses;
 
   /** Save the typed note WITHOUT a status change (small affordance, no big button). */
   async function saveNoteOnly() {
@@ -198,9 +218,14 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
   }
 
   async function transition(toStatus: string) {
-    const key = `${ticket?.status}->${toStatus}`;
-    if (MANDATORY_NOTE_TRANSITIONS.has(key) && noteText.trim().length < 20) {
+    if (needsNote(ticket?.status ?? "", toStatus) && noteText.trim().length < 20) {
       setStatusMsg("This transition requires a note of at least 20 characters — type it in the note box.");
+      return;
+    }
+    if (toStatus === "cancelled" &&
+        !window.confirm(
+          `Cancel ${ticket?.ticketNumber}? This marks it as never having been real work — it will not ` +
+          `count as resolved, and it cannot be reopened. Your note will be recorded against it.`)) {
       return;
     }
     setTransitioning(toStatus);
@@ -323,7 +348,7 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
 
           {/* Status transition with the internal note inline: type a note (grey
               placeholder), click a transition — the note rides along. */}
-          {nextStatuses.length > 0 && (
+          {statusActions.length > 0 && (
             <div className="rounded-lg border bg-white p-4 shadow-sm">
               <h3 className="mb-2 text-base font-semibold text-slate-800">Status &amp; internal note</h3>
               <textarea
@@ -333,27 +358,42 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
                 onChange={(e) => setNoteText(e.target.value)}
                 rows={3}
               />
-              {nextStatuses.some((s) => MANDATORY_NOTE_TRANSITIONS.has(`${ticket.status}->${s}`)) && (
+              {statusActions.some((s) => needsNote(ticket.status, s)) && (
                 <p className={`mb-2 text-xs ${noteText.trim().length < 20 ? "text-amber-600" : "text-emerald-600"}`}>
                   {noteText.trim().length}/20 characters — required for some transitions below
                 </p>
               )}
               <div className="flex flex-wrap items-center gap-2">
-                {nextStatuses.map((s) => {
-                  const needsNote = MANDATORY_NOTE_TRANSITIONS.has(`${ticket.status}->${s}`);
-                  const blocked = needsNote && noteText.trim().length < 20;
+                {statusActions.map((s) => {
+                  const noteRequired = needsNote(ticket.status, s);
+                  const blocked = noteRequired && noteText.trim().length < 20;
+                  // Cancel is destructive and off the lifecycle path, so it
+                  // reads as such rather than sitting in the row of teal
+                  // "Move to ..." buttons as if it were the next step.
+                  const isCancel = s === "cancelled";
                   return (
                     <button
                       key={s}
                       onClick={() => transition(s)}
                       disabled={transitioning !== null || blocked}
                       title={blocked ? "Add a note of at least 20 characters first" : undefined}
-                      className="inline-flex items-center gap-1.5 rounded bg-brand-teal px-3 py-2 text-sm font-medium text-white transition-transform hover:bg-brand-tealDark active:scale-[0.97] disabled:opacity-50"
+                      className={
+                        "inline-flex items-center gap-1.5 rounded px-3 py-2 text-sm font-medium transition-transform " +
+                        "active:scale-[0.97] disabled:opacity-50 " +
+                        (isCancel
+                          ? "border border-red-300 bg-white text-red-700 hover:bg-red-50"
+                          : "bg-brand-teal text-white hover:bg-brand-tealDark")
+                      }
                     >
                       {transitioning === s && <Loader2 className="h-4 w-4 animate-spin" />}
-                      Move to {STATUS_LABEL(s)}
-                      {needsNote && (
-                        <span className="ml-1 rounded-full bg-white/20 px-1.5 py-0.5 text-[10px] uppercase">
+                      {isCancel ? "Cancel ticket" : `Move to ${STATUS_LABEL(s)}`}
+                      {noteRequired && (
+                        <span
+                          className={
+                            "ml-1 rounded-full px-1.5 py-0.5 text-[10px] uppercase " +
+                            (isCancel ? "bg-red-100 text-red-700" : "bg-white/20")
+                          }
+                        >
                           Note required
                         </span>
                       )}

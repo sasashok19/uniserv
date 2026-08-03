@@ -22,6 +22,11 @@ public final class RbacPolicy {
             case "ticket.status.inprogress_to_resolved" -> true;
             case "ticket.status.resolved_to_closed" -> adminOrLead;
             case "ticket.status.closed_to_reopened" -> adminOrLead;
+            // Feature 21: cancelling declares a ticket was never real work at
+            // all — it leaves the backlog without being resolved, so it is the
+            // one transition a lead cannot make. Admin only, deliberately
+            // narrower than every other status action above.
+            case "ticket.status.to_cancelled" -> "admin".equals(role);
             case "ticket.resolution.generate" -> true;
             case "ticket.export" -> adminOrLead;
             case "admin.view", "admin.agents.manage", "admin.tenant.config", "admin.tickets.archive-stale" ->

@@ -1,4 +1,4 @@
-# Session handoff — WhatsApp intake-answer bug (Feature 20), 2026-08-03
+# Session handoff — Features 20/21/22, 2026-08-03
 
 ## Task
 Fix the bug described in `Big_Fix_Prompt.md` (repo root), with `Gateway.log`
@@ -108,3 +108,63 @@ clauses against a silent revert.
 ## Untracked files at repo root
 `Big_Fix_Prompt.md`, `Gateway.log`, `ai-core.log` — inputs for this task,
 deliberately NOT committed.
+
+
+---
+
+# Features 21 & 22 (same session, later)
+
+## Feature 22 — cross-ticket duplicate detection on EVERY channel
+Reported: one sender, two emails 13s apart, both "water logging in my area"
+-> TKT-00020 + TKT-00021, on top of a stale TKT-00019. Traced against the real
+code: `find_by_email` called 0 times for routing, `is_same_topic` never
+reached. Two causes: (a) email skipped the identity branch entirely
+(`if channel != "email"`), (b) the count-based rules could only reason about
+ONE open ticket — "2+ open -> don't guess -> new ticket" is a refusal to
+decide, and a stale stub was open alongside the real one.
+
+- `is_same_topic` (boolean, one ticket) -> `match_open_ticket` (ALL open
+  tickets in ONE call, returns index + same/different/unclear).
+- `unclear` = the message omits the detail that would settle it -> create the
+  ticket, flag `suspectedDuplicateOf`, and have the AI ASK. Nothing merges
+  until the citizen answers (`resolve_duplicate` tool).
+- Confirmed merge: message appended to the ORIGINAL, this ticket takes the
+  existing isDuplicate/parentTicketId/closed treatment, existing
+  duplicate-aware citizen ack, plus a `ticket.duplicate_merged` audit event on
+  the original (needs the new POST /api/v1/db/tickets/{id}/events).
+- LLM unavailable -> per-channel default unchanged (WhatsApp appends, email
+  creates). An outage must never start merging separate emails.
+- Verified the 3-way prompt against the LIVE model on the user's own scenarios
+  (Madambakkam vs Tambaram; water logging vs no power; bare "water logging")
+  at temp 0, 3 runs each — all stable and correct.
+
+## Feature 21 — admin-only Cancel + CSV export
+- **V11 migration** adds `cancelled` to the status CHECK (SQLite table
+  rebuild, same shape as V9). `closed_at` stamped, `resolved_at` left NULL,
+  and the SLA query excludes cancelled — otherwise a cancelled ticket with a
+  past due date counts as a breach forever.
+- Admin only (`ticket.status.to_cancelled`); any non-terminal status; always a
+  >=20 char note; dashboard gates on server-provided `canCancel`.
+- `GET /api/v1/tickets/export.csv` — same filters as the queue, paged at 100
+  internally, capped at 50k with `X-Export-Truncated`, RFC 4180 + CSV-injection
+  escaping (citizen-controlled text lands in these cells).
+- `ticket.export` already existed in RbacPolicy since Feature 11 with no
+  endpoint behind it.
+
+## Tests
+ai-core 260, api-gateway 57, db-writer 8 — all pass.
+Note: ai-core tests load `.env`, so an unmocked LLM call in a test hits the
+network for real. One test was doing that and now patches `match_open_ticket`.
+
+## Deployment for Features 21/22
+ALL FOUR: ai-core, db-writer (V11 migration + events endpoint), api-gateway
+(cancel/export), dashboard (cancel button, export button). Unlike Feature 20
+this is not ai-core-only.
+
+## Still outstanding / not done
+- `api.log` shows `auto-close-unconfirmed call failed: status=502
+  DB_WRITER_UNAVAILABLE` repeatedly — the stale-stub sweeper is broken in
+  production (looks like a Railway cold-start timeout). Not addressed.
+- TKT-00019/20/21 already exist; none of this merges them retroactively.
+- Suspected-duplicate flag has no dashboard affordance yet: if the citizen
+  never answers the question, an agent cannot confirm/dismiss it in the UI.

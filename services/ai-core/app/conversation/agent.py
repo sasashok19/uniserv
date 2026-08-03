@@ -270,6 +270,12 @@ class TestEventRequest(BaseModel):
     # ticket" signal a citizen can give -- see app/tickets/intake.py
     # ensure_ticket_stub, which checks it before any text/identity heuristic.
     inReplyTo: Optional[str] = None
+    # Feature 22: set by ensure_ticket_stub when this message MIGHT continue an
+    # existing open complaint but the text doesn't settle it (e.g. "water
+    # logging" when the open one says "water logging in Madambakkam"). Shape:
+    # {"id", "ticketNumber", "summary"}. Nothing is merged on this alone — the
+    # assistant asks the citizen, and `resolve_duplicate` acts on their answer.
+    suspectedDuplicateOf: Optional[dict] = None
 
 
 class ConversationAgent:
@@ -641,6 +647,8 @@ class ConversationAgent:
                 return await self._tool_submit_complaint(req, thread_key, state, args)
             if name == "check_complaint_status":
                 return await self._tool_check_status(req)
+            if name == "resolve_duplicate":
+                return await self._tool_resolve_duplicate(req, args)
             return {"error": f"unknown tool '{name}'"}
 
         reply_text = await self._openai.run_turn(
@@ -810,6 +818,58 @@ class ConversationAgent:
             }, trace_id=req.traceId))
         return {"complaintReady": True, "messageId": message_id}
 
+    async def _tool_resolve_duplicate(self, req: TestEventRequest, args: dict) -> dict:
+        """Feature 22: the citizen has answered "is this the same complaint?".
+
+        Only the citizen can settle it, so this runs on their answer and
+        nothing else — routing merely raised the suspicion. On a "yes" the
+        ticket created for this message is folded into the original, using the
+        same treatment a detected duplicate has always had
+        (`isDuplicate`/`parentTicketId`/closed, see app/tickets/service.py) so
+        there is one code path for "this is a duplicate", not two. On a "no"
+        the suspicion is simply dropped and the new ticket stands alone.
+        """
+        suspected = req.suspectedDuplicateOf or {}
+        parent_id, parent_number = suspected.get("id"), suspected.get("ticketNumber")
+        if not parent_id or not req.ticketId:
+            return {"error": "no_suspected_duplicate",
+                    "message": "There is no pending duplicate question on this conversation."}
+        if not args.get("isDuplicate"):
+            logger.info("citizen says this is NOT a duplicate traceId=%s ticketId=%s of=%s",
+                        req.traceId, req.ticketId, parent_number)
+            return {"isDuplicate": False, "message": "Understood — treated as a separate complaint."}
+        if parent_id == req.ticketId:
+            return {"error": "same_ticket", "message": "That is this ticket."}
+
+        await self._db.add_message(parent_id, {
+            "tenantId": req.tenantId,
+            "channel": req.channel,
+            "direction": "inbound",
+            "authorType": "user",
+            "content": req.rawText,
+        }, trace_id=req.traceId)
+        await self._db.update_ticket(req.ticketId, {
+            "isDuplicate": 1,
+            "parentTicketId": parent_id,
+            "status": "closed",
+        }, trace_id=req.traceId)
+        # Audit trail on the ORIGINAL: without this, the ticket silently grows
+        # an extra message and an agent has no record of where it came from or
+        # that the citizen confirmed it.
+        try:
+            await self._db.add_event(parent_id, {
+                "eventType": "ticket.duplicate_merged",
+                "actorType": "ai",
+            }, trace_id=req.traceId)
+        except Exception:  # noqa: BLE001 - the merge itself is done; the audit line is best-effort
+            logger.warning("failed to record duplicate-merge audit event traceId=%s parentId=%s",
+                            req.traceId, parent_id)
+        logger.info("citizen confirmed duplicate traceId=%s ticketId=%s mergedInto=%s",
+                    req.traceId, req.ticketId, parent_number)
+        return {"isDuplicate": True, "mergedInto": parent_number,
+                "message": f"Merged into {parent_number}. Tell the citizen their message was added to "
+                           f"their existing complaint {parent_number}, and do not call submit_complaint."}
+
     async def _tool_check_status(self, req: TestEventRequest) -> dict:
         """Feature 17: the assistant-path equivalent of `_handle_status_inquiry`
         (rule-based path) — same underlying `summarize_recent_tickets` call, so
@@ -849,6 +909,22 @@ class ConversationAgent:
             f"questions_asked={state['questions_asked']}",
             f"max_followup_questions={max_followups}",
         ]
+        # Feature 22: routing suspected this continues an existing complaint but
+        # couldn't tell. Surfaced with the other complaint's own words so the
+        # model can ask a specific question ("...the water logging in
+        # Madambakkam?") rather than a generic "is this a duplicate?", which a
+        # citizen has no way to answer usefully.
+        suspected = req.suspectedDuplicateOf or {}
+        if suspected.get("ticketNumber") and not state.get("complaint_ready"):
+            parts.append(
+                "POSSIBLE DUPLICATE: this citizen already has an open complaint "
+                + str(suspected["ticketNumber"]) + " which reads: "
+                + json.dumps(suspected.get("summary", ""))
+                + ". This message may or may not be about that same issue. Ask them ONE short "
+                "question naming that complaint's specific detail (its location or subject) to "
+                "find out, then call resolve_duplicate with their answer. Do not call "
+                "submit_complaint until that is settled."
+            )
         if remaining == 0 and not state["complaint_ready"]:
             parts.append("You have used all follow-up questions: call submit_complaint now.")
         # Carry the citizen's original complaint forward so the assistant uses

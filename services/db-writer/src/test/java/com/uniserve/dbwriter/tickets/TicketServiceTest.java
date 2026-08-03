@@ -66,4 +66,31 @@ class TicketServiceTest {
         assertFalse(where.contains("archived_at"));
         assertTrue(where.contains("origin_message_id"));
     }
+
+    // -----------------------------------------------------------------
+    // Feature 21: 'cancelled' status. The CHECK constraint widening lives in
+    // V11; these cover the rules that are not the database's job.
+    // -----------------------------------------------------------------
+
+    @Test
+    void cancelledIsAValidTicketStatusInTheSchema() throws Exception {
+        // The migration is the contract — if 'cancelled' is ever dropped from
+        // the CHECK, every cancel becomes an opaque constraint violation.
+        String v11 = new String(getClass().getClassLoader()
+                .getResourceAsStream("db/migration/V11__ticket_status_cancelled.sql").readAllBytes());
+        assertTrue(v11.contains("'cancelled'"), "V11 must widen the status CHECK");
+        assertTrue(v11.contains("CREATE INDEX idx_tickets_tenant_status"),
+                "rebuilding the table must recreate its indexes");
+    }
+
+    @Test
+    void everyPriorStatusValueSurvivesTheV11Rebuild() throws Exception {
+        String v11 = new String(getClass().getClassLoader()
+                .getResourceAsStream("db/migration/V11__ticket_status_cancelled.sql").readAllBytes());
+        for (String status : new String[]{
+                "'open'", "'assigned'", "'in_progress'", "'pending_customer'",
+                "'resolved'", "'closed'", "'reopened'"}) {
+            assertTrue(v11.contains(status), "V11 dropped " + status + " from the status CHECK");
+        }
+    }
 }

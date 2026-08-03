@@ -131,3 +131,87 @@ def test_is_same_topic_returns_none_on_api_error():
         settings.openai_model = "gpt-4o-mini"
         result = _run(is_same_topic("existing", "other", "new"))
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Feature 22: match_open_ticket — ONE call judging the new message against ALL
+# of the citizen's open tickets. Replaces the per-ticket boolean is_same_topic,
+# which cost N requests per message and left the caller reconciling N verdicts.
+# ---------------------------------------------------------------------------
+
+from unittest.mock import AsyncMock, patch  # noqa: E402
+
+from app.classify.message_quality import match_open_ticket  # noqa: E402
+
+_CANDIDATES = [
+    {"ticketNumber": "TKT-00019", "text": "Water logging in Madambakkam", "category": "water"},
+    {"ticketNumber": "TKT-00020", "text": "No power in Tambaram", "category": "outage"},
+]
+
+
+def _completion(payload: str):
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=payload))])
+
+
+def _patched_client(payload: str):
+    client = AsyncMock()
+    client.chat.completions.create = AsyncMock(return_value=_completion(payload))
+    return client
+
+
+def test_match_open_ticket_returns_zero_based_index_of_the_named_ticket():
+    """The model answers in 1-based positions from the numbered listing it was
+    shown; callers index into their own list, so it is converted here."""
+    with patch("app.classify.message_quality.settings") as settings, \
+         patch("app.classify.message_quality.AsyncOpenAI", return_value=_patched_client(
+             '{"ticket": 2, "verdict": "same", "reason": "same outage"}')):
+        settings.openai_api_key = "sk-test"
+        settings.openai_model = "gpt-4o-mini"
+        result = _run(match_open_ticket(_CANDIDATES, "Still no power in Tambaram"))
+
+    assert result == {"index": 1, "verdict": "same", "reason": "same outage"}
+
+
+def test_match_open_ticket_treats_a_null_ticket_as_no_match():
+    with patch("app.classify.message_quality.settings") as settings, \
+         patch("app.classify.message_quality.AsyncOpenAI", return_value=_patched_client(
+             '{"ticket": null, "verdict": "different", "reason": "unrelated"}')):
+        settings.openai_api_key = "sk-test"
+        settings.openai_model = "gpt-4o-mini"
+        result = _run(match_open_ticket(_CANDIDATES, "My bill is wrong"))
+
+    assert result["index"] is None
+    assert result["verdict"] == "different"
+
+
+def test_match_open_ticket_ignores_an_out_of_range_or_hallucinated_index():
+    """A ticket NUMBER echoed back instead of a position, or a number past the
+    end of the list, must not index into the candidates by accident."""
+    for bogus in ("19", "99", "0", "true"):
+        with patch("app.classify.message_quality.settings") as settings, \
+             patch("app.classify.message_quality.AsyncOpenAI", return_value=_patched_client(
+                 '{"ticket": %s, "verdict": "same", "reason": "x"}' % bogus)):
+            settings.openai_api_key = "sk-test"
+            settings.openai_model = "gpt-4o-mini"
+            result = _run(match_open_ticket(_CANDIDATES, "anything"))
+        assert result["index"] is None, bogus
+
+
+def test_match_open_ticket_rejects_an_unusable_verdict():
+    """An unrecognised verdict is treated as "no answer" (None) rather than
+    being coerced — callers fall back to their channel's safe default."""
+    with patch("app.classify.message_quality.settings") as settings, \
+         patch("app.classify.message_quality.AsyncOpenAI", return_value=_patched_client(
+             '{"ticket": 1, "verdict": "maybe"}')):
+        settings.openai_api_key = "sk-test"
+        settings.openai_model = "gpt-4o-mini"
+        assert _run(match_open_ticket(_CANDIDATES, "anything")) is None
+
+
+def test_match_open_ticket_is_none_without_candidates_or_api_key():
+    with patch("app.classify.message_quality.settings") as settings:
+        settings.openai_api_key = "sk-test"
+        assert _run(match_open_ticket([], "anything")) is None
+    with patch("app.classify.message_quality.settings") as settings:
+        settings.openai_api_key = ""
+        assert _run(match_open_ticket(_CANDIDATES, "anything")) is None

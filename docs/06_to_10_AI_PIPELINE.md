@@ -43,13 +43,14 @@ before it reasons about topics at all, or each answer becomes its own ticket
 (live-tested: one citizen, three messages, tickets TKT-00016/17/18).
 
 `ensure_ticket_stub` (`app/tickets/intake.py`) therefore checks, ahead of the
-Feature 18 same-topic judgment:
+content-level duplicate judgment (Feature 18, since replaced by Feature 22's
+`match_open_ticket` — see the end of this document):
 
 ```
 message is purely intake-form data  (looks_like_intake_answer, deterministic — no LLM)
   AND the citizen has exactly ONE open ticket with no category set
       (i.e. one stub still mid-intake, whatever else is open)
-        → route to that stub, do not ask is_same_topic at all
+        → route to that stub; no LLM judgment runs at all
 ```
 
 `looks_like_intake_answer` requires a structural signal (an email address, a
@@ -555,3 +556,58 @@ HTTP/1.1 200 OK
 
   Fixed with two additions in `app/conversation/agent.py`, both best-effort (a persistence failure logs a warning and never blocks the reply the citizen is waiting on): `_persist_inbound()` writes the citizen's raw message (`authorType=user, direction=inbound`) from every turn that does NOT itself publish `complaint.ready` this turn — the rule-based path checks its own `complaint_ready` local; the assistant path tracks whether `execute_tool` was called with `"submit_complaint"` this turn via a `submitted_this_turn` flag, since that's the assistant-path equivalent signal. `_persist_outbound_ai_reply()` writes every AI reply (`authorType=ai, direction=outbound, isAiGenerated=1`) unconditionally from `_send_reply`, the single choke point both the rule-based and assistant paths already funnel through. Turns that DO publish `complaint.ready` deliberately skip the inbound persist here, since `create_ticket_from_complaint` persists that same turn's message itself (with its richer intake-augmented content) — persisting both would double the citizen's message in Conversation. Covered by tests in `services/ai-core/tests/test_conversation.py` (identity-gate turn, vague-followup turn, complaint-ready turn — regression guard against the double-persist — and both assistant-path branches).
 - **Conversation memory is keyed by the ticket, not the email thread (re-ask fix).** `ConversationAgent._conv_key()` (`app/conversation/agent.py`) keys both the Valkey conversation state and the OpenAI thread on `ticket:<ticketId>` when a ticket exists, falling back to the per-message `_thread_key` only for direct/test calls. Previously memory was keyed by `_thread_key`, which changes with every inbound Message-ID/In-Reply-To — a citizen's reply threads off *our* identity-request email, so each turn landed on a fresh key and the assistant lost the original complaint and re-asked for it. The assistant path also now stores the citizen's first message as `original_complaint` in state and injects it into the per-turn `additional_instructions` ("treat this as the complaint_summary; do not ask them to repeat it"), so the complaint survives even if the OpenAI thread is reset (e.g. state TTL). Covered by `tests/test_thread_key.py` (`_conv_key` cases).
+
+---
+
+## Cross-ticket duplicate detection (Feature 22)
+
+Routing asks ONE question per inbound message, covering every open ticket the
+citizen has:
+
+```
+match_open_ticket(candidates, new_text)   # app/classify/message_quality.py
+  -> {"index": <position|None>, "verdict": "same"|"different"|"unclear"}
+```
+
+The citizen's open complaints are presented as a numbered list and the model
+names which one this message concerns. One call regardless of how many are
+open — per-ticket calls would cost N requests per message and leave the caller
+reconciling N independent verdicts, including two saying "same".
+
+`ensure_ticket_stub` resolution order (`app/tickets/intake.py`):
+
+```
+1. in_reply_to matches a ticket's origin_message_id          (Feature 19)
+2. explicit TKT-XXXXX in the subject or body                 (Feature 15/17)
+3. the citizen's ONE in-intake stub, if this is form data    (Feature 20)
+4. match_open_ticket over every open ticket                  (Feature 22)
+     same      -> that ticket
+     unclear   -> new stub + suspectedDuplicateOf, and ASK
+     different -> fall through
+5. thread_key, if still open
+6. a fresh stub
+```
+
+Steps 1–3 are structural and cost nothing; step 4 is the only LLM call.
+
+**Same problem AND same place.** "Water logging in Madambakkam" and "water
+logging in Tambaram" are different complaints; so are "water logging" and "no
+power" in one locality. `unclear` exists for the case the boolean check could
+not express: the new message omits the detail (usually the location) the open
+one specifies, so any answer would be a guess.
+
+**`unclear` asks rather than guesses.** The stub carries
+`suspectedDuplicateOf` → `TestEventRequest` → `_render_additional_instructions`,
+which hands the model the other complaint's own words so it can ask a specific
+question. `resolve_duplicate(isDuplicate)` then acts on the citizen's answer:
+on `true` their message is appended to the ORIGINAL, this ticket takes the
+existing duplicate treatment (`isDuplicate`/`parentTicketId`/closed), and a
+`ticket.duplicate_merged` event is written to the original's audit trail; on
+`false` the suspicion is dropped and this ticket stands alone. The tool refuses
+outright if routing never raised a suspicion, so the model cannot merge tickets
+on its own initiative.
+
+**Failure direction is per-channel, on purpose.** `match_open_ticket` returning
+`None` is a network condition, not a verdict, so each channel keeps its
+long-standing default: WhatsApp appends to a sole open ticket, email creates a
+new one. An LLM outage must never start merging a citizen's separate emails.

@@ -37,6 +37,18 @@ public class TicketService {
             "resolved->closed",
             "closed->reopened");
 
+    /**
+     * Feature 21: cancelling is mandatory-note from EVERY source status, so it
+     * is checked by destination rather than listed as one pair per origin.
+     * A cancelled ticket leaves the backlog with no resolution recorded
+     * against it — the note is the only account of why, and it is exactly the
+     * action an audit will ask about.
+     */
+    private static final String CANCELLED = "cancelled";
+
+    /** Statuses a ticket cannot be cancelled FROM (already terminal). */
+    private static final Set<String> TERMINAL_STATUSES = Set.of("closed", CANCELLED);
+
     @Inject
     TicketCache cache;
 
@@ -349,7 +361,12 @@ public class TicketService {
         String agentId = str(body, "agentId");
         String transitionKey = fromStatus + "->" + toStatus;
 
-        if (MANDATORY_NOTE_TRANSITIONS.contains(transitionKey)) {
+        if (CANCELLED.equals(toStatus) && TERMINAL_STATUSES.contains(fromStatus)) {
+            throw new ApiException(422, "ALREADY_TERMINAL",
+                    "Cannot cancel a ticket that is already " + fromStatus);
+        }
+
+        if (MANDATORY_NOTE_TRANSITIONS.contains(transitionKey) || CANCELLED.equals(toStatus)) {
             if (noteContent == null || noteContent.trim().length() < 20) {
                 throw new ApiException(422, "NOTE_TOO_SHORT",
                         "Note must be at least 20 characters for " + transitionKey + " transition");
@@ -376,6 +393,13 @@ public class TicketService {
             t.resolvedAt = SqliteTime.now();
         } else if ("closed".equals(toStatus)) {
             t.closedAt = SqliteTime.now();
+        } else if (CANCELLED.equals(toStatus)) {
+            // Terminal like closed, so closed_at is stamped (queue/SLA queries
+            // already key off it) — but resolved_at is deliberately left NULL.
+            // A cancelled ticket was never resolved, and letting it count as
+            // one would quietly inflate resolution rate and skew MTTR.
+            t.closedAt = SqliteTime.now();
+            t.resolvedAt = null;
         } else if ("reopened".equals(toStatus)) {
             // Clear resolution, bump counter, record who reopened — assignee preserved.
             t.resolution = null;
@@ -546,6 +570,40 @@ public class TicketService {
                 .getSingleResult();
         int next = (max == null ? 0 : ((Number) max).intValue()) + 1;
         return String.format("TKT-%05d", next);
+    }
+
+    /** Allowed `actor_type` values — mirrors the ticket_events CHECK constraint. */
+    private static final Set<String> EVENT_ACTOR_TYPES = Set.of("system", "ai", "agent");
+
+    /**
+     * Append an audit-trail entry supplied by another service (Feature 22).
+     * Validated here rather than trusted: a bad `actorType` would otherwise
+     * fail deep in the CHECK constraint as an opaque 500.
+     */
+    @Transactional
+    public Map<String, Object> addEvent(String id, Map<String, Object> body) {
+        Ticket t = Ticket.findById(id);
+        if (t == null) {
+            throw new ApiException(404, "NOT_FOUND", "ticket not found: " + id);
+        }
+        String eventType = str(body, "eventType");
+        if (eventType == null || eventType.isBlank()) {
+            throw new ApiException(422, "EVENT_TYPE_REQUIRED", "eventType is required");
+        }
+        String actorType = strOr(body, "actorType", "system");
+        if (!EVENT_ACTOR_TYPES.contains(actorType)) {
+            throw new ApiException(422, "INVALID_ACTOR_TYPE",
+                    "actorType must be one of " + EVENT_ACTOR_TYPES);
+        }
+        TicketEvent event = new TicketEvent();
+        event.id = UUID.randomUUID().toString();
+        event.tenantId = t.tenantId;
+        event.ticketId = t.id;
+        event.eventType = eventType;
+        event.actorType = actorType;
+        event.actorId = str(body, "actorId");
+        event.persistAndFlush();
+        return event.toMap();
     }
 
     private void recordEvent(String tenantId, String ticketId, String type, String actorType, String actorId) {

@@ -238,6 +238,55 @@ function TicketQueue({ role }: { role: string }) {
 
   const CHANNEL_ICON: Record<string, typeof Mail> = { email: Mail, whatsapp: MessageCircle };
 
+  /**
+   * Feature 21: CSV export of the CURRENT view. Deliberately reuses the same
+   * scope/assignee filters `load` sends (minus paging and sort, which don't
+   * apply to a full export) so "Export" always means "everything matching what
+   * I'm looking at", never "everything in the tenant".
+   *
+   * Fetched rather than linked so an RBAC rejection can be reported instead of
+   * navigating the tab to a JSON error page.
+   */
+  const [exporting, setExporting] = useState(false);
+  const [exportMsg, setExportMsg] = useState("");
+
+  async function exportCsv() {
+    setExporting(true);
+    setExportMsg("");
+    const params = new URLSearchParams();
+    if (role === "agent") {
+      params.set("assignedTo", "me");
+    } else if (showToggle) {
+      params.set("identityStatus", scope === "confirmed" ? "confirmed" : "pending,anonymous");
+    }
+    try {
+      const resp = await fetch(`/api/tickets/export?${params.toString()}`);
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        setExportMsg(data?.error?.message ?? "Export failed.");
+        return;
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `uniserve-tickets-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setExportMsg(
+        resp.headers.get("X-Export-Truncated")
+          ? `Exported ${resp.headers.get("X-Export-Row-Count")} rows (capped — narrow the filters for the rest).`
+          : "Export downloaded.",
+      );
+    } catch {
+      setExportMsg("Export failed.");
+    } finally {
+      setExporting(false);
+    }
+  }
+
   return (
     <div className="space-y-4">
       {showToggle && (
@@ -286,6 +335,17 @@ function TicketQueue({ role }: { role: string }) {
         </div>
 
         <div className="flex items-center gap-2 text-sm">
+          {exportMsg && <span className="text-xs text-slate-500">{exportMsg}</span>}
+          {showToggle && (
+            <button
+              onClick={exportCsv}
+              disabled={exporting}
+              title="Download every ticket matching the current view as CSV"
+              className="rounded border px-3 py-1 text-slate-600 hover:bg-slate-100 disabled:opacity-50 active:scale-[0.97]"
+            >
+              {exporting ? "Exporting…" : "Export CSV"}
+            </button>
+          )}
           <button
             onClick={() => load(true)}
             disabled={refreshing}

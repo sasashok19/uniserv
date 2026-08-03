@@ -58,6 +58,25 @@ _SAME_TOPIC_SYSTEM_PROMPT = (
 )
 
 
+_MATCH_OPEN_TICKET_SYSTEM_PROMPT = (
+    "You decide whether a citizen's NEW message to a public-utility complaint desk continues one "
+    "of the complaints they already have open, describes a different one, or whether you cannot "
+    "tell.\n"
+    "Two complaints are the SAME only if BOTH the problem AND the place match. Treat these as "
+    "DIFFERENT: the same problem in another locality; a different problem in the same locality.\n"
+    "Answer \"unclear\" when the new message could plausibly be either — typically because it "
+    "omits the detail (usually the location) that the existing complaint specifies, so you would "
+    "be guessing. If the existing complaint does not specify that detail either, and the problem "
+    "matches, that is \"same\", not unclear.\n"
+    "A vague follow-up with no new subject matter (\"any update?\", \"still not fixed\", \"please "
+    "help\") continues the complaint it most plausibly refers to.\n"
+    "You are given the citizen's open complaints, numbered. Reply with the number of the one this "
+    "message concerns, or null if it concerns none of them.\n"
+    "Respond with STRICT JSON only, no prose: "
+    '{"ticket": <number|null>, "verdict": "same"|"different"|"unclear", "reason": "<short reason>"}'
+)
+
+
 def available() -> bool:
     """Whether either assessment can be attempted at all — only an API key is
     required (a plain completion, not the Assistants gateway)."""
@@ -129,4 +148,59 @@ async def is_same_topic(existing_text: str, existing_category: Optional[str], ne
         return same_topic
     except Exception as exc:  # noqa: BLE001 - best-effort; caller assumes same topic
         logger.warning("same-topic assessment failed, assuming same topic: %s", exc)
+        return None
+
+
+async def match_open_ticket(candidates: list[dict], new_text: str) -> Optional[dict]:
+    """Which of the citizen's open complaints (if any) does `new_text` continue?
+
+    `candidates` is ``[{"ticketNumber": ..., "text": ..., "category": ...}]``
+    in the order they should be presented. Returns
+    ``{"index": Optional[int], "verdict": "same"|"different"|"unclear",
+    "reason": str}`` where `index` is a position in `candidates`, or ``None``
+    on any failure/unavailability (callers fall back to their channel's own
+    safe default).
+
+    Deliberately ONE call covering every open ticket rather than one call per
+    ticket (Feature 22). Per-ticket calls cost N requests per inbound message
+    and then leave the caller to reconcile N independent verdicts — including
+    the awkward case where two of them say "same". Asking the model to pick
+    from a numbered list costs one request no matter how many tickets are
+    open, and makes the choice the model's rather than a tie-break rule's.
+    """
+    if not candidates or not available():
+        return None
+    try:
+        client = AsyncOpenAI(api_key=settings.openai_api_key, timeout=_REQUEST_TIMEOUT_SECONDS)
+        listing = "\n\n".join(
+            f"{i + 1}. [{c.get('ticketNumber') or 'unnumbered'}]"
+            f" (category: {c.get('category') or 'uncategorised'})\n{c.get('text') or ''}"
+            for i, c in enumerate(candidates)
+        )
+        user_message = f"THE CITIZEN'S OPEN COMPLAINTS:\n{listing}\n\nNEW MESSAGE:\n{new_text}"
+        response = await client.chat.completions.create(
+            model=settings.openai_model,
+            temperature=0,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": _MATCH_OPEN_TICKET_SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+        )
+        parsed = json.loads(response.choices[0].message.content or "{}")
+        verdict = parsed.get("verdict")
+        if verdict not in ("same", "different", "unclear"):
+            logger.warning("open-ticket match returned an unusable verdict=%r, ignoring", verdict)
+            return None
+        index = parsed.get("ticket")
+        # The model answers in 1-based positions from the listing above; anything
+        # outside it (a hallucinated number, a ticket id, null) means "none".
+        if isinstance(index, bool) or not isinstance(index, int) or not 1 <= index <= len(candidates):
+            index = None
+        else:
+            index -= 1
+        logger.info("open-ticket match verdict=%s index=%s reason=%s", verdict, index, parsed.get("reason"))
+        return {"index": index, "verdict": verdict, "reason": parsed.get("reason")}
+    except Exception as exc:  # noqa: BLE001 - best-effort, see docstring
+        logger.warning("open-ticket match failed, falling back to channel default: %s", exc)
         return None

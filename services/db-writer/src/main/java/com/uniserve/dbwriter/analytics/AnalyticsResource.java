@@ -97,6 +97,7 @@ public class AnalyticsResource {
                   COUNT(*) AS total
                 FROM tickets
                 WHERE tenant_id = ?1 AND created_at >= datetime('now', ?2) AND archived_at IS NULL
+                  AND status <> 'cancelled'
                 """ + f.sql())
                 .setParameter(1, tenantId)
                 .setParameter(2, modifier(period));
