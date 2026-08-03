@@ -92,12 +92,15 @@ projection, `LIST_COLUMNS`). Email adapter threading, cross-channel merge,
 dashboard, RBAC, status transitions and Phase 2 stubs untouched. All 204
 pre-existing tests still pass.
 
-## ACTION REQUIRED AFTER DEPLOY
-`ASSISTANT_INSTRUCTIONS` changed, so from `services/ai-core` run once:
-`python scripts/update_assistant.py`
-against the live `OPENAI_ASSISTANT_ID`. Without it the deployed Assistant
-keeps the old instructions (the code-side gates still work; only the model's
-phrasing/behaviour guidance is stale).
+## Assistant sync — DONE (2026-08-03)
+`scripts/update_assistant.py` was run against the live
+`asst_FX75qlIQVJohreLhh2ugyFKm` ("UniServe Complaint Intake Agent",
+gpt-4o-mini). Verified by re-fetching it: instructions byte-identical to
+`ASSISTANT_INSTRUCTIONS` (6149 chars), tools = confirm_identity,
+submit_complaint, check_complaint_status. Re-run this script whenever
+`app/conversation/tools.py` changes — the deployed Assistant object does not
+pick changes up on its own. `tests/test_tools.py` guards the Feature 20
+clauses against a silent revert.
 
 ## Test command
 `cd services/ai-core && ./.venv/Scripts/python.exe -m pytest -q`
