@@ -168,3 +168,10 @@ this is not ai-core-only.
 - TKT-00019/20/21 already exist; none of this merges them retroactively.
 - Suspected-duplicate flag has no dashboard affordance yet: if the citizen
   never answers the question, an agent cannot confirm/dismiss it in the UI.
+
+## Assistant sync for Feature 22 — DONE
+`scripts/update_assistant.py` re-run against `asst_FX75qlIQVJohreLhh2ugyFKm`
+and verified by re-fetching: 4 tools registered (confirm_identity,
+submit_complaint, check_complaint_status, **resolve_duplicate**) and
+instructions byte-identical to the repo (7018 chars). `tests/test_tools.py`
+guards the duplicate clauses against a silent revert.
