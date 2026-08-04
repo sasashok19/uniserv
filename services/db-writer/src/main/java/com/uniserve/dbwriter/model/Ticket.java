@@ -87,6 +87,14 @@ public class Ticket extends PanacheEntityBase {
     @Column(name = "service_id")
     public String serviceId;
 
+    /** The citizen's chief complaint in one line (Feature 23) — derived by
+     * ai-core from the first inbound message and re-derived as the citizen
+     * replies. Written here rather than left implicit in the message timeline
+     * so the queue and the ticket header can both show what the ticket is
+     * about without reading the conversation. */
+    @Column(name = "chief_complaint")
+    public String chiefComplaint;
+
     @Column(name = "resolution")
     public String resolution;
 
@@ -159,6 +167,7 @@ public class Ticket extends PanacheEntityBase {
         m.put("is_duplicate", isDuplicate);
         m.put("parent_ticket_id", parentTicketId);
         m.put("service_id", serviceId);
+        m.put("chief_complaint", chiefComplaint);
         m.put("resolution", resolution);
         m.put("sla_due_at", slaDueAt);
         m.put("resolved_at", resolvedAt);

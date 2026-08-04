@@ -12,6 +12,7 @@ from typing import Optional
 from app.classify.classifier import classify
 from app.dedup.service import check_duplicate
 from app.identity.db_client import DbWriterClient
+from app.tickets import chief_complaint
 from app.priority.engine import ScoreRequest, score
 from app.priority.llm_scorer import rubric_available, score_with_rubric
 
@@ -117,6 +118,10 @@ async def create_ticket_from_complaint(
             "authorType": "user",
             "content": message_content,
         }, trace_id=trace_id)
+        # Feature 23: a continuation REFINES the chief complaint rather than
+        # replacing it — this message is more of the same complaint, so it may
+        # add the location or duration the opening message left out.
+        await chief_complaint.refresh(db, existing_ticket_id, complaint_summary, trace_id=trace_id)
         # This thread's own stub is a duplicate of a DIFFERENT ticket — link
         # it rather than leaving it stranded with identityStatus=pending
         # forever (which would otherwise never leave the Unconfirmed queue).
@@ -155,6 +160,16 @@ async def create_ticket_from_complaint(
     }
     if intake.get("serviceId"):
         ticket_fields["serviceId"] = intake["serviceId"]
+    # Feature 23: the complaint text extracted here is the best statement of
+    # the citizen's problem the system will ever have — richer than the raw
+    # arrival message the stub's chief complaint was first derived from — so
+    # the filing turn refines it. Derived (not `refresh`ed) because this path
+    # is already writing the ticket row: folding it into `ticket_fields` costs
+    # nothing, where a refresh would add a redundant read and a second PATCH.
+    chief_line = await chief_complaint.derive(
+        (existing_stub or {}).get("chief_complaint"), complaint_summary, trace_id=trace_id)
+    if chief_line:
+        ticket_fields["chiefComplaint"] = chief_line
 
     if stub_ticket_id:
         ticket = await db.update_ticket(stub_ticket_id, ticket_fields, trace_id=trace_id)

@@ -71,7 +71,13 @@ SUBMIT_COMPLAINT_TOOL = {
             "properties": {
                 "complaint_summary": {
                     "type": "string",
-                    "description": "1-3 sentence summary of what happened.",
+                    "description": (
+                        "1-3 sentence summary of what happened, self-contained: it must include "
+                        "every detail about the PROBLEM the citizen has given anywhere in this "
+                        "conversation (what, where, since when, how many affected, any meter/bill "
+                        "reference), not just their first wording of it. The ticket's headline "
+                        "complaint is derived from this text."
+                    ),
                 },
                 "category_hint": {
                     "type": "string",
@@ -202,6 +208,16 @@ It is never a new complaint and never a complaint_summary: it belongs to the \
 complaint already in progress in this conversation. Record the values via \
 confirm_identity and, once nothing is missing, call submit_complaint with the \
 ORIGINAL complaint from earlier in this thread as the complaint_summary.
+- When the citizen HAS added something about the problem itself since they \
+first described it — where it is, how long it has been happening, how many \
+people or houses are affected, a meter or bill number, or a correction of \
+something they said earlier — your complaint_summary must state the original \
+complaint AND that detail together, as one self-contained description. Do not \
+send the first wording alone once you know more, and do not send only the new \
+detail: "No power" and "since Tuesday, whole of 2nd Street" are each useless \
+on their own. This summary is what the ticket's headline complaint is built \
+from, so it is the one place every detail the citizen has given about the \
+problem has to end up.
 - If intake details arrive and NO complaint has been described in this thread \
 yet, do not invent one from them — never submit a name, an email address or an \
 ID as the complaint_summary. Thank them and ask what problem they are \

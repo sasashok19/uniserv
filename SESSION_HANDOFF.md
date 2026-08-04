@@ -222,3 +222,99 @@ byte-identical to the version already pushed to
 
 ## Deployment for 22b
 ai-core, db-writer, api-gateway, dashboard — all four again.
+
+---
+
+# Session handoff — Feature 23, 2026-08-04
+
+## Task (user's words)
+1. "Current version of csv only have the ticket search view exported. I need
+   all field at the ticket details view to be included, conversation history,
+   audit, internal notes."
+2. "I do not have a Chief / Primary complaint / concern field in ticket details
+   and ticket queue screen, I need one field to hold the chief complaint. This
+   should be based out of the first email or watsapp which triggered the ticket.
+   Also this needs to get updated as we get response back from customer via
+   conversations. Include that field in all services."
+3. "As usual ensure all docs updated, test case updated, executed and commit
+   pushed. Also ensure the assistance reflects the latest in Open AI."
+
+## Status: implemented, all suites green, docs updated
+ai-core **286/286**, api-gateway **64/64**, db-writer **8/8**, dashboard
+`tsc --noEmit` + `next lint` clean.
+
+## 1. Chief complaint (`tickets.chief_complaint`, migration V12)
+One line (≤140 chars) per ticket. Derived by ai-core only — no agent edits it,
+no other service writes it.
+
+- **db-writer**: `V12__ticket_chief_complaint.sql`, `Ticket.chiefComplaint` +
+  `toMap`, `TicketService` create/update/`LIST_COLUMNS`/`SORT_COLUMNS`
+  (`sortBy=chiefComplaint`).
+- **ai-core**: new `app/tickets/chief_complaint.py` —
+  `derive(existing, new_text)` (pure), `refresh(db, id, text)` (read → derive →
+  write only on change), `condense(text)` (deterministic fallback). Call sites:
+  `ConversationAgent._persist_inbound` (every inbound turn, incl. the first
+  message on a stub), `create_ticket_from_complaint` both paths, and the
+  confirmed-duplicate merge in `_tool_resolve_duplicate`.
+- **api-gateway**: `chiefComplaint` in the ticket-detail body; queue rows carry
+  `chief_complaint` via `LIST_COLUMNS`.
+- **dashboard**: subject-line block under the `TKT-…` heading on the detail
+  page; sortable **Chief complaint** column right after Ticket in the queue
+  (truncated, full text on hover).
+
+**Two invariants** (both from earlier live failures):
+- an intake-form answer is never a complaint — reuses Feature 20's
+  `looks_like_intake_answer`, or most tickets' chief complaint would end up
+  being the citizen's own phone number (intake answers are usually a WhatsApp
+  stub's 2nd-4th messages);
+- a worse value never replaces a better one — `condense` supplies only the
+  FIRST value, so an LLM outage can't overwrite a derived line.
+
+"No change" is the model's own answer (`{"chief_complaint", "changed"}`) rather
+than a string diff, so an equivalent rewording doesn't count as a change.
+
+## 2. Full-detail CSV export
+`GET /api/v1/tickets/export.csv` now defaults to full detail: every
+ticket-detail field (chief complaint, citizen name/email/phone, resolution,
+identity/origin ids) **plus** `conversation`, `internal_notes` and
+`audit_trail` as one multi-line cell each. Still **one row per ticket** — the
+file stays pivotable; within a cell each entry is folded to one line so the
+cell's newlines only mean "next entry".
+
+- `?detail=summary` returns the old flat shape. Full detail costs 3 extra
+  db-writer calls per ticket, so it caps at **2,000 rows** vs the flat
+  50,000; reported via `X-Export-Detail` / `X-Export-Row-Cap`.
+- Transcripts cut at 30,000 chars on an entry boundary with a visible marker
+  (Excel silently drops past 32,767).
+- `EXPORT_COLUMNS` is a strict prefix of `fullColumns()`, asserted by a test, so
+  an index-based consumer isn't broken.
+
+## 3. OpenAI Assistant
+`app/conversation/tools.py` DID change this time, so a sync was required:
+`submit_complaint`'s `complaint_summary` description and
+`ASSISTANT_INSTRUCTIONS` now require a **self-contained** summary — the original
+complaint plus every detail the citizen has since added about the problem
+("No power" and "since Tuesday, whole of 2nd Street" are each useless alone),
+because that text is what the chief complaint is derived from.
+`scripts/update_assistant.py` run against `asst_FX75qlIQVJohreLhh2ugyFKm`.
+
+## Testing note worth keeping
+`services/ai-core/tests/conftest.py` is new: an autouse fixture blanks
+`settings.openai_api_key` for every test. `.env.local` holds a REAL key on this
+machine, and `chief_complaint`/`message_quality`/`llm_scorer` all gate their LLM
+call on "is a key set?", so without it `pytest` would quietly hit the network.
+Tests that want the LLM path still patch `settings` in their own module.
+
+Also: db-writer's `@QuarkusTest` binds port 8081 — stop the local dev
+db-writer or pass `-Dquarkus.http.test-port=<free>`, or you get a misleading
+"Failed to start quarkus" error that looks like a code failure.
+
+## Docs updated
+README (`Chief complaint` section + contents entry, data-model row, Feature 21
+export section rewritten, tickets API reference, Testing), `docs/05_TICKET_SCHEMA.md`
+(later-migrations table + `chief_complaint` subsection), `docs/06_to_10_AI_PIPELINE.md`
+(derivation section with the call-site table), `docs/12_AGENT_DASHBOARD.md`
+(queue column/header + full-detail export), `docs/04_DB_WRITER_SERVICE.md`.
+
+## Deployment for 23
+All four again: db-writer (V12 migration), ai-core, api-gateway, dashboard.

@@ -336,3 +336,12 @@ HTTP/1.1 503 Service Unavailable
   assignee preserved), concurrent GETs during a write (SQLite WAL), notes/events/
   messages sub-resources, identity create/find, agent create, and schema
   version/tables all pass against the real Panache-backed database.
+- **`chief_complaint` (Feature 23, migration V12).** Nullable `TEXT` on
+  `tickets`, accepted on `POST /api/v1/db/tickets` and `PATCH
+  /api/v1/db/tickets/{id}` as `chiefComplaint` (camelCase in, `chief_complaint`
+  out, like every other column), returned by `Ticket.toMap()`, included in the
+  queue list's `LIST_COLUMNS`, and sortable via `sortBy=chiefComplaint`
+  (whitelisted in `SORT_COLUMNS`, never interpolated raw). db-writer stores it
+  and nothing more — it is derived exclusively by ai-core
+  (`app/tickets/chief_complaint.py`); there is no validation or truncation here,
+  since the cap belongs with the deriver that knows what the field is for.

@@ -611,3 +611,48 @@ on its own initiative.
 `None` is a network condition, not a verdict, so each channel keeps its
 long-standing default: WhatsApp appends to a sole open ticket, email creates a
 new one. An LLM outage must never start merging a citizen's separate emails.
+
+---
+
+## Chief complaint derivation (Feature 23)
+
+`app/tickets/chief_complaint.py` maintains `tickets.chief_complaint` — one line
+(≤140 chars) saying what the citizen actually wants. A fourth LLM-assisted
+judgment alongside `assess_coherence`, `is_same_topic` and `match_open_ticket`,
+and it follows the same contract: a plain chat completion (not the Assistants
+gateway), best-effort, never able to block a routing decision or a reply.
+
+```
+derive(existing, new_text)   -> Optional[str]   # pure; None means "keep existing"
+refresh(db, ticket_id, text) -> Optional[str]   # read, derive, write only on a change
+condense(text)               -> Optional[str]   # deterministic fallback, no LLM
+```
+
+The prompt returns `{"chief_complaint": …, "changed": <bool>}` — asking the
+model whether it revised the line is cheaper and more accurate than diffing
+strings, since an equivalent rewording is not a change.
+
+**Call sites** (every point a citizen message reaches a ticket):
+
+| Site | Function | Why |
+| --- | --- | --- |
+| `ConversationAgent._persist_inbound` | `refresh` | Every inbound turn, including the very first message on a stub — this is what gives a ticket a chief complaint before its complaint has even been filed |
+| `create_ticket_from_complaint`, new-ticket path | `derive` | The extracted `complaint_summary` is the richest statement of the problem available; folded into the ticket write already happening rather than costing a second PATCH |
+| `create_ticket_from_complaint`, append path | `refresh` | A continuation may add the location or duration the opening message omitted |
+| `_tool_resolve_duplicate`, confirmed merge | `refresh` | The merge moves the message onto the original ticket, so it moves what that message tells us with it |
+
+**Invariants**, both learned from earlier live failures:
+
+- **An intake answer is not a complaint.** Reuses Feature 20's structural
+  `looks_like_intake_answer`, because intake answers are typically a WhatsApp
+  stub's 2nd–4th messages — without the guard, most tickets' chief complaint
+  would be the citizen's own phone number or email address.
+- **A worse value never replaces a better one.** `condense` supplies only the
+  FIRST value; once an LLM-derived line exists, an outage leaves it alone rather
+  than overwriting it with a raw truncation of whatever just arrived.
+
+**Assistant-side dependency.** The field's quality tracks
+`submit_complaint`'s `complaint_summary`, so `ASSISTANT_INSTRUCTIONS` requires
+that summary to be self-contained — the original complaint plus every detail the
+citizen has since added about the problem. Needs
+`scripts/update_assistant.py` to reach the live Assistant.

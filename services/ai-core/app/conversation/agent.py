@@ -36,6 +36,7 @@ from app.events.publisher import BasePublisher
 from app.identity.db_client import DbWriterClient
 from app.identity.resolver import ChannelIdentityIn as ResolverChannelIdentityIn
 from app.identity.resolver import IdentityResolver, ResolveRequest
+from app.tickets import chief_complaint
 from app.tickets.intake import update_ticket_identity
 
 logger = logging.getLogger("ai-core")
@@ -857,6 +858,10 @@ class ConversationAgent:
             "authorType": "user",
             "content": req.rawText,
         }, trace_id=req.traceId)
+        # The citizen has just confirmed this text belongs to the ORIGINAL
+        # complaint, so it refines that ticket's chief complaint — the merge
+        # moves the message across, and this moves what it tells us with it.
+        await chief_complaint.refresh(self._db, parent_id, req.rawText, trace_id=req.traceId)
         await self._db.update_ticket(req.ticketId, {
             "isDuplicate": 1,
             "parentTicketId": parent_id,
@@ -1062,6 +1067,15 @@ class ConversationAgent:
         except Exception:  # noqa: BLE001 - Conversation logging is best-effort
             logger.warning("failed to persist inbound message traceId=%s ticketId=%s",
                             req.traceId, req.ticketId)
+        # Feature 23: every citizen message the dashboard shows also updates
+        # the ticket's chief complaint. Placed here, at the one point every
+        # inbound turn passes through, rather than at each of the callers —
+        # the FIRST message that triggered the ticket lands here too (a stub
+        # is created before this runs), which is what gives a ticket a chief
+        # complaint before its complaint has even been filed. It is its own
+        # best-effort call, deliberately outside the try above, so a failure
+        # to persist the message does not skip the update or vice versa.
+        await chief_complaint.refresh(self._db, req.ticketId, content, trace_id=req.traceId)
 
     async def _persist_outbound_ai_reply(self, req: TestEventRequest, text: str) -> None:
         """Record the AI's own reply on the ticket's Conversation timeline —

@@ -26,6 +26,7 @@ resolution workflow and full audit trail.
 - [Queue separation & ticket lifecycle](#queue-separation--ticket-lifecycle)
 - [Citizen-facing notifications](#citizen-facing-notifications)
 - [Subject-line ticket threading & dedup](#subject-line-ticket-threading--dedup)
+- [Chief complaint](#chief-complaint)
 - [Configurable per-channel intake fields](#configurable-per-channel-intake-fields)
 - [Configurable priority rubric & general settings](#configurable-priority-rubric--general-settings)
 - [HTTP API reference](#http-api-reference)
@@ -559,7 +560,7 @@ See [05_TICKET_SCHEMA](docs/05_TICKET_SCHEMA.md) for full DDL.
 | `tenants` | `id`, `name`, `slug` (unique), `deployment_mode`, `llm_provider`, `config_json` |
 | `agents` | `id`, `tenant_id`, `name`, `email` (unique/tenant), `password_hash`, `role` (admin\|lead\|agent), `is_active` |
 | `identity_profiles` | `id`, `tenant_id`, `master_id` (unique), `name`/`email`/`phone`, `channel_ids_json`, `is_anonymous`, `anon_ref_id` (e.g. `ANON-7X3K`), `merged_into` |
-| `tickets` | `id`, `tenant_id`, `ticket_number` (e.g. `TKT-00142`), `identity_id`, `identity_status` (pending\|anonymous\|confirmed), `assigned_to`, `status` (open\|assigned\|in_progress\|pending_customer\|resolved\|closed\|reopened — `pending_customer` added by `V9`, a table rebuild since SQLite can't alter a CHECK), `category`/`subcategory`, `priority_score` (0–10), `priority_label`, `sentiment_score`, `channel_origin`, `thread_id`, `archived_at`, `is_duplicate`, `parent_ticket_id`, `service_id`, `sla_due_at` |
+| `tickets` | `id`, `tenant_id`, `ticket_number` (e.g. `TKT-00142`), `identity_id`, `identity_status` (pending\|anonymous\|confirmed), `assigned_to`, `status` (open\|assigned\|in_progress\|pending_customer\|resolved\|closed\|reopened — `pending_customer` added by `V9`, a table rebuild since SQLite can't alter a CHECK), `chief_complaint` (`V12`, see [Chief complaint](#chief-complaint)), `category`/`subcategory`, `priority_score` (0–10), `priority_label`, `sentiment_score`, `channel_origin`, `thread_id`, `archived_at`, `is_duplicate`, `parent_ticket_id`, `service_id`, `sla_due_at` |
 | `ticket_messages` | `channel`, `direction`, `author_type` (ai\|agent\|user\|system), `content`, `media_urls_json`, `is_ai_generated` |
 | `ticket_notes` | `content`, `is_mandatory`, `transition_from`/`transition_to` |
 | `ticket_events` | `event_type`, `actor_type`, `actor_id`, `meta_json` (full audit trail) |
@@ -1103,17 +1104,48 @@ always requires a ≥20-character note, and the dashboard offers it only when th
 server says the role may do it (`canCancel`, decided in the gateway rather than
 from a role string in the browser).
 
-**Ticket CSV export (Feature 21).** `GET /api/v1/tickets/export.csv`, honouring
-exactly the same filters as the queue so "export" always means "what I'm
-looking at". The `ticket.export` permission (admin/lead) had existed in
-`RbacPolicy` since Feature 11 with no endpoint behind it. Paged internally at
-db-writer's own maximum (100/request) rather than one unbounded query — the
-queue query LEFT JOINs the identity table, so memory and latency stay flat
-regardless of tenant size — and capped at 50,000 rows, with the cap reported in
-`X-Export-Truncated` rather than silently stopping short. Cells are RFC 4180
-escaped **and** formula-injection neutralised: these columns hold text the
-citizen controls (their name, a complaint resolution), and a value starting
-`=`, `+`, `-` or `@` executes when the file is opened in Excel or Sheets.
+**Ticket CSV export (Feature 21, widened in Feature 23).**
+`GET /api/v1/tickets/export.csv`, honouring exactly the same filters as the
+queue so "export" always means "what I'm looking at". The `ticket.export`
+permission (admin/lead) had existed in `RbacPolicy` since Feature 11 with no
+endpoint behind it. Paged internally at db-writer's own maximum (100/request)
+rather than one unbounded query — the queue query LEFT JOINs the identity
+table, so memory and latency stay flat regardless of tenant size — with the row
+cap reported in `X-Export-Truncated`/`X-Export-Row-Cap` rather than silently
+stopping short. Cells are RFC 4180 escaped **and** formula-injection
+neutralised: these columns hold text the citizen controls (their name, a
+complaint resolution), and a value starting `=`, `+`, `-` or `@` executes when
+the file is opened in Excel or Sheets.
+
+Feature 23 fixed what the export actually contained. It was the queue, column
+for column — so the export of a *complaint-handling* system contained no
+complaint: not the citizen's name, not what they asked for, not a word either
+side had said, not who did what to the ticket. Every field the ticket-detail
+page shows is now exported too, including the chief complaint, the citizen's
+name/email/phone, and all three timelines:
+
+| Column | Contents |
+| --- | --- |
+| `conversation` | Every message both ways — `[timestamp] Received · citizen: …` / `[timestamp] Sent · ai: …` |
+| `internal_notes` | Every internal note, with the author and the transition it justified — `[timestamp] Priya (in_progress→resolved): …` |
+| `audit_trail` | Every audit event with its actor — `[timestamp] status.resolved: Admin User` |
+
+Design decisions worth knowing:
+
+- **Still one row per ticket**, not a row per message. The file stays a table
+  that sorts, filters and pivots on ticket attributes — which is what an export
+  is for — and each timeline rides along as one multi-line cell. Within a cell,
+  each entry is folded to a single line, so the cell's own newlines only ever
+  mean "next entry" and a 40-message thread reads as a list rather than a wall.
+- **`?detail=summary` returns the original flat shape.** The transcripts cost
+  three extra db-writer calls per ticket, so the full export is capped at
+  **2,000 rows** against the flat export's 50,000. The dashboard button sends no
+  `detail` param (full is the default) and reports which shape came back via
+  `X-Export-Detail`; a tenant-wide monthly pull wants `summary`.
+- **Transcripts are cut at 30,000 characters**, on an entry boundary, with a
+  visible `[… truncated: …]` marker. Excel's own limit is 32,767 characters per
+  cell and it drops the overflow *silently* — a visible cut beats an invisible
+  one.
 
 **Duplicate "complaint registered" acknowledgement (also live-tested).**
 Independently of the above, the SAME conversation surfaced a second bug:
@@ -1133,6 +1165,73 @@ guessed at mid-conversation. **Operational note:** this is an
 `ASSISTANT_INSTRUCTIONS` change, so it needs `scripts/update_assistant.py`
 run once against the live `OPENAI_ASSISTANT_ID` to take effect (see the
 Feature 17 status-inquiry note above for why).
+
+---
+
+## Chief complaint
+
+**What it is (Feature 23).** One line per ticket saying what the citizen
+actually wants — `tickets.chief_complaint`, migration **V12**, capped at 140
+characters. It is the ticket's subject line: shown under the ticket number on
+the detail page, as a sortable column immediately after the ticket number in the
+queue, and in the CSV export.
+
+**The gap it closes.** The queue could show a ticket's number, status, priority,
+category, channel and assignee — everything *about* a complaint and nothing *of*
+it. The only place the complaint itself existed was the free text of the
+ticket's first inbound message, so triage meant opening tickets one at a time to
+find out what each was about.
+
+**Where it comes from.** ai-core owns it end to end
+(`services/ai-core/app/tickets/chief_complaint.py`); no agent edits it and
+neither the gateway nor the dashboard writes it.
+
+1. **From the message that triggered the ticket.** A stub is created on arrival,
+   and the first inbound message gives it its first chief complaint — before the
+   complaint has even been filed.
+2. **Re-derived as the citizen replies.** An opening message is usually the least
+   informative thing a citizen will say ("no power"); the location, the duration
+   and the "it's the whole street, not just my house" arrive in later replies. A
+   line frozen at message one would be stale by the time an agent read it.
+
+Written at every point a citizen message reaches a ticket:
+`ConversationAgent._persist_inbound` (every inbound turn), complaint filing and
+continuation in `app/tickets/service.py`, and a confirmed duplicate merge (the
+merge moves the message onto the original ticket, so it moves what that message
+tells us with it). The filing path uses the pure `derive(...)` and folds the
+result into the ticket write it was already making; the others use
+`refresh(...)`, which reads, derives and writes back only on an actual change.
+
+**Best-effort, like every LLM-assisted decision here.** A plain chat completion
+(not the Assistants gateway), and any failure falls back to a deterministic
+condensation of the citizen's own opening sentence. It is a display and triage
+aid — it must never be able to block a ticket, a routing decision, or a reply a
+citizen is waiting on.
+
+**Three rules that keep it trustworthy:**
+
+- **An intake-form answer is not a complaint.** "Nithya",
+  "nithya@gmail.com", "56784567" are answers to questions *we* asked, and they
+  are typically a WhatsApp stub's 2nd, 3rd and 4th messages — so without a guard
+  the chief complaint of most tickets would end up being the citizen's own phone
+  number. Reuses Feature 20's deterministic `looks_like_intake_answer`.
+- **A worse value never replaces a better one.** Once the LLM has written a line,
+  an LLM outage does not overwrite it with a raw truncation — the deterministic
+  path only ever supplies the *first* value.
+- **"No change" is the model's answer, not a string diff.** The prompt asks for
+  `{"chief_complaint": …, "changed": bool}`, so a follow-up that adds nothing
+  about the problem ("any update?", "still not fixed", "thanks") leaves the line
+  exactly as it was — including when the model would have reworded it
+  equivalently.
+
+**Assistant-side counterpart.** The quality of this field depends on
+`submit_complaint`'s `complaint_summary`, so `ASSISTANT_INSTRUCTIONS` now
+requires that summary to be self-contained: the original complaint **and** every
+detail the citizen has since added about the problem, as one description —
+"No power" and "since Tuesday, whole of 2nd Street" are each useless alone.
+**Operational note:** that is an `ASSISTANT_INSTRUCTIONS` change, so it needs
+`scripts/update_assistant.py` run once against the live `OPENAI_ASSISTANT_ID`
+to take effect.
 
 ---
 
@@ -1356,13 +1455,21 @@ own tickets and `/agents` performance are lead/admin only via
   `?identityStatus=pending,anonymous` for the Unconfirmed queue). Also accepts
   `?page=` (1-based), `?pageSize=` (default 30, max 100), `?sortBy=` (one of
   `ticketNumber`/`createdAt`/`status`/`category`/`priorityScore`/`priorityLabel`/
-  `channel`/`identityStatus`/`citizenName`/`citizenEmail`/`citizenPhone`) and
+  `channel`/`identityStatus`/`chiefComplaint`/`citizenName`/`citizenEmail`/
+  `citizenPhone`) and
   `?sortDir=asc|desc` (default `createdAt` `desc` — newest first). Each row is
   enriched with `citizen_name`/`citizen_email`/`citizen_phone` (db-writer LEFT
   JOINs `identity_profiles`), and the response carries the **full matching
   `total`** (not just the page size) for pagination.
-  `GET /api/v1/tickets/{id}` (detail includes the full message timeline and
-  internal notes)
+  `GET /api/v1/tickets/{id}` (detail includes `chiefComplaint`, the full
+  message timeline and internal notes)
+- `GET /api/v1/tickets/export.csv` — CSV of the current view (`ticket.export`,
+  admin/lead). Takes the same filters as the list, plus `?detail=summary` for
+  the flat queue-shaped export; the default is **full detail** — every
+  ticket-detail field plus `conversation`, `internal_notes` and `audit_trail`
+  transcripts, capped at 2,000 rows (the flat shape caps at 50,000). Reports
+  `X-Export-Row-Count`, `X-Export-Detail`, and on truncation
+  `X-Export-Truncated`/`X-Export-Row-Cap`.
 - `GET /api/v1/tickets/{id}/events` — the ticket's **audit trail** (creation,
   assignments, status transitions) with actor/assignee agent ids resolved to
   display names; backed by the `ticket_events` table. Assignments are audited
@@ -1621,8 +1728,15 @@ since they aren't part of an adapter-originated transaction — db-writer's
 
 - **api-gateway / db-writer** (Java): `cd services/<service> && mvn test`
   (JUnit 5 + `@QuarkusTest`).
+  db-writer's `@QuarkusTest` classes bind port 8081, so stop the local dev
+  db-writer first or pass `-Dquarkus.http.test-port=<free port>`.
 - **ai-core** (Python): `cd services/ai-core && pytest tests/ -q` (inside
-  the service's `.venv`).
+  the service's `.venv`). `tests/conftest.py` blanks `OPENAI_API_KEY` for every
+  test via an autouse fixture — `app.config.settings` loads `.env.local`, which
+  holds a real key on a dev machine, and several code paths gate an LLM call on
+  "is a key configured?" (`message_quality`, `llm_scorer`, `chief_complaint`),
+  so without it the suite would quietly reach the network. Tests that exercise
+  the LLM path patch `settings` in their own module namespace, which still wins.
 - **dashboard**: no automated test suite yet in Phase 1; verified manually
   through the browser and via the BFF route handlers.
 

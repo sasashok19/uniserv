@@ -84,6 +84,7 @@ public class TicketService {
         t.isDuplicate = intOr(body, "isDuplicate", 0);
         t.parentTicketId = str(body, "parentTicketId");
         t.serviceId = str(body, "serviceId");
+        t.chiefComplaint = str(body, "chiefComplaint");
         t.slaDueAt = str(body, "slaDueAt");
         // Flush immediately so any CHECK-constraint violation (bad status/priority
         // label/etc.) surfaces here rather than being deferred to commit time.
@@ -189,6 +190,7 @@ public class TicketService {
             Map.entry("priorityScore", "t.priority_score"),
             Map.entry("priorityLabel", "t.priority_label"),
             Map.entry("channel", "t.channel_origin"),
+            Map.entry("chiefComplaint", "t.chief_complaint"),
             Map.entry("identityStatus", "t.identity_status"),
             Map.entry("citizenName", "ip.name"),
             Map.entry("citizenEmail", "ip.email"),
@@ -199,8 +201,8 @@ public class TicketService {
             "id", "ticket_number", "status", "category", "subcategory", "priority_score",
             "priority_label", "sentiment_score", "channel_origin", "assigned_to", "identity_id",
             "identity_status", "identity_source", "thread_id", "origin_message_id", "is_duplicate",
-            "parent_ticket_id", "service_id", "resolution", "sla_due_at", "resolved_at", "closed_at",
-            "reopened_count", "reopened_by", "created_at", "updated_at");
+            "parent_ticket_id", "service_id", "chief_complaint", "resolution", "sla_due_at",
+            "resolved_at", "closed_at", "reopened_count", "reopened_by", "created_at", "updated_at");
 
     private static List<String> listSelectColumns() {
         List<String> cols = new ArrayList<>();
@@ -333,6 +335,9 @@ public class TicketService {
         }
         if (body.containsKey("serviceId")) {
             t.serviceId = str(body, "serviceId");
+        }
+        if (body.containsKey("chiefComplaint")) {
+            t.chiefComplaint = str(body, "chiefComplaint");
         }
         if (body.containsKey("archivedAt")) {
             t.archivedAt = str(body, "archivedAt");

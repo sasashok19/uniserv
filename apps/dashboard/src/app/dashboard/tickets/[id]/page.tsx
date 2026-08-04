@@ -23,6 +23,10 @@ type TicketDetail = {
   ticketNumber: string;
   status: string;
   resolution: string | null;
+  /** Feature 23: the citizen's own complaint in one line, derived by ai-core
+   * from the message that opened the ticket and re-derived as they reply.
+   * Null on a ticket that predates the field or has had no inbound message. */
+  chiefComplaint: string | null;
   category: string | null;
   channelOrigin: string;
   identityId: string | null;
@@ -301,12 +305,27 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
         ← Back to ticket queue
       </Link>
 
-      <div className="mt-3 mb-6 flex items-center justify-between">
+      <div className="mt-3 flex items-center justify-between">
         <h1 className="text-xl font-bold text-brand-teal">{ticket.ticketNumber}</h1>
         <span className={BADGE_BASE} style={statusBadgeStyle(ticket.status)}>
           {STATUS_LABEL(ticket.status)}
         </span>
       </div>
+
+      {/* Feature 23: the chief complaint sits with the ticket number rather than
+          among the metadata fields — it is the ticket's subject line, and an
+          agent opening this page should not have to find it. Rendered even when
+          empty so the page never silently omits it: a blank one means the
+          citizen's first message hasn't been processed, which is itself worth
+          seeing. */}
+      <p className="mb-6 mt-1 text-base text-slate-700">
+        <span className="mr-2 text-xs uppercase tracking-wide text-slate-500">Chief complaint</span>
+        {ticket.chiefComplaint ? (
+          <span className="font-medium">{ticket.chiefComplaint}</span>
+        ) : (
+          <span className="italic text-slate-400">Not yet determined</span>
+        )}
+      </p>
 
       {statusMsg && <p className="mb-4 rounded border bg-white p-2 text-sm shadow-sm">{statusMsg}</p>}
 

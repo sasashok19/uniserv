@@ -29,9 +29,12 @@ export async function GET(request: NextRequest) {
     "Content-Disposition":
       resp.headers.get("Content-Disposition") ?? 'attachment; filename="uniserve-tickets.csv"',
   });
-  const truncated = resp.headers.get("X-Export-Truncated");
-  const rowCount = resp.headers.get("X-Export-Row-Count");
-  if (truncated) headers.set("X-Export-Truncated", truncated);
-  if (rowCount) headers.set("X-Export-Row-Count", rowCount);
+  // Forwarded so the queue can report what it actually got — how many rows,
+  // whether the cap cut it off and at what, and (Feature 23) whether the file
+  // is the full-detail shape or the flat summary one.
+  for (const h of ["X-Export-Truncated", "X-Export-Row-Count", "X-Export-Row-Cap", "X-Export-Detail"]) {
+    const value = resp.headers.get(h);
+    if (value) headers.set(h, value);
+  }
   return new NextResponse(body, { status: 200, headers });
 }

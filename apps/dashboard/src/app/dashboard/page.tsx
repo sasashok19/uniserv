@@ -21,6 +21,9 @@ type Ticket = {
   id: string;
   ticket_number: string;
   status: string;
+  /** Feature 23: the citizen's complaint in one line, so triage no longer means
+   * opening tickets one at a time to find out what each is about. */
+  chief_complaint: string | null;
   category: string | null;
   priority_label: string | null;
   channel_origin: string;
@@ -91,6 +94,12 @@ const QUEUE_DEFAULTS = {
 /** Column header → server `sortBy` key. A null key means the column is not sortable. */
 const QUEUE_COLUMNS: { label: string; sortKey: string | null }[] = [
   { label: "Ticket", sortKey: "ticketNumber" },
+  // Feature 23: immediately after the ticket number, where a subject line
+  // belongs — the queue's other columns all describe a complaint the agent
+  // could not actually read. Sortable server-side ("chiefComplaint" is
+  // whitelisted in TicketService.SORT_COLUMNS), which groups the same
+  // complaint text together — the cheapest duplicate spotter there is.
+  { label: "Chief complaint", sortKey: "chiefComplaint" },
   { label: "Status", sortKey: "status" },
   { label: "Priority", sortKey: "priorityLabel" },
   { label: "Category", sortKey: "category" },
@@ -275,10 +284,16 @@ function TicketQueue({ role }: { role: string }) {
       link.click();
       link.remove();
       URL.revokeObjectURL(url);
+      // Feature 23: the export now carries each ticket's full detail, so the
+      // confirmation says how much came back — a capped full export is a
+      // realistic outcome (the cap is 2,000 rows, not 50,000), and silently
+      // handing over a short file would read as "that's everything".
+      const rows = resp.headers.get("X-Export-Row-Count");
+      const cap = resp.headers.get("X-Export-Row-Cap");
       setExportMsg(
         resp.headers.get("X-Export-Truncated")
-          ? `Exported ${resp.headers.get("X-Export-Row-Count")} rows (capped — narrow the filters for the rest).`
-          : "Export downloaded.",
+          ? `Exported ${rows} tickets with full detail — capped at ${cap ?? rows}. Narrow the filters for the rest.`
+          : `Exported ${rows} tickets with conversation, notes and audit trail.`,
       );
     } catch {
       setExportMsg("Export failed.");
@@ -340,7 +355,7 @@ function TicketQueue({ role }: { role: string }) {
             <button
               onClick={exportCsv}
               disabled={exporting}
-              title="Download every ticket matching the current view as CSV"
+              title="Download every ticket matching the current view as CSV — all detail fields plus conversation, internal notes and audit trail"
               className="rounded border px-3 py-1 text-slate-600 hover:bg-slate-100 disabled:opacity-50 active:scale-[0.97]"
             >
               {exporting ? "Exporting…" : "Export CSV"}
@@ -460,6 +475,18 @@ function TicketQueue({ role }: { role: string }) {
                       <Link href={`/dashboard/tickets/${t.id}`} className="text-brand-teal hover:underline">
                         {t.ticket_number}
                       </Link>
+                    </td>
+                    {/* Capped and truncated rather than wrapped: one line per
+                        ticket keeps the queue scannable, and `title` gives the
+                        full text on hover for the ones that don't fit. */}
+                    <td className="max-w-[20rem] p-2">
+                      {t.chief_complaint ? (
+                        <span className="block truncate" title={t.chief_complaint}>
+                          {t.chief_complaint}
+                        </span>
+                      ) : (
+                        <span className="text-slate-400">—</span>
+                      )}
                     </td>
                     <td className="p-2">
                       <span className={BADGE_BASE} style={statusBadgeStyle(t.status)}>

@@ -610,6 +610,46 @@ When `APP_ENV=development`, the seed data provides:
 - **Settings: login-page news feed URL.** `generalSettings.newsFeedUrl` (validated http(s)) is editable in Administration → Settings; the public `GET /api/v1/public/news-config` serves it to the dashboard's `/api/news` route, which prefers it over the `NEWS_RSS_URL` env and the BBC Tamil default. Blank restores the default.
 - **Administration sub-tabs added: Priority Rules and Settings.** `PriorityRulesPanel.tsx` edits the tenant's free-text AI priority rubric (`GET|PUT /api/v1/tenant/priority-rubric`, pre-filled with the backend's default writeup of the current scoring engine); `GeneralSettingsPanel.tsx` edits tenant general settings — currently `maxFollowupQuestions` 0–5 (`GET|PUT /api/v1/tenant/general-settings`). Both proxy through Next.js routes under `src/app/api/tenant/` and are admin-only (enforced at the gateway via `admin.tenant.config`). See the README's *Configurable priority rubric & general settings* section.
 
+## Chief complaint column & header (Feature 23)
+
+The queue's columns all described a complaint the agent could not actually
+read — number, status, priority, category, channel, citizen, assignee — so
+triage meant opening tickets one at a time. `tickets.chief_complaint` (V12,
+derived by ai-core; see the README's *Chief complaint* section) is now surfaced
+in both screens:
+
+- **Queue**: a **Chief complaint** column immediately after the ticket number,
+  where a subject line belongs. Capped at `max-w-[20rem]` and `truncate`d with
+  the full text on `title` hover — one line per ticket keeps the table
+  scannable. Server-side sortable via `sortBy=chiefComplaint` (whitelisted in
+  `TicketService.SORT_COLUMNS`), which groups identical complaint text
+  together — the cheapest duplicate-spotter available.
+- **Ticket detail**: rendered directly under the `TKT-…` heading rather than
+  among the metadata fields, since it is the ticket's subject line and an agent
+  should not have to hunt for it. Rendered even when empty ("Not yet
+  determined") so the page never silently omits it — a blank one means the
+  citizen's first message hasn't been processed yet, which is itself worth
+  seeing.
+
+`GET /api/v1/tickets/{id}` returns it as `chiefComplaint`; the queue list
+carries the raw `chief_complaint` column.
+
+## Full-detail CSV export (Feature 23)
+
+**Export CSV** on the queue toolbar now downloads every field the ticket-detail
+page shows plus the three timelines — `conversation`, `internal_notes`,
+`audit_trail` — one multi-line cell each, still **one row per ticket**. The
+previous export was the queue column-for-column, which meant the export of a
+complaint-handling system contained no complaint text, no citizen name, and no
+record of who did what.
+
+The button sends no `detail` param (full is the gateway's default);
+`?detail=summary` returns the old flat shape. Because the transcripts cost three
+extra db-writer calls per ticket, the full export caps at **2,000 rows** where
+the flat one caps at 50,000 — the confirmation line reports the row count and,
+when capped, the cap itself, from `X-Export-Row-Count` / `X-Export-Row-Cap` /
+`X-Export-Detail` (all forwarded by the dashboard's export proxy route).
+
 ## Possible-duplicate banner (Feature 22)
 
 When routing cannot tell whether a new message continues an existing complaint

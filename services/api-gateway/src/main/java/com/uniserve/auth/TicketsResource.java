@@ -113,19 +113,36 @@ public class TicketsResource {
     }
 
     /**
-     * Feature 21: full ticket export as CSV, honouring exactly the same
+     * Feature 21/23: full ticket export as CSV, honouring exactly the same
      * filters as {@link #list} so "export" always means "what I am looking
      * at". Restricted by the `ticket.export` permission (admin/lead), which
      * has existed in {@link RbacPolicy} since Feature 11 but had no endpoint
      * behind it until now.
      *
+     * Feature 23 widened what a row contains. The original export was the
+     * QUEUE, column for column — so the export of a complaint-handling system
+     * contained no complaint: not the citizen's name, not what they asked for,
+     * not a word either side said, not who did what to the ticket. Everything
+     * the ticket-detail page shows is now exported too, with the three
+     * timelines (conversation, internal notes, audit trail) flattened into one
+     * multi-line cell each. Deliberately still ONE ROW PER TICKET rather than
+     * a row per message: the file stays a table that sorts, filters and pivots
+     * on ticket attributes, which is what an export is for, and the
+     * transcripts ride along in cells that Excel and Sheets both display
+     * with their line breaks intact.
+     *
+     * `?detail=summary` returns the original flat shape. That matters because
+     * the transcripts cost three extra db-writer calls per ticket, so the
+     * full export is capped at {@value #DETAIL_MAX_ROWS} rows against the flat
+     * export's {@value #EXPORT_MAX_ROWS} — a tenant-wide monthly pull wants
+     * the flat one.
+     *
      * Paged internally at db-writer's maximum (100/request) rather than asking
      * for everything at once: the queue query LEFT JOINs the identity table,
      * so an unbounded page would be the slowest query in the system, and this
-     * keeps memory flat regardless of tenant size. Capped at
-     * {@value #EXPORT_MAX_ROWS} rows — an export that silently stopped short
-     * would be worse than one that says so, so the cap is reported in the
-     * response headers rather than being invisible.
+     * keeps memory flat regardless of tenant size. An export that silently
+     * stopped short would be worse than one that says so, so the cap is
+     * reported in the response headers rather than being invisible.
      */
     @GET
     @Path("/export.csv")
@@ -136,7 +153,8 @@ public class TicketsResource {
                               @QueryParam("category") String category,
                               @QueryParam("identityStatus") String identityStatus,
                               @QueryParam("sortBy") String sortBy,
-                              @QueryParam("sortDir") String sortDir) {
+                              @QueryParam("sortDir") String sortDir,
+                              @QueryParam("detail") String detail) {
         if (!user.can("ticket.export")) {
             return forbidden("INSUFFICIENT_ROLE", "Your role cannot export tickets");
         }
@@ -144,15 +162,21 @@ public class TicketsResource {
         if ("none".equals(assignedTo)) {
             resolvedAssignee = null;
         }
+        // Full detail is the DEFAULT: the dashboard button sends no `detail`
+        // param, and "export this ticket queue" almost always means "give me
+        // the tickets", not "give me the columns I was already looking at".
+        boolean full = !"summary".equalsIgnoreCase(detail);
+        int maxRows = full ? DETAIL_MAX_ROWS : EXPORT_MAX_ROWS;
+        List<String> columns = full ? fullColumns() : EXPORT_COLUMNS;
 
         Map<String, String> agentNames = agentDirectory();
         StringBuilder csv = new StringBuilder();
-        csv.append(String.join(",", EXPORT_COLUMNS)).append("\r\n");
+        csv.append(String.join(",", columns)).append("\r\n");
 
         int page = 1;
         int rows = 0;
         boolean truncated = false;
-        while (rows < EXPORT_MAX_ROWS) {
+        while (rows < maxRows) {
             StringBuilder q = new StringBuilder("tenantId=").append(enc(user.tenantId()));
             append(q, "assignedTo", "none".equals(assignedTo) ? null : resolvedAssignee);
             append(q, "status", status);
@@ -178,11 +202,14 @@ public class TicketsResource {
                 }
                 @SuppressWarnings("unchecked")
                 Map<String, Object> t = (Map<String, Object>) mm;
-                if (rows >= EXPORT_MAX_ROWS) {
+                if (rows >= maxRows) {
                     truncated = true;
                     break;
                 }
-                csv.append(csvRow(t, agentNames)).append("\r\n");
+                if (full) {
+                    t.putAll(ticketTimelines(str(t, "id"), agentNames));
+                }
+                csv.append(csvRow(t, agentNames, columns)).append("\r\n");
                 rows++;
             }
             if (list.size() < EXPORT_PAGE_SIZE) {
@@ -194,28 +221,64 @@ public class TicketsResource {
         String filename = "uniserve-tickets-" + java.time.LocalDate.now() + ".csv";
         Response.ResponseBuilder response = Response.ok(csv.toString())
                 .header("Content-Disposition", "attachment; filename=\"" + filename + "\"")
-                .header("X-Export-Row-Count", rows);
+                .header("X-Export-Row-Count", rows)
+                // Which shape came back, so the dashboard can say "full detail"
+                // vs "summary" instead of the user having to count columns.
+                .header("X-Export-Detail", full ? "full" : "summary");
         if (truncated) {
             response.header("X-Export-Truncated", "true");
+            response.header("X-Export-Row-Cap", maxRows);
         }
         return response.build();
     }
 
     private static final int EXPORT_PAGE_SIZE = 100;   // db-writer's own maximum
     private static final int EXPORT_MAX_ROWS = 50_000;
+    /**
+     * Full-detail rows each cost three extra db-writer calls (messages, notes,
+     * events), so they are capped two orders of magnitude below the flat
+     * export rather than sharing its limit. Anyone who needs more rows than
+     * this wants `?detail=summary`, and the response headers say so.
+     */
+    private static final int DETAIL_MAX_ROWS = 2_000;
 
-    private static final List<String> EXPORT_COLUMNS = List.of(
-            "ticket_number", "status", "identity_status", "category", "subcategory",
+    /** Longest transcript kept in one cell. Excel's own hard limit is 32,767
+     * characters per cell and it silently drops the overflow, so a long thread
+     * is cut HERE, visibly, with a marker naming what was left out. */
+    private static final int MAX_TRANSCRIPT_CHARS = 30_000;
+
+    /** Package-private: {@code TicketExportAndCancelTest} asserts that the full
+     * export is a superset of this, in this order. */
+    static final List<String> EXPORT_COLUMNS = List.of(
+            "ticket_number", "status", "identity_status", "chief_complaint", "category", "subcategory",
             "priority_label", "priority_score", "sentiment_score", "channel_origin",
             "citizen_name", "citizen_email", "citizen_phone", "service_id",
             "assigned_to_name", "is_duplicate", "parent_ticket_id", "resolution",
             "sla_due_at", "created_at", "updated_at", "resolved_at", "closed_at",
             "reopened_count", "thread_id", "id");
 
-    static String csvRow(Map<String, Object> t, Map<String, String> agentNames) {
+    /**
+     * Appended for a full-detail export: the remaining ticket-detail fields
+     * plus the three timelines. Order puts the transcripts LAST because they
+     * are the wide cells — a spreadsheet opened on this file shows every
+     * scalar column before it needs horizontal scrolling.
+     */
+    private static final List<String> DETAIL_COLUMNS = List.of(
+            "identity_id", "origin_message_id", "reopened_by",
+            "conversation", "internal_notes", "audit_trail");
+
+    /** Package-private so {@code TicketExportAndCancelTest} can assert the
+     * column contract without standing up a container. */
+    static List<String> fullColumns() {
+        List<String> cols = new ArrayList<>(EXPORT_COLUMNS);
+        cols.addAll(DETAIL_COLUMNS);
+        return cols;
+    }
+
+    static String csvRow(Map<String, Object> t, Map<String, String> agentNames, List<String> columns) {
         String assignedAgentId = str(t, "assigned_to");
         StringBuilder row = new StringBuilder();
-        for (String column : EXPORT_COLUMNS) {
+        for (String column : columns) {
             if (row.length() > 0) {
                 row.append(',');
             }
@@ -225,6 +288,141 @@ public class TicketsResource {
             row.append(csvCell(value));
         }
         return row.toString();
+    }
+
+    /**
+     * The three per-ticket timelines the ticket-detail page shows, each
+     * flattened to one newline-separated transcript for a single CSV cell.
+     *
+     * Best-effort per timeline (see {@link #timeline}): an export of 2,000
+     * tickets must not fail outright because one ticket's notes fetch errored,
+     * and a cell that SAYS it could not be read beats a blank one that is
+     * indistinguishable from "this ticket has no notes".
+     */
+    private Map<String, Object> ticketTimelines(String ticketId, Map<String, String> agentNames) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("conversation", timeline(ticketId, "conversation", () -> conversationTranscript(ticketId)));
+        out.put("internal_notes", timeline(ticketId, "notes", () -> notesTranscript(ticketId, agentNames)));
+        out.put("audit_trail", timeline(ticketId, "audit trail", () -> auditTranscript(ticketId, agentNames)));
+        return out;
+    }
+
+    /**
+     * Isolate one timeline's failure to its own cell. `DbWriterClient.ticketNotes`
+     * (and any transport fault behind the other two) throws a
+     * {@code DbWriterException} on a 4xx/5xx, so without this a single
+     * unreadable ticket would abort an entire 2,000-row export with a 500 —
+     * losing 1,999 good rows over one bad one.
+     */
+    String timeline(String ticketId, String what, java.util.function.Supplier<String> read) {
+        try {
+            return read.get();
+        } catch (RuntimeException e) {
+            LOG.warnf("export: could not read %s for ticket %s: %s", what, ticketId, e.getMessage());
+            return "[unavailable: this ticket's " + what + " could not be read at export time]";
+        }
+    }
+
+    /** "[2026-08-04 09:12] Received · citizen: No power since morning" per line. */
+    private String conversationTranscript(String ticketId) {
+        StringBuilder out = new StringBuilder();
+        DbWriterClient.ApiResult result = db.call("GET", "/api/v1/db/tickets/" + ticketId + "/messages", null);
+        if (result.status() >= 400 || result.body() == null) {
+            // `db.call` is the non-throwing pass-through, so this is raised for
+            // {@link #timeline} to turn into the same "unavailable" cell a
+            // thrown failure produces — one wording, one place.
+            throw new IllegalStateException("messages returned " + result.status());
+        }
+        if (result.body().get("data") instanceof List<?> list) {
+            for (Object o : list) {
+                if (!(o instanceof Map<?, ?> m)) {
+                    continue;
+                }
+                String direction = "outbound".equals(String.valueOf(m.get("direction"))) ? "Sent" : "Received";
+                // author_type is the raw enum (user/ai/agent/system); "citizen"
+                // reads correctly in an export that a non-operator may open.
+                Object authorType = m.get("author_type");
+                String author = authorType == null ? "citizen" : String.valueOf(authorType);
+                if ("user".equals(author)) {
+                    author = "citizen";
+                }
+                appendEntry(out, m.get("created_at"), direction + " · " + author, m.get("content"));
+            }
+        }
+        return truncateTranscript(out.toString(), "messages");
+    }
+
+    /**
+     * Internal notes, including the mandatory transition notes — the written
+     * justification for every resolve/close/reopen/cancel, and the single most
+     * likely reason anyone exports a ticket in the first place.
+     */
+    private String notesTranscript(String ticketId, Map<String, String> agentNames) {
+        StringBuilder out = new StringBuilder();
+        for (Map<String, Object> n : db.ticketNotes(ticketId)) {
+            String agentId = str(n, "agent_id");
+            // A null agent is the system writing its own note (e.g. the
+            // auto-close job), not an unknown agent.
+            String author = agentId == null ? "System" : agentNames.getOrDefault(agentId, agentId);
+            String transitionFrom = str(n, "transition_from");
+            String transitionTo = str(n, "transition_to");
+            if (transitionTo != null) {
+                author += " (" + (transitionFrom == null ? "" : transitionFrom + "→") + transitionTo + ")";
+            }
+            appendEntry(out, n.get("created_at"), author, n.get("content"));
+        }
+        return truncateTranscript(out.toString(), "notes");
+    }
+
+    /** "[ts] status.resolved — Admin User {"...meta..."}" per line. */
+    private String auditTranscript(String ticketId, Map<String, String> agentNames) {
+        StringBuilder out = new StringBuilder();
+        DbWriterClient.ApiResult result = db.call("GET", "/api/v1/db/tickets/" + ticketId + "/events", null);
+        if (result.status() >= 400 || result.body() == null) {
+            throw new IllegalStateException("events returned " + result.status());   // see conversationTranscript
+        }
+        if (result.body().get("data") instanceof List<?> list) {
+            for (Object o : list) {
+                if (!(o instanceof Map<?, ?> e)) {
+                    continue;
+                }
+                String actorId = e.get("actor_id") == null ? null : String.valueOf(e.get("actor_id"));
+                Object actorType = e.get("actor_type");
+                String actor = actorId == null
+                        ? (actorType == null ? "system" : String.valueOf(actorType))
+                        : agentNames.getOrDefault(actorId, actorId);
+                Object meta = e.get("meta_json");
+                appendEntry(out, e.get("created_at"), String.valueOf(e.get("event_type")),
+                        actor + (meta == null ? "" : " " + meta));
+            }
+        }
+        return truncateTranscript(out.toString(), "events");
+    }
+
+    /**
+     * One transcript line: {@code [timestamp] label: body}. Newlines inside the
+     * body are folded to spaces so each entry stays one line — the cell's own
+     * line breaks then mean "next entry", which is what makes a 40-message
+     * thread readable in a spreadsheet cell instead of a wall of text.
+     */
+    static void appendEntry(StringBuilder out, Object timestamp, String label, Object body) {
+        String text = body == null ? "" : String.valueOf(body).replaceAll("\\s*\\R\\s*", " ").trim();
+        if (out.length() > 0) {
+            out.append('\n');
+        }
+        out.append('[').append(timestamp == null ? "" : timestamp).append("] ")
+                .append(label).append(": ").append(text);
+    }
+
+    static String truncateTranscript(String transcript, String what) {
+        if (transcript.length() <= MAX_TRANSCRIPT_CHARS) {
+            return transcript;
+        }
+        // Cut on an entry boundary so the last line in the cell is a whole
+        // entry rather than half of one.
+        int cut = transcript.lastIndexOf('\n', MAX_TRANSCRIPT_CHARS);
+        return transcript.substring(0, cut > 0 ? cut : MAX_TRANSCRIPT_CHARS)
+                + "\n[… truncated: this ticket has more " + what + " than fit one cell]";
     }
 
     /**
@@ -470,6 +668,11 @@ public class TicketsResource {
         body.put("ticketNumber", t.get("ticket_number"));
         body.put("status", t.get("status"));
         body.put("resolution", t.get("resolution"));
+        // Feature 23: what the citizen actually wants, in one line, derived by
+        // ai-core from their own messages (see ai-core's
+        // app/tickets/chief_complaint.py). Null on a ticket that predates the
+        // field or has not received an inbound message yet.
+        body.put("chiefComplaint", t.get("chief_complaint"));
         body.put("category", t.get("category"));
         body.put("channelOrigin", t.get("channel_origin"));
         body.put("identityId", identityId);

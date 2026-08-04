@@ -132,6 +132,44 @@ CREATE INDEX idx_tickets_assigned        ON tickets(assigned_to);
 CREATE INDEX idx_tickets_created         ON tickets(tenant_id, created_at DESC);
 ```
 
+Columns added by later migrations (V5–V12), all nullable so no backfill is
+required:
+
+| Column | Migration | Purpose |
+| --- | --- | --- |
+| `thread_id` | V5 | Conversation thread key — the DB-side thread→ticket lookup (Valkey state expires in ~2h, an unconfirmed thread can sit for days) |
+| `archived_at` | V5 | Soft delete; non-null hides the ticket from every queue, never physically removed |
+| `service_id` | V6 | Service/Customer ID promoted out of the first message's free text |
+| `origin_message_id` | V7 | The originating inbound email's `Message-ID` / WhatsApp `wamid`, reused for reply threading and for resolving a swipe-reply to its ticket |
+| `chief_complaint` | V12 | **Feature 23** — the citizen's complaint in one line (≤140 chars), derived by ai-core from the message that opened the ticket and re-derived as they reply. See "Chief complaint" below |
+
+### `chief_complaint` (Feature 23)
+
+The one-line answer to "what is this ticket about". Before it existed the only
+place that answer lived was the free text of the ticket's first inbound
+message, so neither the queue nor the ticket header could show it — an agent
+triaging saw status, priority, category and channel, every attribute *about* a
+complaint and nothing *of* it.
+
+Written only by ai-core (`app/tickets/chief_complaint.py`), never by an agent:
+
+- **Derived, not copied.** An LLM one-liner from the citizen's own text, with a
+  deterministic condensation of their opening sentence as the fallback when the
+  LLM is unreachable.
+- **It follows the conversation.** Re-derived on every inbound citizen message,
+  because an opening message is usually the least informative thing a citizen
+  will say ("no power") — the location, the duration and the "it's the whole
+  street" arrive in later replies.
+- **Two invariants.** An intake-form answer is never a complaint (a bare name,
+  email or customer number is skipped via Feature 20's `looks_like_intake_answer`,
+  or the field would end up holding the citizen's own phone number); and a worse
+  value never replaces a better one (the deterministic path only ever supplies
+  the *first* value, so an LLM outage cannot overwrite a derived line with a raw
+  truncation).
+
+Sortable server-side as `sortBy=chiefComplaint`, which groups identical
+complaint text together — the cheapest duplicate-spotter in the queue.
+
 ### ticket_messages
 ```sql
 CREATE TABLE ticket_messages (

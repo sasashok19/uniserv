@@ -43,6 +43,9 @@ def test_create_ticket_from_complaint_updates_the_existing_stub_not_a_new_row():
     assert fields_arg["category"]
     db.add_message.assert_awaited_once()
     assert db.add_message.await_args.args[0] == "stub-1"
+    # Feature 23: the chief complaint rides along in the SAME write as the
+    # category and priority rather than costing a second PATCH.
+    assert fields_arg["chiefComplaint"] == "My meter is faulty"
     # A fresh stub never triggers category-based cross-ticket dedup.
     db.list_tickets.assert_not_called()
 
@@ -83,8 +86,31 @@ def test_create_ticket_from_complaint_treats_second_message_on_same_stub_as_cont
     assert result["ticketNumber"] == "TKT-00007"
     assert db.add_message.await_args.args[0] == "stub-1"
     # Same ticket, not a different one — never marked as a linked duplicate.
-    db.update_ticket.assert_not_called()
+    # Asserted by field rather than by "no write happened at all", because
+    # Feature 23 gave a continuation one legitimate reason to write: the extra
+    # detail it carries may refine the chief complaint.
+    for _, payload in (call.args for call in db.update_ticket.await_args_list):
+        assert "isDuplicate" not in payload
+        assert "parentTicketId" not in payload
     db.list_tickets.assert_not_called()
+
+
+def test_create_ticket_from_complaint_refines_the_chief_complaint_on_a_continuation():
+    """Feature 23: the citizen's follow-up detail reaches the chief complaint —
+    the whole point of the field tracking the conversation rather than being
+    frozen at the first message."""
+    db = AsyncMock()
+    db.get_ticket = AsyncMock(return_value={
+        "id": "stub-1", "category": "product", "ticket_number": "TKT-00007", "status": "open",
+        "chief_complaint": None,
+    })
+    db.update_ticket = AsyncMock()
+    db.add_message = AsyncMock()
+
+    _run(create_ticket_from_complaint(db, "t1", _payload(), trace_id="tr-6"))
+
+    db.update_ticket.assert_awaited_once_with(
+        "stub-1", {"chiefComplaint": "My meter is faulty"}, trace_id="tr-6")
 
 
 def test_create_ticket_from_complaint_never_cross_merges_a_different_new_complaint():
