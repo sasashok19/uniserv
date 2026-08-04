@@ -10,7 +10,14 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from app.tickets.chief_complaint import MAX_CHARS, available, condense, derive, refresh
+from app.tickets.chief_complaint import (
+    MAX_CHARS,
+    available,
+    condense,
+    derive,
+    derive_from_history,
+    refresh,
+)
 
 
 def _run(coro):
@@ -187,11 +194,52 @@ def test_derive_without_a_key_uses_the_deterministic_path_and_calls_no_client():
     client_cls.assert_not_called()
 
 
+# --- derive_from_history: one call over a whole conversation --------------
+
+def test_derive_from_history_puts_every_citizen_message_to_the_model_at_once():
+    with patch("app.tickets.chief_complaint.settings") as settings, \
+            patch("app.tickets.chief_complaint.AsyncOpenAI") as client_cls:
+        settings.openai_api_key = "sk-test"
+        settings.openai_model = "gpt-4o-mini"
+        client = _fake_client(
+            '{"chief_complaint": "No power on 2nd Street since Tuesday", "changed": true}')
+        client_cls.return_value = client
+
+        result = _run(derive_from_history(
+            ["No power", "Nithya", "It is the whole of 2nd Street", "Since Tuesday"]))
+
+    assert result == "No power on 2nd Street since Tuesday"
+    # ONE request for the whole conversation, not one per message.
+    client.chat.completions.create.assert_awaited_once()
+    prompt = client.chat.completions.create.await_args.kwargs["messages"][1]["content"]
+    assert "1. No power" in prompt
+    assert "2nd Street" in prompt
+    # The intake answer is dropped before the model sees it — it is an answer to
+    # our question, not a description of a problem.
+    assert "Nithya" not in prompt
+
+
+def test_derive_from_history_falls_back_to_the_first_real_message():
+    # No key: the citizen's own opening sentence still beats a blank cell.
+    assert _run(derive_from_history(["9876543210", "No water since Monday. Please help."])) \
+        == "No water since Monday"
+
+
+def test_derive_from_history_of_nothing_usable_is_none():
+    assert _run(derive_from_history([])) is None
+    assert _run(derive_from_history(["", "   "])) is None
+    # Every message was intake data — there is no complaint here to describe.
+    assert _run(derive_from_history(["Nithya", "56784567"])) is None
+
+
 # --- refresh: read, derive, write only on a change -----------------------
 
 def test_refresh_writes_the_derived_line_onto_the_ticket():
     db = AsyncMock()
     db.get_ticket = AsyncMock(return_value={"id": "t-1", "chief_complaint": None})
+    db.get_messages = AsyncMock(return_value=[
+        {"direction": "inbound", "content": "No power in Anna Nagar since Tuesday"},
+    ])
 
     result = _run(refresh(db, "t-1", "No power in Anna Nagar since Tuesday", trace_id="tr-1"))
 
@@ -202,7 +250,47 @@ def test_refresh_writes_the_derived_line_onto_the_ticket():
     assert payload == {"chiefComplaint": "No power in Anna Nagar since Tuesday"}
 
 
-def test_refresh_writes_nothing_when_the_line_is_unchanged():
+def test_refresh_derives_a_first_value_from_the_whole_history_not_just_this_message():
+    """Found while backfilling: a ticket with no chief complaint yet may already
+    have a conversation — every pre-V12 row is in that state. Deriving from the
+    latest message alone would record "any update?" as the complaint."""
+    db = AsyncMock()
+    db.get_ticket = AsyncMock(return_value={"chief_complaint": None})
+    db.get_messages = AsyncMock(return_value=[
+        {"direction": "inbound", "content": "No power in Anna Nagar since Tuesday"},
+        {"direction": "outbound", "content": "We are looking into it"},
+        {"direction": "inbound", "content": "Any update?"},
+    ])
+
+    result = _run(refresh(db, "t-1", "Any update?"))
+
+    # The real complaint wins over the follow-up that triggered this refresh.
+    assert result == "No power in Anna Nagar since Tuesday"
+    # Outbound messages are never part of the citizen's complaint.
+    assert "looking into it" not in (result or "")
+
+
+def test_refresh_includes_this_message_when_it_is_not_yet_persisted():
+    db = AsyncMock()
+    db.get_ticket = AsyncMock(return_value={"chief_complaint": None})
+    db.get_messages = AsyncMock(return_value=[])
+
+    assert _run(refresh(db, "t-1", "Sewage overflowing on Lattice Bridge Road")) \
+        == "Sewage overflowing on Lattice Bridge Road"
+
+
+def test_refresh_still_derives_when_the_history_fetch_fails():
+    # Best-effort: a message-history failure degrades to "just this message"
+    # rather than leaving the ticket with no chief complaint at all.
+    db = AsyncMock()
+    db.get_ticket = AsyncMock(return_value={"chief_complaint": None})
+    db.get_messages = AsyncMock(side_effect=RuntimeError("db down"))
+
+    assert _run(refresh(db, "t-1", "Transformer sparking near the school")) \
+        == "Transformer sparking near the school"
+
+
+def test_refresh_with_an_existing_line_does_not_reread_the_history():
     db = AsyncMock()
     db.get_ticket = AsyncMock(return_value={"chief_complaint": "No power in Anna Nagar"})
 
@@ -210,6 +298,8 @@ def test_refresh_writes_nothing_when_the_line_is_unchanged():
     # and an existing line is never downgraded — so there is nothing to write.
     assert _run(refresh(db, "t-1", "Any update?")) is None
     db.update_ticket.assert_not_called()
+    # The incremental path costs no extra fetch — that is once per ticket only.
+    db.get_messages.assert_not_called()
 
 
 def test_refresh_writes_nothing_for_an_intake_answer():

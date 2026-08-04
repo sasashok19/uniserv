@@ -65,9 +65,11 @@ _SYSTEM_PROMPT = (
     f"sentence (at most {MAX_CHARS} characters) naming WHAT the citizen's problem is and, when "
     "they have said so, WHERE. It is the answer to \"what is this ticket about?\" that an agent "
     "reads before opening the conversation.\n"
-    "Write it as a plain third-person statement: no greeting, no ticket number, no agent-facing "
-    "commentary, no speculation about cause or fix, no trailing full stop. Keep the citizen's own "
-    "words for the problem. Never add a detail they did not give.\n"
+    "Name the PROBLEM, not the reporter: \"Bill doubled this month\", never \"The citizen says "
+    "their bill doubled\" or \"Customer is reporting a billing issue\" — never begin with \"The "
+    "citizen\", \"The customer\", \"The user\" or \"Request to\". No greeting, no ticket number, no "
+    "agent-facing commentary, no speculation about cause or fix, no trailing full stop. Keep the "
+    "citizen's own words for the problem. Never add a detail they did not give.\n"
     "When an EXISTING chief complaint is supplied you are REVISING it using the citizen's latest "
     "message. Keep the original problem as the anchor and change the line only when the new "
     "message genuinely sharpens or corrects it — a location, a specific meter or bill, a duration, "
@@ -124,18 +126,15 @@ def condense(text: Optional[str]) -> Optional[str]:
     return cut + "…"
 
 
-async def _summarise(existing: Optional[str], new_text: str) -> Optional[str]:
-    """One-line chief complaint from `new_text`, revising `existing` when there
-    is one. Returns ``None`` when the model reports no change, or on any
-    failure/unavailability (caller keeps whatever the ticket already had)."""
+async def _ask(user_message: str) -> Optional[dict]:
+    """One completion against `_SYSTEM_PROMPT`. Returns the parsed JSON, or
+    ``None`` on any failure/unavailability. Shared by the incremental and
+    whole-history paths so there is one prompt and one failure contract rather
+    than two that can drift apart."""
     if not available():
         return None
     try:
         client = AsyncOpenAI(api_key=settings.openai_api_key, timeout=_REQUEST_TIMEOUT_SECONDS)
-        user_message = (
-            (f"EXISTING CHIEF COMPLAINT:\n{existing}\n\n" if existing else "")
-            + f"CITIZEN'S {'LATEST' if existing else 'FIRST'} MESSAGE:\n{new_text}"
-        )
         response = await client.chat.completions.create(
             model=settings.openai_model,
             temperature=0,
@@ -145,20 +144,70 @@ async def _summarise(existing: Optional[str], new_text: str) -> Optional[str]:
                 {"role": "user", "content": user_message},
             ],
         )
-        parsed = json.loads(response.choices[0].message.content or "{}")
-        line = (parsed.get("chief_complaint") or "").strip()
-        # An existing line plus "changed: false" is the model declining to
-        # revise — the common case for a follow-up like "any update?", and the
-        # whole reason it is asked for explicitly rather than diffed.
-        if existing and not parsed.get("changed", True):
-            logger.info("chief complaint unchanged by this message")
-            return None
-        if not line:
-            return None
-        return line[:MAX_CHARS].strip()
+        return json.loads(response.choices[0].message.content or "{}")
     except Exception as exc:  # noqa: BLE001 - best-effort, see module docstring
         logger.warning("chief-complaint summarisation failed, keeping the current value: %s", exc)
         return None
+
+
+async def _summarise(existing: Optional[str], new_text: str) -> Optional[str]:
+    """One-line chief complaint from `new_text`, revising `existing` when there
+    is one. Returns ``None`` when the model reports no change, or on any
+    failure/unavailability (caller keeps whatever the ticket already had)."""
+    user_message = (
+        (f"EXISTING CHIEF COMPLAINT:\n{existing}\n\n" if existing else "")
+        + f"CITIZEN'S {'LATEST' if existing else 'FIRST'} MESSAGE:\n{new_text}"
+    )
+    parsed = await _ask(user_message)
+    if parsed is None:
+        return None
+    line = (parsed.get("chief_complaint") or "").strip()
+    # An existing line plus "changed: false" is the model declining to
+    # revise — the common case for a follow-up like "any update?", and the
+    # whole reason it is asked for explicitly rather than diffed.
+    if existing and not parsed.get("changed", True):
+        logger.info("chief complaint unchanged by this message")
+        return None
+    if not line:
+        return None
+    return line[:MAX_CHARS].strip()
+
+
+async def derive_from_history(
+    inbound_texts: list[str], trace_id: Optional[str] = None,
+) -> Optional[str]:
+    """One line from a ticket's WHOLE inbound history, in a single call.
+
+    This is the backfill path (``scripts/backfill_chief_complaints.py``) for
+    tickets that predate the field. The live path derives incrementally because
+    it only ever has one new message; a backfill has the finished conversation
+    in hand, so replaying it message by message would cost one request per
+    message to reach an answer the model can give in one — and would burn the
+    request budget on turns the live code would have skipped anyway.
+
+    Intake-form answers are dropped before the model sees them, for the same
+    reason `derive` refuses to act on one: they are answers to our questions,
+    not descriptions of a problem. Falls back to `condense` of the citizen's
+    first real message when the LLM is unavailable. Never raises.
+    """
+    texts = [t.strip() for t in inbound_texts if (t or "").strip()]
+    texts = [t for t in texts if not looks_like_intake_answer(t)]
+    if not texts:
+        return None
+
+    parsed = await _ask(
+        "THE CITIZEN'S MESSAGES ON THIS ONE COMPLAINT, OLDEST FIRST — write the single chief "
+        "complaint line they add up to, using the later messages to sharpen the first:\n"
+        + "\n\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))
+    )
+    if parsed is not None:
+        line = (parsed.get("chief_complaint") or "").strip()
+        if line:
+            return line[:MAX_CHARS].strip()
+    # No LLM (or an unusable answer): the citizen's own opening sentence is
+    # still a far better queue column than a blank cell.
+    logger.info("chief complaint backfilled deterministically traceId=%s", trace_id)
+    return condense(texts[0])
 
 
 async def derive(
@@ -195,6 +244,26 @@ async def derive(
     return line
 
 
+async def _inbound_history(
+    db: DbWriterClient, ticket_id: str, new_text: Optional[str], trace_id: Optional[str],
+) -> list[str]:
+    """The citizen's own messages on this ticket, oldest first, with `new_text`
+    included. Every live caller persists the message before refreshing, so it is
+    normally already in the fetched history — appended only when absent, so a
+    caller that refreshes first is not silently missing the newest message."""
+    texts: list[str] = []
+    try:
+        texts = [m.get("content") or "" for m in await db.get_messages(ticket_id, trace_id=trace_id)
+                 if m.get("direction") == "inbound"]
+    except Exception:  # noqa: BLE001 - fall back to just this message
+        logger.warning("could not read inbound history for the chief complaint traceId=%s ticketId=%s",
+                       trace_id, ticket_id)
+    text = (new_text or "").strip()
+    if text and text not in (t.strip() for t in texts):
+        texts.append(text)
+    return texts
+
+
 async def refresh(
     db: DbWriterClient, ticket_id: str, new_text: Optional[str], trace_id: Optional[str] = None,
 ) -> Optional[str]:
@@ -208,14 +277,29 @@ async def refresh(
     — which together are why a ticket has a chief complaint from its very
     first message and keeps up with every reply after it.
 
+    **A ticket with no line yet is derived from its WHOLE inbound history, not
+    from just this message.** Found while backfilling: deriving a first value
+    from the latest message alone makes "any update?" the chief complaint of a
+    ticket whose real complaint ("no power in Anna Nagar") was stated three
+    messages earlier. That is not a hypothetical — every ticket created before
+    the column existed is in exactly this state, as is any ticket whose first
+    derivation failed while the LLM was down. Reading the history here means the
+    live path self-heals those tickets on the citizen's next message instead of
+    recording a follow-up as the complaint, and it costs one extra message
+    fetch once per ticket lifetime rather than on every turn.
+
     Never raises: every caller is on the path of a reply the citizen is
     waiting for.
     """
     try:
         ticket = await db.get_ticket(ticket_id, trace_id=trace_id)
         existing = (ticket.get("chief_complaint") or "").strip() or None
-        line = await derive(existing, new_text, trace_id=trace_id)
-        if not line:
+        if existing:
+            line = await derive(existing, new_text, trace_id=trace_id)
+        else:
+            line = await derive_from_history(
+                await _inbound_history(db, ticket_id, new_text, trace_id), trace_id=trace_id)
+        if not line or line == existing:
             return None
         await db.update_ticket(ticket_id, {"chiefComplaint": line}, trace_id=trace_id)
         logger.info("chief complaint %s traceId=%s ticketId=%s value=%r",

@@ -170,6 +170,15 @@ Written only by ai-core (`app/tickets/chief_complaint.py`), never by an agent:
 Sortable server-side as `sortBy=chiefComplaint`, which groups identical
 complaint text together — the cheapest duplicate-spotter in the queue.
 
+**Nullable, with two ways to fill in.** A ticket created before V12 has none
+until either (a) its next citizen message, at which point `refresh` derives one
+from the ticket's whole inbound history rather than from that message alone —
+so active tickets self-heal — or (b)
+`services/ai-core/scripts/backfill_chief_complaints.py`, for the resolved and
+closed tickets that will never get another message. A ticket whose only inbound
+messages were intake answers legitimately stays NULL; the UI renders that as
+"Not yet determined" rather than pretending.
+
 ### ticket_messages
 ```sql
 CREATE TABLE ticket_messages (

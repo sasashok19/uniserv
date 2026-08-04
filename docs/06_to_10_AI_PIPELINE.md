@@ -623,10 +623,14 @@ and it follows the same contract: a plain chat completion (not the Assistants
 gateway), best-effort, never able to block a routing decision or a reply.
 
 ```
-derive(existing, new_text)   -> Optional[str]   # pure; None means "keep existing"
-refresh(db, ticket_id, text) -> Optional[str]   # read, derive, write only on a change
-condense(text)               -> Optional[str]   # deterministic fallback, no LLM
+derive(existing, new_text)     -> Optional[str]  # pure; None means "keep existing"
+derive_from_history(texts)     -> Optional[str]  # one call over a whole conversation
+refresh(db, ticket_id, text)   -> Optional[str]  # read, derive, write only on a change
+condense(text)                 -> Optional[str]  # deterministic fallback, no LLM
 ```
+
+`_ask` is the single completion both derive paths go through, so there is one
+prompt and one failure contract rather than two that can drift.
 
 The prompt returns `{"chief_complaint": …, "changed": <bool>}` — asking the
 model whether it revised the line is cheaper and more accurate than diffing
@@ -651,8 +655,29 @@ strings, since an equivalent rewording is not a change.
   FIRST value; once an LLM-derived line exists, an outage leaves it alone rather
   than overwriting it with a raw truncation of whatever just arrived.
 
+**First value comes from the whole history.** `refresh` derives incrementally
+only when the ticket already HAS a line. With none, it reads the inbound
+timeline and calls `derive_from_history` — because a ticket without a chief
+complaint may still have a conversation (every pre-V12 row; any ticket whose
+first derivation hit an LLM outage), and a first value taken from the triggering
+message alone would record "any update?" as the complaint. This is what makes
+the live path self-healing for still-active tickets; the extra fetch is once per
+ticket lifetime.
+
+**Backfill.** `scripts/backfill_chief_complaints.py` covers the tickets that
+will never get another citizen message and so cannot self-heal. One request per
+ticket over its whole inbound history, idempotent (skips any ticket that already
+has a line), reads/writes only through db-writer's HTTP API so `DB_WRITER_URL`
+picks the environment. See the README's *Backfilling existing tickets*.
+
 **Assistant-side dependency.** The field's quality tracks
 `submit_complaint`'s `complaint_summary`, so `ASSISTANT_INSTRUCTIONS` requires
 that summary to be self-contained — the original complaint plus every detail the
 citizen has since added about the problem. Needs
 `scripts/update_assistant.py` to reach the live Assistant.
+
+**Prompt note.** The system prompt forbids narrating the reporter ("The citizen
+says their bill doubled") and requires the problem itself ("Bill doubled this
+month"). Learned from the first backfill dry run, where a third of the lines
+came back as third-person reports about the citizen instead of subject lines;
+the fix is in the shared `_SYSTEM_PROMPT`, so the live path got it too.

@@ -318,3 +318,46 @@ export section rewritten, tickets API reference, Testing), `docs/05_TICKET_SCHEM
 
 ## Deployment for 23
 All four again: db-writer (V12 migration), ai-core, api-gateway, dashboard.
+
+## Follow-up: chief-complaint backfill (same day)
+User asked for a one-shot backfill of pre-V12 tickets.
+
+**`services/ai-core/scripts/backfill_chief_complaints.py`** — idempotent (skips
+any ticket that already has a line), one LLM request per ticket over its whole
+inbound history via the new `derive_from_history`, HTTP-only through db-writer so
+`DB_WRITER_URL` picks the environment. `--dry-run` / `--limit` / `--concurrency`
+/ `--include-archived` / `--tenant-id`. Non-zero exit on any failure.
+
+**Ran against the LOCAL dev DB** (`services/db-writer/data/uniserve-dev.db`,
+started the packaged jar on 8090 for it): 19 tickets, **18 written**, 1 skipped
+(TKT-00004 — no usable inbound text), 0 failed. Re-run confirms idempotence
+(18 already have one, 0 written).
+
+**NOT yet run against production.** The Railway db-writer
+(`https://uniserv-production.up.railway.app`) rejects the local
+`DB_WRITER_INTERNAL_API_KEY` with 401 — production has its own key, set in
+Railway's env vars. To finish:
+
+```bash
+cd services/ai-core
+DB_WRITER_URL=https://uniserv-production.up.railway.app \
+DB_WRITER_INTERNAL_API_KEY=<railway value> \
+  python scripts/backfill_chief_complaints.py --dry-run   # then without --dry-run
+```
+
+### Two learnings folded back into the LIVE path (not just the script)
+1. **First value now comes from the whole inbound history.** `refresh` used to
+   derive a first value from the triggering message alone, which would have made
+   "any update?" the chief complaint of any pre-V12 ticket that received a
+   follow-up — the real complaint was three messages earlier. It now calls
+   `derive_from_history` when the ticket has no line yet (incremental `derive`
+   only when it already has one), so the live path self-heals active pre-V12
+   tickets. Extra message fetch is once per ticket lifetime.
+2. **Prompt: name the problem, not the reporter.** The first dry run returned
+   about a third of lines as "The citizen's bill appears to be incorrect" —
+   narration, not a subject line. `_SYSTEM_PROMPT` now forbids opening with
+   "The citizen/customer/user" and requires the problem itself. Shared prompt,
+   so the live path got the fix automatically.
+
+ai-core now **292/292** (13 new chief-complaint tests). api-gateway 65/65,
+db-writer 8/8 unchanged.

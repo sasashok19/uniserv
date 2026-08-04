@@ -1202,6 +1202,44 @@ tells us with it). The filing path uses the pure `derive(...)` and folds the
 result into the ticket write it was already making; the others use
 `refresh(...)`, which reads, derives and writes back only on an actual change.
 
+**A ticket with no line yet is derived from its whole inbound history**, not
+from the message that triggered the refresh — `refresh` reads the message
+timeline in that one case (`derive_from_history`, a single request over the
+whole conversation). Found while backfilling: a first value taken from the
+latest message alone makes *"any update?"* the chief complaint of a ticket
+whose real complaint was stated three messages earlier. Every ticket created
+before the column existed is in exactly that state, as is any ticket whose
+first derivation happened while the LLM was down — so this is what makes the
+live path **self-healing**: those tickets get a correct line on the citizen's
+next message rather than recording a follow-up as the complaint. The extra
+message fetch happens once per ticket lifetime, never on a turn that already
+has a line.
+
+### Backfilling existing tickets
+
+`services/ai-core/scripts/backfill_chief_complaints.py` fills the field in for
+tickets that predate it — the ones that will never get another citizen message
+(resolved, closed, cancelled) and so can't self-heal.
+
+```bash
+cd services/ai-core
+python scripts/backfill_chief_complaints.py --dry-run     # derive and print, write nothing
+python scripts/backfill_chief_complaints.py               # apply
+python scripts/backfill_chief_complaints.py --limit 20    # trial a few first
+```
+
+Deliberately a script, not a migration or a deploy hook: it spends one LLM
+request per ticket, which should never happen implicitly. It is **idempotent** —
+a ticket that already has a chief complaint is skipped, never re-derived — so an
+interrupted run resumes by re-running, and a later run costs only the new
+tickets. Reads and writes exclusively through db-writer's HTTP API like every
+other ai-core write, so `DB_WRITER_URL` decides which environment it targets
+(a deployed db-writer needs its `DB_WRITER_INTERNAL_API_KEY`, not the local
+one). Other flags: `--concurrency` (default 4), `--include-archived`,
+`--tenant-id`. Exits non-zero if any ticket failed, so it is safe to call from a
+deploy script. A ticket whose only inbound messages were intake answers is
+reported as skipped rather than given an invented line.
+
 **Best-effort, like every LLM-assisted decision here.** A plain chat completion
 (not the Assistants gateway), and any failure falls back to a deterministic
 condensation of the citizen's own opening sentence. It is a display and triage
