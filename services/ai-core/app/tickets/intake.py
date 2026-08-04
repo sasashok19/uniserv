@@ -110,10 +110,14 @@ splits off its own ticket exactly as Feature 18 intended.
 
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from app.classify.message_intent import assess_inbound
 from app.classify.message_quality import match_open_ticket
-from app.dedup.service import OPEN_STATUSES
+from app.classify.text_cleanup import strip_quoted_reply
+from app.config import settings
+from app.dedup.service import ADDRESSABLE_STATUSES, OPEN_STATUSES, TERMINAL_STATUSES
 from app.identity.db_client import DbWriterClient
 
 logger = logging.getLogger("ai-core")
@@ -124,6 +128,23 @@ TICKET_NUMBER_RE = re.compile(r"TKT-\d{4,}")
 # arrive newest-first, so this bounds prompt size (and cost) on an account with
 # a long tail of stale open tickets without affecting the realistic cases.
 _MAX_MATCH_CANDIDATES = 8
+
+# How far back to look for "have we already asked this contact to clarify?".
+# Independent of the reply window: that one bounds attribution, this one bounds
+# how long a citizen stays exempt from being asked the same thing twice.
+_ESCALATION_LOOKBACK_DAYS = 7
+
+# Sent when a message cannot be attributed and does not read as a complaint
+# (routing rung 5). It has to do two jobs at once, because we genuinely do not
+# know which case this is: give them a way to reach the right ticket, and a way
+# to start a new one.
+ASK_FOR_REFERENCE = (
+    "Thanks for your message. We couldn't tell which complaint this is about. "
+    "If you're replying about an existing complaint, please send us its ticket "
+    "number (it looks like TKT-00123). If this is a new problem, please describe "
+    "what's wrong — for example \"no power in Anna Nagar since Tuesday\" — and "
+    "we'll register it for you."
+)
 
 # --- "Is this message just intake-form data?" (Feature 20) ------------------
 # Deliberately deterministic (no LLM): this guard decides whether to even ASK
@@ -299,6 +320,118 @@ async def _find_identity_for_channel(
     return None
 
 
+def _cutoff(days: int) -> str:
+    """A `SqliteTime`-format timestamp `days` ago, for string comparison against
+    stored `created_at` values (db-writer writes `yyyy-MM-dd HH:mm:ss` UTC, which
+    sorts lexicographically)."""
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _reply_window_days(tenant_config: dict) -> int:
+    """How long a bare reply may still be attributed to a ticket (Feature 24).
+    Tenant setting wins over the service default; a nonsensical value is
+    ignored rather than allowed to disable attribution entirely."""
+    raw = ((tenant_config or {}).get("generalSettings") or {}).get("replyWindowDays")
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        return settings.reply_window_days
+    return days if days > 0 else settings.reply_window_days
+
+
+async def _ticket_dialogue(
+    db: DbWriterClient, ticket_id: str, trace_id: Optional[str],
+) -> tuple[Optional[str], Optional[dict]]:
+    """`(the citizen's original complaint, the last message we sent)` for one
+    ticket, from a single message-timeline fetch.
+
+    Both halves come from the same call on purpose: routing needs the complaint
+    to tell tickets apart AND the last outbound to judge whether this message
+    answers it, and a dedicated endpoint per half would double the round trips
+    per candidate to save nothing. Best-effort — a fetch failure just means this
+    ticket contributes no candidate, never that routing fails.
+    """
+    try:
+        messages = await db.get_messages(ticket_id, trace_id=trace_id)
+    except Exception:  # noqa: BLE001 - see docstring
+        return None, None
+    inbound = [m for m in messages if m.get("direction") == "inbound" and m.get("content")]
+    outbound = [m for m in messages if m.get("direction") == "outbound" and m.get("content")]
+    return (inbound[0]["content"] if inbound else None), (outbound[-1] if outbound else None)
+
+
+async def _resolve_by_reply_to(
+    db: DbWriterClient, tenant_id: str, in_reply_to: str, trace_id: Optional[str],
+) -> Optional[dict]:
+    """The ticket the message being replied to lives on (routing rung 0).
+
+    Two lookups, because there are two kinds of message a citizen can reply to:
+
+    - one of OURS (Feature 24) — the reply-to id matches the `channel_message_id`
+      we recorded when we sent it. This is the case that matters and the one that
+      was missing: "Is this resolved?" -> "Yes it is" resolves here, exactly,
+      with no interpretation.
+    - the ticket's OWN first inbound message (Feature 19) — the citizen
+      swipe-replied to their original complaint.
+    """
+    message = await db.find_message_by_channel_id(tenant_id, in_reply_to, trace_id=trace_id)
+    if message and message.get("ticket_id"):
+        ticket = await db.get_ticket(message["ticket_id"], trace_id=trace_id)
+        if ticket and ticket.get("id"):
+            logger.info("ticket resolved via reply to our own message traceId=%s ticketId=%s",
+                        trace_id, ticket["id"])
+            return ticket
+    matches = await db.list_tickets(tenant_id, originMessageId=in_reply_to, trace_id=trace_id)
+    if matches:
+        logger.info("ticket resolved via reply to the original complaint traceId=%s ticketId=%s",
+                    trace_id, matches[0]["id"])
+        return matches[0]
+    return None
+
+
+async def _resolve_by_reference(
+    db: DbWriterClient, tenant_id: str, subject: Optional[str], raw_text: Optional[str],
+    trace_id: Optional[str],
+) -> Optional[dict]:
+    """The ticket a `TKT-XXXXX` the citizen typed refers to (routing rung 1)."""
+    referenced = extract_ticket_number(subject) or extract_ticket_number(raw_text)
+    if not referenced:
+        return None
+    matches = await db.list_tickets(tenant_id, ticketNumber=referenced, trace_id=trace_id)
+    if matches:
+        logger.info("ticket resolved via explicit reference traceId=%s ticketNumber=%s ticketId=%s",
+                    trace_id, referenced, matches[0]["id"])
+        return matches[0]
+    logger.warning("message referenced unknown ticket traceId=%s ticketNumber=%s — ignoring the reference",
+                    trace_id, referenced)
+    return None
+
+
+async def _resolved(
+    db: DbWriterClient, ticket: dict, trace_id: Optional[str], via: str,
+) -> dict:
+    """Package a resolved ticket, noting in its audit trail when a citizen has
+    written to a ticket that was already finished (Feature 24).
+
+    The status is deliberately NOT changed. A reply on a resolved ticket may be
+    "yes, thanks" or "no, it is still broken", and only a human should decide
+    which of those reopens work — an automatic reopen on the wrong reading would
+    churn the backlog, and an automatic close on the wrong reading would bury a
+    live complaint.
+    """
+    if (ticket.get("status") or "") in TERMINAL_STATUSES:
+        try:
+            await db.add_event(ticket["id"], {
+                "eventType": "ticket.reply_after_resolution",
+                "actorType": "system",
+                "meta": {"status": ticket.get("status"), "via": via},
+            }, trace_id=trace_id)
+        except Exception:  # noqa: BLE001 - best-effort audit, never blocks routing
+            logger.warning("failed to record reply-after-resolution traceId=%s ticketId=%s",
+                           trace_id, ticket.get("id"))
+    return {"id": ticket["id"], "ticketNumber": ticket.get("ticket_number")}
+
+
 async def ensure_ticket_stub(
     db: DbWriterClient, tenant_id: str, thread_key: str, channel: str,
     subject: Optional[str] = None, raw_text: Optional[str] = None,
@@ -306,97 +439,283 @@ async def ensure_ticket_stub(
     origin_message_id: Optional[str] = None, in_reply_to: Optional[str] = None,
     trace_id: Optional[str] = None,
 ) -> dict:
-    """Find the ticket this message belongs to, or create a bare stub.
+    """Find the ticket this message belongs to, create a stub, or decline to do
+    either (Feature 24).
 
-    Resolution order, most explicit signal first:
+    Returns ``{"id", "ticketNumber"}`` for a resolved/created ticket — plus
+    ``suspectedDuplicateOf`` when the duplicate question needs asking — or
+    ``{"unrouted": True, "ask": <text|None>}`` with NO ``id`` when no ticket
+    could be attributed and inventing one would be wrong. Callers must check for
+    an ``id`` before using it.
 
-    1. `in_reply_to` (Feature 19) — a WhatsApp swipe-reply's quoted-message
-       id or an email's In-Reply-To header. When it matches some ticket's
-       own `origin_message_id`, the citizen has taken an explicit UI action
-       (or their mail client has) pointing at exactly one prior message —
-       stronger than anything inferred from text or identity, and needs no
-       interpretation at all. Previously this field was parsed by the
-       WhatsApp adapter (`WhatsAppParser.inReplyTo`) but never used for
-       inbound routing, only for outbound reply threading — a citizen who
-       swiped to reply on their original complaint still fell through to
-       the identity/topic heuristic below, which has no way to know a
-       swipe-reply happened and can (and, live-tested, did) misjudge a
-       short follow-up like "It happens around 11PM" as a different topic
-       from the original message, creating a duplicate ticket instead of
-       appending to the one being replied to.
-    2. An explicit `TKT-XXXXX` reference (subject or message body) — a
-       citizen-visible, explicit reference rather than an inferred one,
-       and is what lets a reply to an old ticket resolve to that exact
-       ticket even if `in_reply_to` isn't available (or the citizen
-       re-quotes an old message in a new one rather than replying to it).
-    3. The identity's one still-in-intake stub, when this message is nothing
-       but intake-form data (Feature 20) — the citizen is answering the
-       question that stub asked, so no count or topic reasoning applies.
-    4. Identity + open-ticket-count/topic heuristic, then thread_key — see
-       below and the module docstring. `thread_key` itself is unique per
-       email when there's no real In-Reply-To (see
-       `ConversationAgent._thread_key`), so the threadId lookup is a
-       perfectly good PRIMARY signal for email; for WhatsApp (a stable
-       per-phone key, not a per-conversation one) it's only a safety-net
-       FALLBACK for the narrow window before identity has linked to a
-       ticket at all.
+    The ladder, strongest signal first. Rungs 0-1 and 3 are free; rungs 2 and 4
+    are ONE shared LLM call; nothing is ever guessed.
+
+    0. **The message they replied to.** A WhatsApp swipe-reply's `context.id` or
+       an email `In-Reply-To`, matched against the `channel_message_id` of a
+       message WE sent (Feature 24) or a ticket's own original inbound message
+       (Feature 19). Exact and interpretation-free.
+    1. **A `TKT-XXXXX` the citizen typed.** Ranked ABOVE rung 0 deliberately:
+       replying to a message is often just "the last thread in my app", whereas
+       typing a ticket number is an unambiguous statement of intent. When the two
+       disagree the typed reference wins and the disagreement is logged.
+    2. **An answer to something we asked.** The judgment that was missing, and
+       the reason a citizen's "Yes it is" landed on an unrelated ticket: every
+       previous check compared the message against ticket COMPLAINT text, and a
+       bare confirmation contains none. Candidates are the last outbound message
+       on each of the citizen's tickets in any status, within the reply window —
+       so an answer to "Is this resolved?" reaches a resolved ticket instead of
+       being excluded from routing entirely.
+    3. **An intake-form answer**, but only when the last thing we asked on that
+       stub actually WAS an intake question. A bare "yes" is structurally
+       identical whether it answers "did you mean x@gmail.com?" or "is this
+       fixed?", and this guard used to claim either for whichever stub happened
+       to be mid-intake.
+    4. **A new complaint.** Coherent, and describing a problem — from the same
+       call as rung 2. Runs the Feature 22 duplicate check before creating,
+       so "the same complaint again" still asks rather than duplicating.
+    5. **None of the above.** No ticket is created. The message is parked for a
+       lead (`unrouted_messages`) and the citizen is asked which complaint they
+       mean; a second unroutable message escalates instead of asking again.
+       Storing it is the point — a dropped message is invisible to everyone,
+       which is worse than a misroute an agent can fix.
     """
-    if in_reply_to:
-        matches = await db.list_tickets(tenant_id, originMessageId=in_reply_to, trace_id=trace_id)
-        if matches:
-            logger.info("ticket resolved via in-reply-to traceId=%s inReplyTo=%s ticketId=%s",
-                        trace_id, in_reply_to, matches[0]["id"])
-            return {"id": matches[0]["id"], "ticketNumber": matches[0].get("ticket_number")}
+    # What the citizen typed THIS time, with our own quoted message and their
+    # signature removed. Only ever used for judgments; the raw text is what gets
+    # persisted, and an email reply otherwise arrives containing our question and
+    # their original complaint, which would make rungs 2 and 4 answer yes to
+    # almost anything.
+    clean_text = strip_quoted_reply(raw_text)
 
-    referenced = extract_ticket_number(subject) or extract_ticket_number(raw_text)
-    if referenced:
-        matches = await db.list_tickets(tenant_id, ticketNumber=referenced, trace_id=trace_id)
-        if matches:
-            logger.info("ticket resolved via explicit reference traceId=%s ticketNumber=%s ticketId=%s",
-                        trace_id, referenced, matches[0]["id"])
-            return {"id": matches[0]["id"], "ticketNumber": matches[0].get("ticket_number")}
-        logger.warning("message referenced unknown ticket traceId=%s ticketNumber=%s — treating as new",
-                        trace_id, referenced)
+    reference_ticket = await _resolve_by_reference(db, tenant_id, subject, raw_text, trace_id)
+    reply_ticket = await _resolve_by_reply_to(db, tenant_id, in_reply_to, trace_id) if in_reply_to else None
 
+    if reference_ticket and reply_ticket and reference_ticket["id"] != reply_ticket["id"]:
+        logger.warning(
+            "routing signals disagree traceId=%s typedReference=%s replyTo=%s — the typed "
+            "reference wins (a deliberate citizen action beats which thread they replied in)",
+            trace_id, reference_ticket.get("ticket_number"), reply_ticket.get("ticket_number"))
+    chosen = reference_ticket or reply_ticket
+    if chosen:
+        return await _resolved(db, chosen, trace_id,
+                               "reference" if reference_ticket else "reply-to")
+
+    # Everything below needs to know which tickets are this citizen's.
+    identity = None
     if channel_identity_value:
         identity = await _find_identity_for_channel(
             db, tenant_id, channel_identity_type, channel_identity_value, trace_id=trace_id)
-        if identity and identity.get("master_id"):
-            open_tickets = await db.list_tickets(
-                tenant_id, identityId=identity["master_id"], status=OPEN_STATUSES,
-                sortBy="createdAt", sortDir="desc", trace_id=trace_id)
-            # Feature 20: an intake answer belongs to the stub that ASKED for
-            # it, full stop — before any count or topic reasoning. A stub with
-            # no category has never had a complaint filed on it, so it is by
-            # definition still mid-intake; when exactly one such stub is open,
-            # there is no ambiguity about which conversation this answers.
-            # Checked even when several tickets are open, so a thread already
-            # split by this bug self-heals on the citizen's next reply instead
-            # of shedding another ticket per message.
-            intake_stubs = [t for t in open_tickets if not t.get("category")]
-            if len(intake_stubs) == 1 and looks_like_intake_answer(raw_text):
-                logger.info(
-                    "ticket resolved via in-intake stub (message is intake-form data, not a new "
-                    "complaint) traceId=%s ticketId=%s openTickets=%d",
-                    trace_id, intake_stubs[0]["id"], len(open_tickets),
-                )
-                return {"id": intake_stubs[0]["id"], "ticketNumber": intake_stubs[0].get("ticket_number")}
-            if open_tickets:
-                resolved = await _match_against_open_tickets(
-                    db, tenant_id, thread_key, channel, open_tickets, raw_text,
-                    origin_message_id, trace_id)
-                if resolved is not None:
-                    return resolved
-            # Exactly zero open tickets linked to this identity — fall
-            # through to the thread-key check below (safety net for a
-            # ticket that hasn't been linked to the identity yet, e.g.
-            # still on its very first turn).
+    master_id = (identity or {}).get("master_id")
 
-    existing = await db.list_tickets(tenant_id, threadId=thread_key, status=OPEN_STATUSES, trace_id=trace_id)
-    if existing:
-        return {"id": existing[0]["id"], "ticketNumber": existing[0].get("ticket_number")}
+    tickets: list[dict] = []
+    if master_id:
+        tickets = await db.list_tickets(
+            tenant_id, identityId=master_id, status=ADDRESSABLE_STATUSES,
+            sortBy="createdAt", sortDir="desc", trace_id=trace_id)
+    if not tickets:
+        # Identity hasn't linked to a ticket yet (the narrow first-turn window).
+        # The thread key is a per-conversation id for email and a per-phone one
+        # for WhatsApp, so it is a safety net here rather than a primary signal.
+        tickets = await db.list_tickets(
+            tenant_id, threadId=thread_key, status=ADDRESSABLE_STATUSES, trace_id=trace_id)
 
+    if not tickets:
+        # Nothing of theirs exists. This is the genuinely-first-contact case, and
+        # the only question is whether the message is a complaint at all — "Hi"
+        # must not become a ticket.
+        return await _first_contact(
+            db, tenant_id, thread_key, channel, clean_text, raw_text,
+            channel_identity_value, origin_message_id, in_reply_to, trace_id)
+
+    tenant_config = await db.get_tenant_config(tenant_id, trace_id=trace_id)
+    window_cutoff = _cutoff(_reply_window_days(tenant_config))
+
+    # One timeline fetch per candidate gives both halves of the context.
+    dialogues: list[dict] = []
+    for ticket in tickets[:_MAX_MATCH_CANDIDATES]:
+        complaint, last_outbound = await _ticket_dialogue(db, ticket["id"], trace_id)
+        dialogues.append({"ticket": ticket, "complaint": complaint, "lastOutbound": last_outbound})
+
+    # --- Rung 2: is this an answer to something we asked? ------------------
+    questions = [
+        d for d in dialogues
+        if d["lastOutbound"] and (d["lastOutbound"].get("created_at") or "") >= window_cutoff
+    ]
+    intent = await assess_inbound(
+        [{"ticketNumber": d["ticket"].get("ticket_number"), "status": d["ticket"].get("status"),
+          "question": d["lastOutbound"].get("content"), "complaint": d["complaint"]}
+         for d in questions],
+        clean_text, trace_id=trace_id)
+
+    if intent is None:
+        # The judgment itself was unavailable — a network condition, not a
+        # decision about this message. Deliberately NOT a guess: fall back to
+        # the structural rungs only, and ask the citizen if those decline.
+        logger.info("inbound intent unavailable traceId=%s — structural rungs only", trace_id)
+        return await _route_without_llm(
+            db, tenant_id, thread_key, channel, dialogues, clean_text, raw_text,
+            channel_identity_value, origin_message_id, in_reply_to, window_cutoff, trace_id)
+
+    if intent["index"] is not None:
+        answered = questions[intent["index"]]["ticket"]
+        logger.info("ticket resolved as an answer to our own question traceId=%s ticketId=%s status=%s "
+                    "reason=%s", trace_id, answered["id"], answered.get("status"), intent["reason"])
+        return await _resolved(db, answered, trace_id, "answer-to-our-question")
+
+    # --- Rung 3: an intake answer, to a stub that actually asked one -------
+    intake_stub = _in_intake_stub(dialogues, clean_text, window_cutoff)
+    if intake_stub is not None:
+        logger.info("ticket resolved via in-intake stub traceId=%s ticketId=%s", trace_id, intake_stub["id"])
+        return await _resolved(db, intake_stub, trace_id, "intake-answer")
+
+    # --- Rung 4: a new complaint ------------------------------------------
+    if intent["is_new_complaint"]:
+        open_tickets = [d["ticket"] for d in dialogues
+                        if (d["ticket"].get("status") or "") not in TERMINAL_STATUSES]
+        if open_tickets:
+            resolved = await _match_against_open_tickets(
+                db, tenant_id, thread_key, channel, open_tickets, clean_text,
+                origin_message_id, trace_id)
+            if resolved is not None:
+                return resolved
+        return await _create_stub(db, tenant_id, thread_key, channel, origin_message_id, trace_id)
+
+    # --- Rung 5: unattributable, and not a complaint -----------------------
+    return await _park_unrouted(
+        db, tenant_id, channel, clean_text, raw_text, channel_identity_value,
+        in_reply_to, intent["reason"] or "not an answer to anything we asked, and not a complaint",
+        trace_id)
+
+
+def _in_intake_stub(dialogues: list[dict], clean_text: str, window_cutoff: str) -> Optional[dict]:
+    """The stub this intake-form answer belongs to, if exactly one qualifies
+    (routing rung 3).
+
+    Two conditions, both required. The ticket must still be mid-intake (no
+    `category` — no complaint has been filed on it), and the last thing we sent
+    on it must have actually BEEN an intake request. The second is new in
+    Feature 24 and is what stopped this rung from swallowing every bare "yes":
+    `looks_like_intake_answer` cannot tell "yes, that's my email" from "yes, it
+    is resolved", so it may only be trusted where an intake question was asked.
+    """
+    candidates = []
+    for d in dialogues:
+        outbound = d["lastOutbound"]
+        if d["ticket"].get("category"):
+            continue
+        if not outbound or not outbound.get("is_intake_request"):
+            continue
+        if (outbound.get("created_at") or "") < window_cutoff:
+            continue
+        candidates.append(d["ticket"])
+    if len(candidates) == 1 and looks_like_intake_answer(clean_text):
+        return candidates[0]
+    return None
+
+
+async def _first_contact(
+    db: DbWriterClient, tenant_id: str, thread_key: str, channel: str,
+    clean_text: str, raw_text: Optional[str], channel_identity_value: Optional[str],
+    origin_message_id: Optional[str], in_reply_to: Optional[str], trace_id: Optional[str],
+) -> dict:
+    """This contact has no tickets at all. Create one only if they have actually
+    reported something.
+
+    The user's rule was "first message, no check needed" — softened here for one
+    reason: "Hi", "Hello?" and "Is anyone there" are common openers, and each
+    would otherwise become a permanent ticket that reporting has to explain
+    forever. When the LLM is unreachable we DO create the ticket regardless: a
+    lost first complaint is much worse than a junk row, and that is the
+    long-standing bias everywhere in this pipeline.
+    """
+    intent = await assess_inbound([], clean_text, trace_id=trace_id)
+    if intent is not None and not intent["is_new_complaint"]:
+        logger.info("first contact is not a complaint traceId=%s reason=%s", trace_id, intent["reason"])
+        return await _park_unrouted(
+            db, tenant_id, channel, clean_text, raw_text, channel_identity_value,
+            in_reply_to, intent["reason"] or "first message from this contact is not a complaint",
+            trace_id)
     return await _create_stub(db, tenant_id, thread_key, channel, origin_message_id, trace_id)
+
+
+async def _route_without_llm(
+    db: DbWriterClient, tenant_id: str, thread_key: str, channel: str, dialogues: list[dict],
+    clean_text: str, raw_text: Optional[str], channel_identity_value: Optional[str],
+    origin_message_id: Optional[str], in_reply_to: Optional[str], window_cutoff: str,
+    trace_id: Optional[str],
+) -> dict:
+    """Routing with the LLM unavailable: structural rungs only, then ask.
+
+    The pre-Feature-24 fallbacks (WhatsApp appends to a sole open ticket, email
+    starts a new one) were themselves guesses, and one of them is precisely how
+    the reported misroute happened. So an outage now costs a clarifying question
+    rather than a wrong attribution — EXCEPT where a structural signal still
+    stands on its own: an intake answer to a stub that asked an intake question
+    needs no judgment, and a message that reads like a complaint by the
+    deterministic test still opens a ticket rather than being held.
+    """
+    intake_stub = _in_intake_stub(dialogues, clean_text, window_cutoff)
+    if intake_stub is not None:
+        return await _resolved(db, intake_stub, trace_id, "intake-answer")
+    # `looks_like_intake_answer` doubles as a serviceable "this is not prose"
+    # test: anything it accepts is a bare name, identifier or acknowledgement,
+    # none of which is a complaint.
+    if looks_like_intake_answer(clean_text):
+        return await _park_unrouted(
+            db, tenant_id, channel, clean_text, raw_text, channel_identity_value,
+            in_reply_to, "could not assess this message (AI unavailable) and it carries no complaint text",
+            trace_id)
+    return await _create_stub(db, tenant_id, thread_key, channel, origin_message_id, trace_id)
+
+
+async def _park_unrouted(
+    db: DbWriterClient, tenant_id: str, channel: str, clean_text: str, raw_text: Optional[str],
+    channel_identity_value: Optional[str], in_reply_to: Optional[str], reason: str,
+    trace_id: Optional[str],
+) -> dict:
+    """Routing rung 5: store the message, create no ticket, and tell the caller
+    what to say back.
+
+    `ask` is the reply to send the citizen, or ``None`` when we have already
+    asked this contact once — the second unroutable message escalates instead,
+    so a citizen who answers "I don't have it" is never trapped in a loop.
+    """
+    escalate = False
+    if channel_identity_value:
+        asked = await db.unrouted_ask_count(
+            tenant_id, channel_identity_value, _cutoff(_ESCALATION_LOOKBACK_DAYS), trace_id=trace_id)
+        escalate = asked > 0
+
+    parked = None
+    try:
+        parked = await db.create_unrouted_message({
+            "tenantId": tenant_id,
+            "channel": channel,
+            "channelIdentityValue": channel_identity_value,
+            # The RAW text, not the stripped one: an agent resolving this needs
+            # exactly what the citizen sent, quotes and all.
+            "content": raw_text or clean_text,
+            "channelMessageId": in_reply_to,
+            "reason": reason,
+            "status": "escalated" if escalate else "pending",
+            "askCount": 0 if escalate else 1,
+        }, trace_id=trace_id)
+    except Exception:  # noqa: BLE001 - see below
+        # Even this failing must not raise: the alternative is an unhandled
+        # error on the citizen's message. It is logged loudly because a message
+        # that reaches neither a ticket nor this queue is genuinely lost.
+        logger.error("UNROUTED MESSAGE COULD NOT BE STORED traceId=%s channel=%s reason=%s text=%r",
+                     trace_id, channel, reason, (raw_text or clean_text)[:200])
+
+    logger.info("message not attributable to any ticket traceId=%s escalated=%s reason=%s",
+                trace_id, escalate, reason)
+    return {
+        "unrouted": True,
+        "unroutedId": (parked or {}).get("id"),
+        "escalated": escalate,
+        "reason": reason,
+        "ask": None if escalate else ASK_FOR_REFERENCE,
+    }
 
 
 async def _match_against_open_tickets(

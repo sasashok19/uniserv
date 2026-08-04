@@ -57,7 +57,7 @@ class TicketsResourceReplyTest {
         when(db.call(eq("GET"), eq("/api/v1/db/identities/id-9"), any()))
                 .thenReturn(new DbWriterClient.ApiResult(200, Map.of("phone", "+919876543212")));
         when(whatsAppAdapter.sendReply(eq("+919876543212"), eq("Please visit the office tomorrow"), eq("wamid.orig9")))
-                .thenReturn(true);
+                .thenReturn(new com.uniserve.adapters.SendResult(true, "prov-1"));
 
         Response response = resource.reply("tkt-1", Map.of("content", "Please visit the office tomorrow"));
 

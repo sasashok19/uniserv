@@ -345,3 +345,20 @@ HTTP/1.1 503 Service Unavailable
   and nothing more — it is derived exclusively by ai-core
   (`app/tickets/chief_complaint.py`); there is no validation or truncation here,
   since the cap belongs with the deriver that knows what the field is for.
+- **Feature 24 (migration V13) — inbound routing support.**
+  `PATCH /api/v1/db/tickets/{ticketId}/messages/{messageId}/channel-id` stamps a
+  sent message with the id its channel provider assigned it. Deliberately narrow
+  rather than a general message PATCH: the row must exist BEFORE the send (so a
+  failed send still records what we tried to say) but the wamid/Message-ID only
+  exists after it, and nothing else about a sent message may be rewritten.
+  `GET /api/v1/db/tickets/messages/by-channel-id?tenantId=&channelMessageId=`
+  is the reverse lookup behind routing rung 0 — tenant-scoped, and a 404 is the
+  NORMAL case (most inbound messages are not replies).
+  `POST|GET /api/v1/db/unrouted-messages`, `/ask-count`, `/{id}/attach`,
+  `/{id}/discard` back the unrouted queue. `attach` copies the text onto the
+  target ticket's conversation as well as resolving the row — clearing the queue
+  without delivering the message would defeat the point — and carries the
+  provider id across so a later reply to that message routes by rung 0.
+  There is deliberately **no** "last outbound message" endpoint: routing needs a
+  candidate's complaint AND the last thing we asked, and `messages(id)` returns
+  the whole timeline in one round trip.

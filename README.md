@@ -26,6 +26,7 @@ resolution workflow and full audit trail.
 - [Queue separation & ticket lifecycle](#queue-separation--ticket-lifecycle)
 - [Citizen-facing notifications](#citizen-facing-notifications)
 - [Subject-line ticket threading & dedup](#subject-line-ticket-threading--dedup)
+- [Inbound routing ladder](#inbound-routing-ladder)
 - [Chief complaint](#chief-complaint)
 - [Configurable per-channel intake fields](#configurable-per-channel-intake-fields)
 - [Configurable priority rubric & general settings](#configurable-priority-rubric--general-settings)
@@ -759,9 +760,12 @@ weeks later about something unrelated, got silently appended to the old,
 resolved ticket instead of starting a new one. Fixed in `ensure_ticket_stub`
 (`app/tickets/intake.py`):
 - The threadId fallback now requires the ticket still be OPEN
-  (`open,assigned,in_progress,reopened` — `app/dedup/service.py`'s
-  `OPEN_STATUSES`, now also including `reopened`, which it was previously
-  missing).
+  (`app/dedup/service.py`'s `OPEN_STATUSES`, which also gained `reopened`,
+  which it was previously missing). **Superseded by Feature 24** — see
+  [Inbound routing ladder](#inbound-routing-ladder): `OPEN_STATUSES` was
+  still missing `pending_customer`, and a *resolved* ticket being excluded
+  from routing entirely is what sent a citizen's "Yes it is" to the wrong
+  ticket. Attribution now uses the wider `ADDRESSABLE_STATUSES`.
 - For a channel with no subject line at all (WhatsApp today), resolution
   now tries identity + open-ticket count BEFORE the threadId match, not
   after: zero open tickets → new; exactly one → append (the same
@@ -1168,6 +1172,123 @@ Feature 17 status-inquiry note above for why).
 
 ---
 
+## Inbound routing ladder
+
+**The bug (Feature 24).** An agent asked *"Is this resolved?"* on **TKT-00010**
+(status `resolved`); the citizen replied *"Yes it is"* on WhatsApp; the reply was
+filed against **TKT-00014**, an unrelated open stub. Three compounding defects,
+each worth knowing because each was invisible on its own:
+
+1. **A resolved ticket was not a routing candidate.** `OPEN_STATUSES`
+   (`app/dedup/service.py`) was the candidate filter, so TKT-00010 could not be
+   found by any means. **`pending_customer` was missing from it too** — the
+   status whose entire purpose is "we asked the citizen something and are
+   waiting" — which silently broke the parked-follow-up flow on *every* channel:
+   the answer arrived, could not find the ticket, and started a new one.
+2. **"Yes it is" is structurally an intake-form answer.** Every token is an
+   affirmation or filler, so `looks_like_intake_answer` returns True and the
+   Feature 20 guard handed the message to whichever stub was mid-intake. That
+   rule was written for *"yes, that's my email"* answering **our intake
+   question**; it was firing on a "yes" answering a completely different one.
+   (It is knife-edge, too: `"It is resolved"` returns False — `resolved` is a
+   statement word — while `"Yes it is"` returns True.)
+3. **The one exact signal was unusable.** WhatsApp sends `context.id` on a
+   swipe-reply and email sends `In-Reply-To`; both name a message **we** sent.
+   We stored provider ids for inbound messages only, and
+   `WhatsAppAdapter.sendReply` returned a `boolean`, discarding Meta's wamid.
+
+**What was actually missing conceptually:** every check routing had compared the
+new message against ticket **complaint text** (`is_same_topic`,
+`match_open_ticket`). A reply like "Yes it is" contains no complaint content, so
+those comparisons had nothing to work with and the fallbacks guessed. The context
+that resolves it is **what we last asked them**.
+
+### The ladder
+
+| # | Test | Result | Cost |
+|---|---|---|---|
+| 0 | Inbound reply-to id matches a stored **outbound** `channel_message_id` (or a ticket's own `origin_message_id`, Feature 19) | that ticket, **any status** | free, exact |
+| 1 | Valid `TKT-xxxxx` typed by the citizen | that ticket, **any status** | free |
+| 2 | AI: does this answer one of our outstanding questions? | that ticket, **any status** | 1 call |
+| 3 | Intake answer **and** that stub's last outbound was an intake ask | that stub | free |
+| 4 | AI (*same call as 2*): does it read as a new complaint? | Feature 22 dedup check → new ticket | 0 extra |
+| 5 | None of the above | park in `unrouted_messages`, ask once, escalate on the second | free |
+
+Rungs 2 and 4 are **one** request (`app/classify/message_intent.assess_inbound`)
+returning `{answers_ticket, is_new_complaint, reason}`. Two separate calls would
+cost twice as much *and* could contradict each other — both answering yes would
+leave the caller with a tie-break rule, which is exactly the kind of guess this
+work exists to remove.
+
+**Rung 1 beats rung 0 deliberately.** Replying to a message is often just
+"whichever thread was open in my app"; typing a ticket number is an unambiguous
+statement of intent. When the two disagree the typed reference wins and the
+disagreement is logged.
+
+**Rung 3 is now gated on having asked.** The intake guard may only claim a bare
+"yes" when the last outbound message on that stub was itself an intake request
+(`ticket_messages.is_intake_request`). This is what stops defect 2 recurring.
+
+### Decisions worth knowing
+
+- **Reply window: 3 days**, `generalSettings.replyWindowDays` overrides per
+  tenant. A "yes" arriving months after we asked is not an answer — the citizen
+  has forgotten the question — so it falls through to rung 5 instead of binding
+  to a stale one.
+- **A reply on a finished ticket is appended and audited, never acted on.** The
+  message joins the conversation and a `ticket.reply_after_resolution` event is
+  written; the **status is not changed**. "Yes it is" and "No it isn't" are
+  indistinguishable to a router, and an automatic reopen on the wrong reading
+  churns the backlog while an automatic close on the wrong reading buries a live
+  complaint.
+- **The old channel-default fallbacks are gone.** When the judgment was
+  unavailable, routing used to fall back to "WhatsApp appends to a sole open
+  ticket / email starts a new one". Those were guesses, and one of them is how
+  this misroute happened. An LLM outage now **asks the citizen** — except where a
+  structural signal still stands alone: an intake answer to a stub that asked
+  one, prose that still opens a ticket, and a first contact, which still gets a
+  ticket because a lost first complaint is far worse than a junk row.
+- **Quoted text is stripped before any judgment** (`app/classify/text_cleanup.py`)
+  — an email reply otherwise arrives carrying our own question *and* the original
+  complaint, which would make rungs 2 and 4 answer yes to almost anything. The
+  **raw** text is still what gets stored; an agent needs what the citizen sent.
+- **The status-update notification is now recorded on the conversation.** It was
+  sent and forgotten — invisible in the dashboard, and invisible to routing,
+  which matters more than it sounds: its own text says *"just reply to this
+  email"*, so it produces exactly the inbound "no, it's not fixed" that rung 2
+  has to attribute. With no record of the question there was nothing for the
+  reply to be an answer to.
+
+### Rung 5: the unrouted-message queue
+
+A message that answers nothing we asked and describes no problem ("yes", "ok",
+"you are correct") creates **no ticket**. It is stored in `unrouted_messages`
+and the citizen is asked which complaint they mean; a **second** unroutable
+message from the same contact **escalates** instead of asking again, so "I don't
+have it" never loops.
+
+Storing it is the whole point. Dropping the message loses a citizen's words
+entirely — nobody can fix what was never stored, which is worse than a misroute
+an agent *can* fix — and minting a placeholder ticket would put permanent noise
+in the queue that reporting then has to exclude forever.
+
+Leads and admins get an **Unrouted** view (`unrouted.view`/`unrouted.manage`,
+lead/admin only, since resolving one files a citizen's words onto a ticket of the
+agent's choosing). **Attach** takes the ticket *number* the agent is reading and
+copies the text onto that ticket's conversation — clearing the queue without
+delivering the message would defeat the purpose — and also carries the provider
+id across, so a later reply to that same message resolves by rung 0. **Discard**
+marks it noise; the row is kept either way, never deleted.
+
+### Migration V13
+
+`ticket_messages.channel_message_id` (+ index), `ticket_messages.is_intake_request`,
+and the `unrouted_messages` table. Note that `channel_message_id` is only
+populated for messages sent **after** deploy, so rung 0 begins working from each
+ticket's next outbound message; rungs 1–5 work immediately.
+
+---
+
 ## Chief complaint
 
 **What it is (Feature 23).** One line per ticket saying what the citizen
@@ -1508,6 +1629,9 @@ own tickets and `/agents` performance are lead/admin only via
   transcripts, capped at 2,000 rows (the flat shape caps at 50,000). Reports
   `X-Export-Row-Count`, `X-Export-Detail`, and on truncation
   `X-Export-Truncated`/`X-Export-Row-Cap`.
+- `GET|POST /api/v1/unrouted-messages`, `POST /api/v1/unrouted-messages/{id}/attach`
+  (body `{ticketNumber}` or `{ticketId}`), `POST /api/v1/unrouted-messages/{id}/discard`
+  — the Feature 24 unrouted queue, lead/admin only (`unrouted.view`/`unrouted.manage`)
 - `GET /api/v1/tickets/{id}/events` — the ticket's **audit trail** (creation,
   assignments, status transitions) with actor/assignee agent ids resolved to
   display names; backed by the `ticket_events` table. Assignments are audited

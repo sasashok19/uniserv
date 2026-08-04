@@ -1,13 +1,23 @@
 "use client";
 
 import { useState } from "react";
-import { BarChart3, ChevronLeft, ChevronRight, Inbox, Settings2 } from "lucide-react";
+import { BarChart3, ChevronLeft, ChevronRight, HelpCircle, Inbox, Settings2 } from "lucide-react";
 
-export type NavKey = "analytics" | "queue" | "admin";
+export type NavKey = "analytics" | "queue" | "unrouted" | "admin";
 
-const NAV: { key: NavKey; label: string; icon: typeof Inbox; adminOnly?: boolean }[] = [
+const NAV: {
+  key: NavKey;
+  label: string;
+  icon: typeof Inbox;
+  adminOnly?: boolean;
+  leadOrAdmin?: boolean;
+}[] = [
   { key: "analytics", label: "Analytics", icon: BarChart3 },
   { key: "queue", label: "Ticket Queue", icon: Inbox },
+  // Feature 24: messages routing could not attribute to a ticket. Lead/admin
+  // only — resolving one files a citizen's words onto a ticket of the agent's
+  // choosing, and an agent who sees only their own tickets cannot judge that.
+  { key: "unrouted", label: "Unrouted", icon: HelpCircle, leadOrAdmin: true },
   { key: "admin", label: "Administration", icon: Settings2, adminOnly: true },
 ];
 
@@ -41,7 +51,11 @@ export default function Sidebar({
       // ignore storage failures (e.g. private mode quota)
     }
   }
-  const items = NAV.filter((n) => !n.adminOnly || role === "admin");
+  const items = NAV.filter(
+    (n) =>
+      (!n.adminOnly || role === "admin") &&
+      (!n.leadOrAdmin || role === "admin" || role === "lead"),
+  );
 
   return (
     <>

@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     identity_anon_ref_prefix: str = "ANON"
     default_region: str = "IN"  # for phone normalisation
 
+    # Inbound routing (Feature 24). How long after we send a citizen a message
+    # a bare reply ("yes", "no", "it is resolved") may still be attributed to
+    # that ticket. Beyond it, an out-of-the-blue "yes" is treated as
+    # unattributable and the citizen is asked which complaint they mean, rather
+    # than being bound to a months-old question they have surely forgotten.
+    # Tenant-overridable via generalSettings.replyWindowDays.
+    reply_window_days: int = 3
+
     # Conversation / LLM (Feature 06)
     conversation_state_ttl_hours: int = 2
     ai_max_followup_questions: int = 2

@@ -66,6 +66,11 @@ public class AuthFilter implements ContainerRequestFilter {
         }
     }
 
+    /** Package-private alias so the path list can be asserted without a container. */
+    boolean isProtectedPath(String path) {
+        return isProtected(path);
+    }
+
     private boolean isProtected(String path) {
         // NOTE: substring matching — "/api/v1/public/announcements" (login-page
         // ticker, PublicAnnouncementsResource) deliberately does NOT match the
@@ -75,6 +80,10 @@ public class AuthFilter implements ContainerRequestFilter {
                 || path.contains("api/v1/tickets")
                 || path.contains("api/v1/analytics")
                 || path.contains("api/v1/announcements")
+                // Feature 24: unrouted messages are raw citizen text, so this
+                // MUST be here — omitting it would leave CurrentUser unpopulated
+                // and the lead/admin check reading a null role.
+                || path.contains("api/v1/unrouted-messages")
                 || path.contains("api/v1/admin");
     }
 

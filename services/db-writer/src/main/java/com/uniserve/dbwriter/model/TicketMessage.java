@@ -50,6 +50,22 @@ public class TicketMessage extends PanacheEntityBase {
     @Column(name = "is_ai_generated")
     public Integer isAiGenerated;
 
+    /** The id the CHANNEL PROVIDER gave this message (Feature 24) — a WhatsApp
+     * wamid or an email Message-ID. Set on outbound messages after a successful
+     * send, and on inbound messages from the webhook/poller. It is what lets an
+     * inbound reply-to (`context.id` / `In-Reply-To`) resolve to the exact
+     * ticket the citizen is replying on, with no heuristic involved. */
+    @Column(name = "channel_message_id")
+    public String channelMessageId;
+
+    /** 1 when this outbound message ASKED the citizen for identity/intake
+     * details (Feature 24). A bare "yes" is structurally identical whether it
+     * answers "did you mean x@gmail.com?" or "is this resolved?", so the intake
+     * guard may only claim such a message when the last thing we asked on that
+     * stub was in fact an intake question. */
+    @Column(name = "is_intake_request")
+    public Integer isIntakeRequest;
+
     @Column(name = "created_at")
     public String createdAt;
 
@@ -63,6 +79,9 @@ public class TicketMessage extends PanacheEntityBase {
         }
         if (isAiGenerated == null) {
             isAiGenerated = 0;
+        }
+        if (isIntakeRequest == null) {
+            isIntakeRequest = 0;
         }
     }
 
@@ -79,6 +98,8 @@ public class TicketMessage extends PanacheEntityBase {
         m.put("content", content);
         m.put("media_urls_json", mediaUrlsJson);
         m.put("is_ai_generated", isAiGenerated);
+        m.put("channel_message_id", channelMessageId);
+        m.put("is_intake_request", isIntakeRequest);
         m.put("created_at", createdAt);
         return m;
     }

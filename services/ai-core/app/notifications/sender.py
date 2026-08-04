@@ -93,12 +93,16 @@ async def send_email(
                 "inReplyToMessageId": in_reply_to,
             })
         resp.raise_for_status()
-        sent = bool(resp.json().get("sent"))
+        body_json = resp.json()
+        sent = bool(body_json.get("sent"))
         if sent:
             logger.info("email delivered: traceId=%s to=%s subject=%s", trace_id, to_address, subject)
         else:
             logger.warning("email send reported false: traceId=%s to=%s", trace_id, to_address)
-        return {"delivered": sent}
+        # Feature 24: the Message-ID the gateway put on this mail. Returned so
+        # the caller can stamp it onto the persisted message — that is what makes
+        # the citizen's reply to it routable back to this exact ticket.
+        return {"delivered": sent, "channelMessageId": body_json.get("channelMessageId")}
     except Exception as exc:  # noqa: BLE001 - report and let the caller decide on retry/DLQ
         logger.error("email delivery failed: traceId=%s to=%s error=%s body=%s",
                       trace_id, to_address, exc, _error_body_snippet(exc))
@@ -128,12 +132,14 @@ async def send_whatsapp(
                 "to": to_phone, "body": body, "contextMessageId": context_message_id,
             })
         resp.raise_for_status()
-        sent = bool(resp.json().get("sent"))
+        body_json = resp.json()
+        sent = bool(body_json.get("sent"))
         if sent:
             logger.info("whatsapp delivered: traceId=%s to=%s", trace_id, to_phone)
         else:
             logger.warning("whatsapp send reported false: traceId=%s to=%s", trace_id, to_phone)
-        return {"delivered": sent}
+        # Feature 24: Meta's wamid for this message — see send_email above.
+        return {"delivered": sent, "channelMessageId": body_json.get("channelMessageId")}
     except Exception as exc:  # noqa: BLE001 - report and let the caller decide on retry/DLQ
         logger.error("whatsapp delivery failed: traceId=%s to=%s error=%s body=%s",
                       trace_id, to_phone, exc, _error_body_snippet(exc))

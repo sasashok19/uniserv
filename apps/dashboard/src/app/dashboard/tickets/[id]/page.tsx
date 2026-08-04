@@ -333,12 +333,20 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
         {/* LEFT: conversation (top) + audit trail (bottom), equal share, own scrollbars. */}
         <div className="space-y-6">
           <section className="rounded-lg border bg-white p-4 shadow-sm">
-            <h2 className="mb-2 text-base font-semibold text-slate-800">Conversation</h2>
+            <h2 className="mb-2 text-base font-semibold text-slate-800">
+              Conversation <span className="text-xs font-normal text-slate-500">(newest first)</span>
+            </h2>
             {ticket.messages.length === 0 ? (
               <p className="text-sm text-slate-500">No messages yet.</p>
             ) : (
+              /* Newest first (user-requested), matching the audit trail below:
+                 an agent opening a ticket wants the latest exchange, not to
+                 scroll a long thread to reach it. The API returns the timeline
+                 oldest-first, so it is reversed here rather than server-side —
+                 chronological order is the correct storage order and the CSV
+                 export reads it that way. */
               <ul className="max-h-[38vh] space-y-2 overflow-y-auto pr-1">
-                {ticket.messages.map((m, i) => (
+                {[...ticket.messages].reverse().map((m, i) => (
                   <li
                     key={i}
                     className={`rounded-lg border bg-slate-50 p-3 text-sm ${AUTHOR_BORDER[m.authorType] ?? "border-l-4 border-l-slate-300"}`}

@@ -75,7 +75,7 @@ class TicketNotifierTest {
                 "ticket_number", "TKT-00101");
         when(db.call(eq("GET"), eq("/api/v1/db/identities/id-3"), any()))
                 .thenReturn(new DbWriterClient.ApiResult(200, Map.of("email", "citizen@example.org")));
-        when(emailAdapter.sendReply(anyString(), anyString(), anyString(), any())).thenReturn(true);
+        when(emailAdapter.sendReply(anyString(), anyString(), anyString(), any())).thenReturn(new com.uniserve.adapters.SendResult(true, "prov-1"));
 
         notifier.sendStatusUpdate(ticket, "resolved", null);
 

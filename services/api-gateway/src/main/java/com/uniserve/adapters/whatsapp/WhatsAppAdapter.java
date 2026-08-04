@@ -1,6 +1,7 @@
 package com.uniserve.adapters.whatsapp;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.uniserve.adapters.SendResult;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -56,10 +57,13 @@ public class WhatsAppAdapter {
      * that window Meta requires a pre-approved template message instead, and this
      * call fails with a Graph API error (not implemented — see docs/02b_ADAPTER_WHATSAPP.md).
      *
-     * @return true on a 2xx Graph API response; throws on failure (caller decides
-     * whether that's fatal or best-effort, same convention as {@code EmailAdapter}).
+     * @return the send outcome including the wamid Meta assigned this message
+     * (Feature 24) — recorded against the ticket_message row so a citizen's
+     * swipe-reply to it resolves straight back to this ticket. Throws on
+     * failure (caller decides whether that's fatal or best-effort, same
+     * convention as {@code EmailAdapter}).
      */
-    public boolean sendReply(String toPhone, String body, String contextMessageId) {
+    public SendResult sendReply(String toPhone, String body, String contextMessageId) {
         if (accessToken.isEmpty() || accessToken.get().isBlank()) {
             throw new IllegalStateException("WHATSAPP_ACCESS_TOKEN is not set");
         }
@@ -82,12 +86,34 @@ public class WhatsAppAdapter {
             if (resp.statusCode() >= 400) {
                 throw new RuntimeException("WhatsApp Graph API " + resp.statusCode() + ": " + resp.body());
             }
-            LOG.infof("WhatsApp reply sent via Graph API to=%s", toPhone);
-            return true;
+            String wamid = extractWamid(resp.body());
+            LOG.infof("WhatsApp reply sent via Graph API to=%s wamid=%s", toPhone, wamid);
+            return new SendResult(true, wamid);
         } catch (RuntimeException e) {
             throw e;
         } catch (Exception e) {
             throw new RuntimeException("WhatsApp Graph API call failed: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * The wamid out of a Graph API send response (Feature 24):
+     * {@code {"messages":[{"id":"wamid.HBg..."}]}}.
+     *
+     * Never throws and never fails the send: the message HAS gone to the
+     * citizen by this point, so an unexpected response shape must cost us the
+     * routing shortcut, not the reply. Package-private for unit tests.
+     */
+    static String extractWamid(String responseBody) {
+        try {
+            com.fasterxml.jackson.databind.JsonNode id = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .readTree(responseBody == null ? "" : responseBody)
+                    .path("messages").path(0).path("id");
+            String wamid = id.isMissingNode() || id.isNull() ? null : id.asText(null);
+            return wamid == null || wamid.isBlank() ? null : wamid;
+        } catch (Exception e) {
+            LOG.warnf("WhatsApp send succeeded but the wamid could not be read: %s", e.getMessage());
+            return null;
         }
     }
 

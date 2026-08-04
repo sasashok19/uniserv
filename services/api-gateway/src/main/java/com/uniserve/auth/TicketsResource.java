@@ -586,6 +586,27 @@ public class TicketsResource {
         return Response.ok(Map.of("isDuplicate", true, "parentTicketId", parentId)).build();
     }
 
+    /**
+     * Record the provider id of a message we just sent (Feature 24). Swallows
+     * its own failure: the citizen HAS the message, and the only thing lost is
+     * the ability to route their reply by id — every other rung still applies.
+     */
+    private void stampChannelMessageId(String ticketId, String messageRowId, String channelMessageId) {
+        if (messageRowId == null) {
+            return;
+        }
+        try {
+            DbWriterClient.ApiResult patched = db.call("PATCH",
+                    "/api/v1/db/tickets/" + ticketId + "/messages/" + messageRowId + "/channel-id",
+                    Map.of("channelMessageId", channelMessageId));
+            if (patched.status() >= 400) {
+                LOG.warnf("could not record channel message id for ticket %s: %s", ticketId, patched.body());
+            }
+        } catch (Exception e) {
+            LOG.warnf("could not record channel message id for ticket %s: %s", ticketId, e.getMessage());
+        }
+    }
+
     /** id -> name for every agent/lead/admin in the tenant, for the assign-to dropdown and queue display. */
     private Map<String, String> agentDirectory() {
         Map<String, String> names = new LinkedHashMap<>();
@@ -759,14 +780,17 @@ public class TicketsResource {
 
         boolean sent = false;
         String sendError = null;
+        String channelMessageId = null;
         if (("email".equals(channel) || "whatsapp".equals(channel)) && identityId != null) {
             DbWriterClient.ApiResult identity = db.call("GET", "/api/v1/db/identities/" + identityId, null);
             if ("email".equals(channel)) {
                 String toAddress = identity.status() < 400 ? str(identity.body(), "email") : null;
                 if (toAddress != null && !toAddress.isBlank()) {
                     try {
-                        sent = emailAdapter.sendReply(
+                        com.uniserve.adapters.SendResult result = emailAdapter.sendReply(
                                 toAddress, "Update on your complaint " + ticketNumber, content, originMessageId);
+                        sent = result.sent();
+                        channelMessageId = result.channelMessageId();
                     } catch (Exception e) {
                         sendError = e.getMessage();
                         LOG.errorf(e, "Failed to send reply email for ticket %s", id);
@@ -778,7 +802,10 @@ public class TicketsResource {
                 String toPhone = identity.status() < 400 ? str(identity.body(), "phone") : null;
                 if (toPhone != null && !toPhone.isBlank()) {
                     try {
-                        sent = whatsAppAdapter.sendReply(toPhone, content, originMessageId);
+                        com.uniserve.adapters.SendResult result =
+                                whatsAppAdapter.sendReply(toPhone, content, originMessageId);
+                        sent = result.sent();
+                        channelMessageId = result.channelMessageId();
                     } catch (Exception e) {
                         sendError = e.getMessage();
                         LOG.errorf(e, "Failed to send WhatsApp reply for ticket %s", id);
@@ -787,6 +814,16 @@ public class TicketsResource {
                     sendError = "No phone number on file for this ticket's identity";
                 }
             }
+        }
+
+        // Feature 24: stamp the sent message with the provider's id, so when the
+        // citizen replies to THIS message ("Is this resolved?" -> "Yes it is")
+        // routing resolves it straight back to this ticket instead of guessing.
+        // Best-effort and deliberately after the send: the agent's reply has
+        // already reached the citizen, and losing a routing shortcut must never
+        // turn a delivered message into a failed one.
+        if (channelMessageId != null) {
+            stampChannelMessageId(id, str(recorded.body(), "id"), channelMessageId);
         }
 
         Map<String, Object> response = new LinkedHashMap<>();

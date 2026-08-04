@@ -361,3 +361,116 @@ DB_WRITER_INTERNAL_API_KEY=<railway value> \
 
 ai-core now **292/292** (13 new chief-complaint tests). api-gateway 65/65,
 db-writer 8/8 unchanged.
+
+---
+
+# Session handoff — Feature 24 (inbound routing), 2026-08-04
+
+## The bug (user's words)
+"I opened a complaint TKT-00010 which is in resolved status and sent a message
+'Is this resolved?'... I replied 'Yes it is'. Now in the portal I see this
+message is updated against the ticket TKT-00014, this is completely wrong."
+
+## Root cause: THREE compounding defects
+1. `OPEN_STATUSES = "open,assigned,in_progress,reopened"` was the routing
+   candidate filter. TKT-00010 was `resolved`, so it was never a candidate —
+   no judgment could have found it. **`pending_customer` was also missing**,
+   which broke the designed follow-up flow on every channel: park a ticket,
+   citizen replies, reply cannot find the ticket, new ticket created.
+2. `looks_like_intake_answer("Yes it is")` is True (all tokens are
+   affirmation/filler), so the Feature 20 intake guard routed it to the single
+   categoryless open stub = TKT-00014.
+3. `ticket_messages` had no provider-id column and `WhatsAppAdapter.sendReply`
+   returned `boolean`, discarding Meta's wamid — so the citizen's `context.id`
+   named a message we could not look up. The one exact signal was unusable.
+
+## The ladder (replaces ensure_ticket_stub's old order)
+```
+0. reply-to id matches a stored OUTBOUND message id   -> that ticket, any status
+1. valid TKT-xxxxx typed by the citizen               -> that ticket, any status
+2. AI: answers one of our outstanding questions?      -> that ticket, any status
+3. intake answer AND that stub's last outbound WAS an intake ask -> that stub
+4. AI (same call as 2): reads as a new complaint?      -> dedup check, new ticket
+5. none of the above -> park in unrouted_messages, ask once, escalate on the 2nd
+```
+Rungs 2+4 are ONE call (`app/classify/message_intent.assess_inbound`) returning
+`{answers_ticket, is_new_complaint, reason}` — two calls could contradict each
+other and leave a tie-break rule, which is the kind of guess this removes.
+Rung 1 beats rung 0 by decision: typing a ticket number is deliberate, replying
+in a thread is often just "whichever chat was open". Disagreements are logged.
+
+## User's decisions (locked)
+- Reply window: **3 days**, `generalSettings.replyWindowDays` overrides.
+- Reply on a resolved/closed ticket: **audit event + added to the conversation
+  only**. No auto-close, no auto-reopen, NO banner (explicitly "audit only").
+  Event type: `ticket.reply_after_resolution`.
+- Unrouted queue: **lead/admin only** (`unrouted.view`/`unrouted.manage`).
+- Typed reference wins over reply-to: agreed.
+- Conversation panel: **newest first** (matches the audit trail).
+
+## Changes
+**V13** (`V13__message_ids_and_unrouted.sql`): `ticket_messages.channel_message_id`,
+`ticket_messages.is_intake_request`, two indexes, `unrouted_messages` table.
+
+**db-writer**: `TicketMessage` +2 fields; `TicketService.setMessageChannelId` /
+`findByChannelMessageId`; `UnroutedMessage` entity + `UnroutedMessageService`
+(create/list/count/recentAskCount/attach/discard — attach COPIES the text onto
+the ticket's conversation, since clearing the queue without delivering the
+message defeats the point) + `UnroutedMessageResource`.
+
+**api-gateway**: new `SendResult(sent, channelMessageId)` replaces the boolean
+from both adapters; `WhatsAppAdapter.extractWamid` reads Meta's id;
+`EmailAdapter.newMessageId` MINTS our own Message-ID (Resend's response `id` is
+not the RFC header and SMTP returns nothing) set via `ResendEmailClient.buildHeaders`;
+reply endpoint + `TicketNotifier` stamp the row after a successful send;
+`TicketNotifier` now also RECORDS the status-update notification on the
+conversation (it was sent and forgotten — invisible to agents AND to routing,
+even though its own text invites a reply); `UnroutedMessagesResource` (accepts a
+ticket NUMBER and resolves it); RBAC + `AuthFilter.isProtected` additions.
+
+**ai-core**: `ADDRESSABLE_STATUSES`/`TERMINAL_STATUSES` and `pending_customer`
+added to `OPEN_STATUSES`; new `app/classify/message_intent.py` and
+`app/classify/text_cleanup.py` (strips quoted replies/signatures/our own
+boilerplate before ANY judgment — an email reply otherwise arrives containing
+our question and their original complaint, which would make rungs 2 and 4
+answer yes to almost anything; the RAW text is still what gets stored);
+`ensure_ticket_stub` rewritten to the ladder with `_first_contact`,
+`_route_without_llm`, `_park_unrouted`, `_in_intake_stub`, `_ticket_dialogue`;
+`config.reply_window_days = 3`; dispatcher short-circuits when routing returns
+no ticket id and sends the ask-for-reference reply; outbound AI replies carry
+`isIntakeRequest` and their row id so the send consumer can stamp the provider id.
+
+**dashboard**: conversation newest-first; `UnroutedPanel` + sidebar item
+(lead/admin, role-gated in BOTH places since the tab key persists in
+sessionStorage); 3 BFF routes.
+
+## Behaviour deliberately REMOVED
+The old channel-default fallbacks ("WhatsApp appends to a sole open ticket",
+"email starts a new one") when the LLM was unavailable. Those were guesses, and
+one of them is how this misroute happened. An outage now asks the citizen —
+except where a structural signal still stands alone (intake answer to a stub
+that asked; prose still opens a ticket; a first contact still gets a ticket,
+because a lost first complaint beats a junk row).
+
+## Tests
+ai-core **314** (new `test_routing_ladder.py` 33, `test_message_intent.py` 17;
+27 obsolete old-ladder tests removed — their surviving intent, incl. the
+Feature 20 three-message regression and Feature 22's unclear-duplicate flow, is
+carried forward in the new file). api-gateway **73** (new `WhatsAppWamidTest`,
+`OutboundMessageIdTest`, `InboundRoutingSupportTest`). db-writer **23** (new
+`MessageChannelIdTest`, `UnroutedMessageServiceTest`). Dashboard tsc + lint clean.
+
+## Deployment
+All four, db-writer FIRST (V13). Note: `channel_message_id` is only populated
+for messages sent AFTER deploy, so rung 0 starts working from the next outbound
+message per ticket; rungs 1-5 work immediately.
+
+## Assistant sync (Feature 24)
+`ASSISTANT_INSTRUCTIONS` gained an "Answers to questions we asked earlier"
+section: a reply may belong to a resolved/closed complaint (routing attributes it
+before the assistant sees it), so treat it as that conversation, never a new
+complaint; acknowledge a confirmed fix without calling submit_complaint; on "not
+fixed" continue the same complaint and say a colleague will look again; and NEVER
+claim to have reopened/resolved/closed anything (the assistant cannot change
+status — only a human decides, per the user's audit-only decision). Pushed to
+`asst_FX75qlIQVJohreLhh2ugyFKm`.

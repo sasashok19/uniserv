@@ -10,7 +10,24 @@ from typing import Optional
 
 from app.identity.db_client import DbWriterClient
 
-OPEN_STATUSES = "open,assigned,in_progress,reopened"
+# A complaint still being worked. `pending_customer` BELONGS here and its
+# absence was a bug (Feature 24): that status means "we asked the citizen
+# something and are waiting", so a ticket in it is the single most likely
+# destination for the next inbound message — and it was invisible to routing,
+# which meant every answer to a parked follow-up spawned a fresh ticket.
+OPEN_STATUSES = "open,assigned,in_progress,pending_customer,reopened"
+
+# Every status an inbound message may still be ATTRIBUTED to (Feature 24).
+# Wider than the above on purpose: an agent asks "Is this resolved?" and marks
+# the ticket resolved, the citizen answers "Yes it is" — that answer belongs on
+# the resolved ticket, and excluding terminal statuses from routing is what sent
+# it to an unrelated one. Attribution is not the same question as "is this
+# ticket open"; nothing here reopens or otherwise changes a ticket's status.
+ADDRESSABLE_STATUSES = OPEN_STATUSES + ",resolved,closed,cancelled"
+
+# Statuses where appending an inbound message deserves an audit note, because
+# the ticket is finished and nobody is necessarily watching it any more.
+TERMINAL_STATUSES = frozenset({"resolved", "closed", "cancelled"})
 
 
 async def check_duplicate(db: DbWriterClient, tenant_id: str, master_id: str, category: str,

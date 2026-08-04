@@ -112,6 +112,27 @@ async def _handle_channel_message(tenant_id: str, event: dict) -> None:
         subject=req.subject, raw_text=req.rawText,
         channel_identity_type=req.channelIdentity.type, channel_identity_value=req.channelIdentity.value,
         origin_message_id=req.messageId, in_reply_to=req.inReplyTo, trace_id=trace_id)
+    # Feature 24: routing may decline to attribute this message to any ticket
+    # AND decline to invent one — a bare "yes" that answers nothing we asked and
+    # describes no problem. The message is already stored for a lead to file
+    # (`unrouted_messages`); all that remains is to ask the citizen which
+    # complaint they mean, and the conversation agent must NOT run, because
+    # there is no ticket for it to run against.
+    if not stub.get("id"):
+        if stub.get("ask"):
+            try:
+                await deliver_reply({
+                    "channel": req.channel,
+                    "channelIdentityValue": req.channelIdentity.value,
+                    "messageText": stub["ask"],
+                }, trace_id=trace_id)
+            except Exception:  # noqa: BLE001 - the message is stored either way
+                logger.exception("failed to send the ask-for-reference reply traceId=%s", trace_id)
+        logger.info(
+            "message parked as unrouted traceId=%s channel=%s escalated=%s asked=%s reason=%s",
+            trace_id, req.channel, stub.get("escalated"), bool(stub.get("ask")), stub.get("reason"),
+        )
+        return
     req.ticketId = stub["id"]
     req.ticketNumber = stub.get("ticketNumber")
     # Feature 22: routing judged this MIGHT continue an existing complaint but
@@ -218,6 +239,15 @@ async def _handle_ai_reply_send(tenant_id: str, event: dict) -> None:
             trace_id, tenant_id, payload.get("threadId"),
         )
         raise
+    # Feature 24: record the id the provider gave the message we just sent, so
+    # the citizen's reply to it resolves straight back to this ticket (routing
+    # rung 0). Best-effort by design — the citizen HAS the message; losing the
+    # shortcut costs a rung, not the reply.
+    channel_message_id = (result or {}).get("channelMessageId")
+    ticket_id, message_id = payload.get("ticketId"), payload.get("messageId")
+    if channel_message_id and ticket_id and message_id:
+        await DbWriterClient().set_message_channel_id(
+            ticket_id, message_id, channel_message_id, trace_id=trace_id)
     logger.info("ai.reply.send processed traceId=%s result=%s", trace_id, result)
 
 

@@ -670,3 +670,36 @@ applies the identical `isDuplicate`/`parentTicketId`/closed treatment the
 conversation path uses and writes both audit trails. The citizen answering in
 the conversation and an agent clicking here are the same decision, taken by
 whichever gets there first.
+
+## Unrouted messages & newest-first conversation (Feature 24)
+
+**Conversation is newest-first**, matching the audit trail beside it — an agent
+opening a ticket wants the latest exchange, not to scroll a long thread to reach
+it. Reversed in the component, not server-side: chronological is the correct
+storage order and the CSV export reads it that way.
+
+**Unrouted** is a new sidebar view (`UnroutedPanel.tsx`), **lead/admin only** —
+gated in the sidebar AND again in `dashboard/page.tsx`, because the active tab
+key persists in `sessionStorage` and a demoted lead must not land on a view they
+can no longer use.
+
+It lists citizen messages routing declined to attribute to any ticket and
+declined to invent one for (see the README's *Inbound routing ladder*).
+`pending` means the citizen has been asked for a ticket number; `escalated`
+means they were asked once already and the next message was also unroutable, so
+the bot stopped asking. Each row shows the message, the sender, and why routing
+gave up.
+
+Two actions. **Attach** takes the ticket **number** the agent is reading (the
+gateway resolves it to an id) and copies the text onto that ticket's
+conversation — clearing the queue without delivering the message would defeat
+the point of storing it. **Discard** marks it noise. The row is kept either way.
+
+BFF routes: `/api/unrouted-messages`, `/api/unrouted-messages/[id]/attach`,
+`/api/unrouted-messages/[id]/discard` — thin pass-throughs so a 403 from the
+gateway's RBAC reaches the UI intact.
+
+**A reply on a resolved ticket is not visually flagged** (the user's explicit
+choice: "audit only, add to conversation"). It appears at the top of the
+conversation and as a `ticket.reply_after_resolution` line in the audit trail;
+the ticket's status is untouched.

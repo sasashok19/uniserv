@@ -200,6 +200,42 @@ CREATE TABLE ticket_messages (
 CREATE INDEX idx_messages_ticket ON ticket_messages(ticket_id, created_at);
 ```
 
+### `ticket_messages.channel_message_id` / `is_intake_request` (Feature 24, V13)
+
+`channel_message_id` is the id the CHANNEL PROVIDER gave a message — a WhatsApp
+wamid or an email `Message-ID`. Set on inbound messages from the webhook/poller
+and on outbound messages after a successful send.
+
+It exists because a citizen's reply names the message it replies to
+(`context.id` on WhatsApp, `In-Reply-To` on email) and that message is one of
+**ours**. Storing provider ids for inbound messages only meant the single most
+reliable routing signal available was unusable, and a reply of "Yes it is" had
+to be matched by heuristics — which is exactly how it reached the wrong ticket.
+With this, routing rung 0 resolves such a reply to its ticket exactly, with no
+interpretation and no LLM.
+
+`is_intake_request` is 1 on an outbound message that ASKED the citizen for
+identity/intake details. A bare "yes" is structurally identical whether it
+answers *"did you mean x@gmail.com?"* or *"is this resolved?"*, so the intake
+guard may only claim such a message where an intake question was actually asked.
+
+### `unrouted_messages` (Feature 24, V13)
+
+Citizen messages routing could not attribute to any ticket and deliberately did
+not invent one for. Columns: `channel`, `channel_identity_value` (the raw
+address — NOT a resolved identity, since routing may have failed precisely
+because identity never resolved), `content`, `channel_message_id`, `reason`,
+`status` (`pending`|`escalated`|`attached`|`discarded`), `resolved_ticket_id`,
+`resolved_by`, `ask_count`.
+
+The alternatives were both worse. Dropping the message loses a citizen's words
+entirely — nobody can fix what was never stored — and a placeholder ticket puts
+permanent noise in the queue. `ask_count` is what stops the clarify loop: the
+second unroutable message from a contact escalates rather than asking again.
+
+See the README's *Inbound routing ladder*.
+
+
 ### ticket_notes
 ```sql
 -- Agent / Lead / Admin notes with mandatory note enforcement

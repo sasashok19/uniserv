@@ -98,9 +98,10 @@ class WhatsAppAdapterTest {
         WhatsAppAdapter adapter = newAdapter(Optional.of("test-token"), Optional.of("1234567890"));
         adapter.graphApiBaseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
 
-        boolean sent = adapter.sendReply("+919876543210", "Your ticket is resolved", "wamid.orig001");
+        com.uniserve.adapters.SendResult result =
+                adapter.sendReply("+919876543210", "Your ticket is resolved", "wamid.orig001");
 
-        assertTrue(sent);
+        assertTrue(result.sent());
         assertEquals("/v21.0/1234567890/messages", capturedPath.get());
         assertEquals("Bearer test-token", capturedAuth.get());
         assertTrue(capturedBody.get().contains("\"to\":\"919876543210\""));

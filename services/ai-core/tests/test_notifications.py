@@ -36,7 +36,7 @@ def test_deliver_reply_sends_email_for_email_channel():
     with patch("app.notifications.sender.httpx.AsyncClient", return_value=ctx):
         result = _run(deliver_reply(payload, trace_id="trace-1"))
 
-    assert result == {"delivered": True}
+    assert result["delivered"] is True
     client.post.assert_awaited_once()
     url, kwargs = client.post.await_args.args, client.post.await_args.kwargs
     assert url[0].endswith("/api/v1/internal/adapters/email/test-send")
@@ -87,7 +87,7 @@ def test_deliver_reply_sends_whatsapp_for_whatsapp_channel():
     with patch("app.notifications.sender.httpx.AsyncClient", return_value=ctx):
         result = _run(deliver_reply(payload, trace_id="trace-2"))
 
-    assert result == {"delivered": True}
+    assert result["delivered"] is True
     client.post.assert_awaited_once()
     url, kwargs = client.post.await_args.args, client.post.await_args.kwargs
     assert url[0].endswith("/api/v1/internal/adapters/whatsapp/send")
@@ -130,7 +130,7 @@ def test_send_whatsapp_posts_to_whatsapp_send_endpoint():
     with patch("app.notifications.sender.httpx.AsyncClient", return_value=ctx):
         result = _run(send_whatsapp("+919876543210", "hello", trace_id="trace-wa-direct"))
 
-    assert result == {"delivered": True}
+    assert result["delivered"] is True
     kwargs = client.post.await_args.kwargs
     assert kwargs["json"] == {"to": "+919876543210", "body": "hello", "contextMessageId": None}
 
@@ -139,7 +139,7 @@ def test_send_whatsapp_reports_failure_without_raising_when_gateway_says_not_sen
     ctx, _client = _mock_async_client({"sent": False})
     with patch("app.notifications.sender.httpx.AsyncClient", return_value=ctx):
         result = _run(send_whatsapp("+919876543210", "hello"))
-    assert result == {"delivered": False}
+    assert result["delivered"] is False
 
 
 def test_deliver_reply_reports_failure_without_raising_when_gateway_says_not_sent():
@@ -147,7 +147,7 @@ def test_deliver_reply_reports_failure_without_raising_when_gateway_says_not_sen
     payload = {"channel": "email", "channelIdentityValue": "citizen@citizen-mail.dev", "messageText": "hi"}
     with patch("app.notifications.sender.httpx.AsyncClient", return_value=ctx):
         result = _run(deliver_reply(payload))
-    assert result == {"delivered": False}
+    assert result["delivered"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +210,7 @@ def test_send_ticket_ack_includes_ticket_number_in_subject_and_body_for_email():
             category="billing", status="open", trace_id="trace-3",
         ))
 
-    assert result == {"delivered": True}
+    assert result["delivered"] is True
     kwargs = client.post.await_args.kwargs
     assert "TKT-00042" in kwargs["json"]["subject"]
     assert "TKT-00042" in kwargs["json"]["body"]
@@ -236,7 +236,7 @@ def test_send_ticket_ack_sends_whatsapp_without_email_subject_note():
             category="billing", origin_message_id="wamid.orig042",
         ))
 
-    assert result == {"delivered": True}
+    assert result["delivered"] is True
     url, kwargs = client.post.await_args.args, client.post.await_args.kwargs
     assert url[0].endswith("/api/v1/internal/adapters/whatsapp/send")
     assert kwargs["json"]["to"] == "+919876543210"

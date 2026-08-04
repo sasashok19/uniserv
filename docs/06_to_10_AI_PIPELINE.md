@@ -681,3 +681,62 @@ says their bill doubled") and requires the problem itself ("Bill doubled this
 month"). Learned from the first backfill dry run, where a third of the lines
 came back as third-person reports about the citizen instead of subject lines;
 the fix is in the shared `_SYSTEM_PROMPT`, so the live path got it too.
+
+---
+
+## Inbound routing ladder (Feature 24)
+
+`ensure_ticket_stub` (`app/tickets/intake.py`) replaced its Feature 17–22
+resolution order with an explicit ladder. See the README's *Inbound routing
+ladder* for the bug and the decisions; this covers the pipeline mechanics.
+
+```
+0. reply-to id -> a stored OUTBOUND channel_message_id, or a ticket's
+                  own origin_message_id                    (free, exact)
+1. TKT-xxxxx typed by the citizen                          (free)
+2. AI: answers one of our outstanding questions?            (1 call, shared)
+3. intake answer AND that stub's last outbound was an
+   intake ask (ticket_messages.is_intake_request)           (free)
+4. AI: reads as a new complaint? -> Feature 22 dedup        (same call as 2)
+5. none -> park in unrouted_messages, ask once, escalate    (free)
+```
+
+### The judgment
+
+```
+assess_inbound(questions, new_text)   # app/classify/message_intent.py
+  -> {"index": <position|None>, "is_new_complaint": <bool>, "reason": str}
+```
+
+`questions` is the last outbound message on each of the citizen's tickets — in
+**any** status, within the reply window — each carrying its ticket number, that
+ticket's status and its original complaint. One call answers rungs 2 and 4
+together: two calls would cost twice as much and could contradict each other,
+leaving a tie-break rule where this design has none.
+
+**Failure direction is the opposite of the other judgments here.** `None` means
+"ask the citizen" (rung 5), never a channel default. The pre-Feature-24
+fallbacks (WhatsApp appends to a sole open ticket, email creates a new one) were
+guesses, and one of them produced the reported misroute. Three structural
+exceptions still fire without the LLM: an intake answer to a stub that asked one
+(`_in_intake_stub`), prose that is not form data (still opens a ticket), and a
+first contact (`_first_contact` — a lost first complaint beats a junk row).
+
+### Supporting pieces
+
+| Piece | Why |
+| --- | --- |
+| `ADDRESSABLE_STATUSES` (`app/dedup/service.py`) | Attribution must reach `resolved`/`closed`/`cancelled` tickets. `OPEN_STATUSES` also gained the missing `pending_customer` — its absence broke every parked follow-up on every channel |
+| `TERMINAL_STATUSES` | A reply landing on one writes `ticket.reply_after_resolution` and changes nothing else. Duplicate detection is NOT offered terminal tickets — a new problem is not a duplicate of finished work |
+| `text_cleanup.strip_quoted_reply` | Judgments see only what the citizen typed this time. The raw text is still what gets stored |
+| `_ticket_dialogue` | One `get_messages` per candidate yields both the complaint and the last question — a dedicated endpoint per half would double the round trips |
+| `_park_unrouted` | Stores the message, returns `{"unrouted": True, "ask": …}`; the dispatcher short-circuits (no conversation agent — there is no ticket to run against) and sends the ask |
+
+### Recording our own outbound ids
+
+Rung 0 only works if we know the id of what we sent. `_persist_outbound_ai_reply`
+now returns its row id and marks `isIntakeRequest`; `_send_reply` carries
+`ticketId`/`messageId` on the `ai.reply.send` event; the consumer stamps the
+provider id (returned by the gateway's adapter endpoints) via
+`set_message_channel_id` after delivery. Best-effort throughout — the citizen has
+the message; losing the shortcut costs a rung, not the reply.

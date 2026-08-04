@@ -29,6 +29,12 @@ public final class RbacPolicy {
             case "ticket.status.to_cancelled" -> "admin".equals(role);
             case "ticket.resolution.generate" -> true;
             case "ticket.export" -> adminOrLead;
+            // Feature 24: the unrouted queue holds messages routing could not
+            // attribute, and resolving one files a citizen's words onto a ticket
+            // of the agent's choosing. Lead/admin only — an agent who sees only
+            // their own tickets has no basis for that judgment, and the queue
+            // itself exposes messages from citizens whose ticket is unknown.
+            case "unrouted.view", "unrouted.manage" -> adminOrLead;
             case "admin.view", "admin.agents.manage", "admin.tenant.config", "admin.tickets.archive-stale" ->
                     "admin".equals(role);
             case "announcements.view" -> true;

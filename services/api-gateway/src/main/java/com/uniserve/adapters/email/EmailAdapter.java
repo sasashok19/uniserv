@@ -1,6 +1,7 @@
 package com.uniserve.adapters.email;
 
 import com.uniserve.adapters.ChannelIdentity;
+import com.uniserve.adapters.SendResult;
 import com.uniserve.adapters.ChannelMessagePublisher;
 import com.uniserve.adapters.ChannelMessageReceived;
 import com.uniserve.adapters.EventValidator;
@@ -163,20 +164,47 @@ public class EmailAdapter {
         return new PollResult(processed, errors);
     }
 
-    /** Send an outbound reply via the configured provider (SMTP or Resend).
-     * Returns true when no exception is thrown. */
-    public boolean sendReply(String toAddress, String subject, String body, String inReplyToMessageId) {
+    /**
+     * Send an outbound reply via the configured provider (SMTP or Resend).
+     *
+     * Feature 24: we now supply our OWN {@code Message-ID} rather than letting
+     * the provider mint one, because we need to know it — a citizen's reply
+     * carries it in {@code In-Reply-To}, which is how routing identifies the
+     * ticket they are replying on. Generating it is the only way to learn it:
+     * Resend's response {@code id} is its internal handle, not the RFC 5322
+     * header, and an SMTP send returns nothing at all.
+     *
+     * Best-effort by nature — an MTA is permitted to replace a Message-ID it
+     * doesn't like, and if that happens the reply-to lookup simply misses and
+     * routing falls through to the ticket number that email carries in every
+     * subject line anyway. WhatsApp, which has no subject line and therefore
+     * genuinely depends on this, gets a provider-confirmed id instead (see
+     * {@code WhatsAppAdapter.extractWamid}).
+     */
+    public SendResult sendReply(String toAddress, String subject, String body, String inReplyToMessageId) {
+        String messageId = newMessageId();
         if ("resend".equalsIgnoreCase(emailProvider)) {
-            return resendClient.send(toAddress, subject, body, inReplyToMessageId);
+            return resendClient.send(toAddress, subject, body, inReplyToMessageId, messageId);
         }
         Mail mail = Mail.withText(toAddress, subject, body);
         if (!isBlank(inReplyToMessageId)) {
             mail.addHeader("In-Reply-To", inReplyToMessageId);
             mail.addHeader("References", inReplyToMessageId);
         }
+        mail.addHeader("Message-ID", "<" + messageId + ">");
         mailer.send(mail);
-        LOG.infof("Email reply sent via SMTP to=%s subject=%s", toAddress, subject);
-        return true;
+        LOG.infof("Email reply sent via SMTP to=%s subject=%s messageId=%s", toAddress, subject, messageId);
+        return new SendResult(true, messageId);
+    }
+
+    /**
+     * A fresh RFC 5322 Message-ID, stored and compared WITHOUT angle brackets to
+     * match {@code extractMessageId}, which strips them from inbound headers —
+     * an id that round-trips as {@code <x@y>} on the way out and {@code x@y} on
+     * the way back would never match itself.
+     */
+    static String newMessageId() {
+        return "uniserve-" + java.util.UUID.randomUUID() + "@uniserve.local";
     }
 
     // ---- auto-generated mail detection (pure, unit-tested) ---------------

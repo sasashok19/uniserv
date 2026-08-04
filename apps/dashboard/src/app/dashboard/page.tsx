@@ -11,6 +11,7 @@ import GeneralSettingsPanel from "@/components/admin/GeneralSettingsPanel";
 import AnnouncementsPanel from "@/components/admin/AnnouncementsPanel";
 import SystemPanel from "@/components/admin/SystemPanel";
 import AnnouncementBanner from "@/components/announcements/AnnouncementBanner";
+import UnroutedPanel from "@/components/unrouted/UnroutedPanel";
 import Topbar from "@/components/layout/Topbar";
 import Sidebar, { type NavKey } from "@/components/layout/Sidebar";
 import { BASE as BADGE_BASE, identityBadgeStyle, priorityBadgeStyle, statusBadgeStyle } from "@/lib/badges";
@@ -66,6 +67,10 @@ export default function DashboardPage() {
         <main className="min-w-0 flex-1 p-6 pb-24 md:pb-6">
           {tab === "queue" && <TicketQueue role={role} />}
           {tab === "analytics" && <AnalyticsPanel canViewAll={role === "admin" || role === "lead"} />}
+          {/* Feature 24: role-gated here as well as in the sidebar, because the
+              tab key survives in sessionStorage — a demoted lead returning to
+              the dashboard must not land on a view they can no longer use. */}
+          {tab === "unrouted" && (role === "admin" || role === "lead") && <UnroutedPanel />}
           {tab === "admin" && role === "admin" && <Administration />}
         </main>
       </div>

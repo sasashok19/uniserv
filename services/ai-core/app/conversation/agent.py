@@ -1077,30 +1077,42 @@ class ConversationAgent:
         # to persist the message does not skip the update or vice versa.
         await chief_complaint.refresh(self._db, req.ticketId, content, trace_id=req.traceId)
 
-    async def _persist_outbound_ai_reply(self, req: TestEventRequest, text: str) -> None:
+    async def _persist_outbound_ai_reply(
+        self, req: TestEventRequest, text: str, is_identity_request: bool = False,
+    ) -> Optional[str]:
         """Record the AI's own reply on the ticket's Conversation timeline —
         previously this was only ever emailed out (see app/notifications/sender.py)
         and never written anywhere the dashboard could show it. Best-effort,
-        same reasoning as `_persist_inbound`."""
+        same reasoning as `_persist_inbound`.
+
+        Returns the message row's id so the send path can stamp the provider's
+        own id onto it once delivery succeeds (Feature 24), or None if nothing
+        was persisted. `is_identity_request` is recorded because routing has to
+        know whether the last thing we asked on a stub was an intake question:
+        a bare "yes" may only be read as an intake answer where one was asked.
+        """
         if not req.ticketId or not (text or "").strip():
-            return
+            return None
         try:
-            await self._db.add_message(req.ticketId, {
+            recorded = await self._db.add_message(req.ticketId, {
                 "tenantId": req.tenantId,
                 "channel": req.channel,
                 "direction": "outbound",
                 "authorType": "ai",
                 "content": text,
                 "isAiGenerated": 1,
+                "isIntakeRequest": 1 if is_identity_request else 0,
             }, trace_id=req.traceId)
+            return (recorded or {}).get("id")
         except Exception:  # noqa: BLE001 - Conversation logging is best-effort
             logger.warning("failed to persist outbound AI reply traceId=%s ticketId=%s",
                             req.traceId, req.ticketId)
+            return None
 
     async def _send_reply(
         self, req: TestEventRequest, thread_key: str, text: str, is_identity_request: bool = False,
     ) -> None:
-        await self._persist_outbound_ai_reply(req, text)
+        message_id = await self._persist_outbound_ai_reply(req, text, is_identity_request)
         origin_message_id = None
         if req.ticketId:
             try:
@@ -1119,6 +1131,12 @@ class ConversationAgent:
                 "isAnonymousAck": req.declaredAnonymous,
                 "ticketNumber": req.ticketNumber,
                 "originMessageId": origin_message_id,
+                # Feature 24: which message row this send corresponds to, so the
+                # consumer can stamp the provider's id onto it after delivery.
+                # Carried through the event because persistence happens here and
+                # delivery happens in the ai.reply.send consumer.
+                "ticketId": req.ticketId,
+                "messageId": message_id,
             }, trace_id=req.traceId))
 
     async def _load_state(self, thread_key: str) -> Optional[dict]:

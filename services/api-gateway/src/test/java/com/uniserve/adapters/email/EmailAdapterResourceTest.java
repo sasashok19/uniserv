@@ -24,14 +24,19 @@ class EmailAdapterResourceTest {
     @Test
     void returnsSentTrueOnSuccess() {
         EmailAdapter emailAdapter = mock(EmailAdapter.class);
-        when(emailAdapter.sendReply(anyString(), anyString(), anyString(), any())).thenReturn(true);
+        when(emailAdapter.sendReply(anyString(), anyString(), anyString(), any()))
+                .thenReturn(new com.uniserve.adapters.SendResult(true, "uniserve-abc@uniserve.local"));
         EmailAdapterResource resource = newResource(emailAdapter);
 
         Response response = resource.testSend(
                 new EmailAdapterResource.TestSendRequest("citizen@example.com", "Subject", "Body", null));
 
         assertEquals(200, response.getStatus());
-        assertEquals(Map.of("sent", true), response.getEntity());
+        // Feature 24: the response also carries the Message-ID we put on the
+        // mail, so ai-core can stamp it onto the persisted message and route the
+        // citizen's reply by it.
+        assertEquals(Map.of("sent", true, "channelMessageId", "uniserve-abc@uniserve.local"),
+                response.getEntity());
     }
 
     @Test

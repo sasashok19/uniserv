@@ -38,10 +38,16 @@ public class WhatsAppAdapterResource {
                     .entity(Map.of("sent", false, "error", "'to' is required"))
                     .build();
         }
-        boolean sent = whatsAppAdapter.sendReply(
+        com.uniserve.adapters.SendResult result = whatsAppAdapter.sendReply(
                 request.to(),
                 request.body() == null ? "" : request.body(),
                 request.contextMessageId());
-        return Response.ok(Map.of("sent", sent)).build();
+        // Feature 24: the wamid goes back to the caller (ai-core) so it can
+        // stamp it onto the ticket_message row it already persisted — that is
+        // what makes the citizen's reply to THIS message routable.
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("sent", result.sent());
+        body.put("channelMessageId", result.channelMessageId());
+        return Response.ok(body).build();
     }
 }

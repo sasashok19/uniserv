@@ -123,6 +123,60 @@ class DbWriterClient:
         resp = await self._request("POST", f"/api/v1/db/tickets/{ticket_id}/events", trace_id, json=payload)
         return resp.json()
 
+    async def find_message_by_channel_id(
+        self, tenant_id: str, channel_message_id: str, trace_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        """The message a channel provider id belongs to (Feature 24) — routing
+        rung 0. Returns None when we never sent/received that id (a 404 here is
+        the normal case, not an error: most inbound messages are not replies)."""
+        try:
+            resp = await self._request(
+                "GET", "/api/v1/db/tickets/messages/by-channel-id", trace_id,
+                params={"tenantId": tenant_id, "channelMessageId": channel_message_id})
+            return resp.json()
+        except Exception:  # noqa: BLE001 - a miss is expected; never blocks routing
+            return None
+
+    async def set_message_channel_id(
+        self, ticket_id: str, message_id: str, channel_message_id: str,
+        trace_id: Optional[str] = None,
+    ) -> None:
+        """Stamp a message we just sent with the provider's id for it
+        (Feature 24), so the citizen's reply to it routes back here exactly.
+        Best-effort: the citizen already has the message."""
+        try:
+            await self._request(
+                "PATCH", f"/api/v1/db/tickets/{ticket_id}/messages/{message_id}/channel-id",
+                trace_id, json={"channelMessageId": channel_message_id})
+        except Exception:  # noqa: BLE001 - losing a routing shortcut is not a send failure
+            logger.warning("failed to record channel message id traceId=%s ticketId=%s",
+                           trace_id, ticket_id)
+
+    async def create_unrouted_message(self, payload: dict, trace_id: Optional[str] = None) -> dict:
+        """Park a message routing could not attribute (Feature 24). This is what
+        makes "create no ticket" safe: the citizen's words are still stored, and
+        a lead can file them against the right ticket."""
+        resp = await self._request("POST", "/api/v1/db/unrouted-messages", trace_id, json=payload)
+        return resp.json()
+
+    async def unrouted_ask_count(
+        self, tenant_id: str, channel_identity_value: str, since: str,
+        trace_id: Optional[str] = None,
+    ) -> int:
+        """How many times we have already asked this contact to clarify since
+        `since` (Feature 24) — the difference between asking again and
+        escalating. Returns 0 on any failure, i.e. we would rather ask a second
+        time than escalate a citizen who was never actually asked."""
+        try:
+            resp = await self._request(
+                "GET", "/api/v1/db/unrouted-messages/ask-count", trace_id,
+                params={"tenantId": tenant_id, "channelIdentityValue": channel_identity_value,
+                        "since": since})
+            return int(resp.json().get("askCount", 0))
+        except Exception:  # noqa: BLE001 - see docstring
+            logger.warning("failed to read unrouted ask count traceId=%s", trace_id)
+            return 0
+
     async def get_notes(self, ticket_id: str, trace_id: Optional[str] = None) -> list[dict]:
         """A ticket's internal/transition notes, oldest first — the "last
         action taken" for the status-summary feature is the newest of these."""

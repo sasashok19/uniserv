@@ -59,12 +59,17 @@ public class EmailAdapterResource {
         // instead of a bare, generic 500 that hides which upstream call
         // actually failed and why.
         try {
-            boolean sent = emailAdapter.sendReply(
+            com.uniserve.adapters.SendResult result = emailAdapter.sendReply(
                     request.to(),
                     request.subject() == null ? "(no subject)" : request.subject(),
                     request.body() == null ? "" : request.body(),
                     request.inReplyToMessageId());
-            return Response.ok(Map.of("sent", sent)).build();
+            // Feature 24: our own Message-ID goes back so ai-core can stamp it
+            // onto the persisted message and route the citizen's reply by it.
+            Map<String, Object> body = new java.util.LinkedHashMap<>();
+            body.put("sent", result.sent());
+            body.put("channelMessageId", result.channelMessageId());
+            return Response.ok(body).build();
         } catch (Exception e) {
             LOG.errorf(e, "test-send failed for to=%s", request.to());
             return Response.status(Response.Status.BAD_GATEWAY)

@@ -145,6 +145,43 @@ public class TicketResource {
         return Response.status(Response.Status.CREATED).entity(tickets.addMessage(id, body)).build();
     }
 
+    /**
+     * Stamp a sent message with the id its channel provider assigned it
+     * (Feature 24). Deliberately narrow — the row must exist before the send
+     * (so a failed send still records what we tried to say) but the
+     * wamid/Message-ID only exists after it, and nothing else about a sent
+     * message may be rewritten.
+     */
+    @PATCH
+    @Path("/{ticketId}/messages/{messageId}/channel-id")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Map<String, Object> setMessageChannelId(@PathParam("messageId") String messageId,
+                                                   Map<String, Object> body) {
+        Object value = body == null ? null : body.get("channelMessageId");
+        return tickets.setMessageChannelId(messageId, value == null ? null : String.valueOf(value));
+    }
+
+    /**
+     * Which ticket a channel provider id belongs to (Feature 24) — routing rung
+     * 0. An inbound WhatsApp swipe-reply carries `context.id` and an email reply
+     * carries `In-Reply-To`; both name one of OUR messages, and this turns that
+     * into its ticket exactly, with no heuristic and no LLM.
+     */
+    @GET
+    @Path("/messages/by-channel-id")
+    public Response messageByChannelId(@QueryParam("tenantId") String tenantId,
+                                       @QueryParam("channelMessageId") String channelMessageId) {
+        if (tenantId == null || tenantId.isBlank()) {
+            throw new ApiException(400, "TENANT_REQUIRED", "tenantId is required");
+        }
+        return tickets.findByChannelMessageId(tenantId, channelMessageId)
+                .map(m -> Response.ok(m).build())
+                .orElseGet(() -> Response.status(404)
+                        .entity(Map.of("error", Map.of("code", "NOT_FOUND",
+                                "message", "no message with that channel id"))).build());
+    }
+
+
     @GET
     @Path("/{id}/events")
     public Map<String, Object> events(@PathParam("id") String id) {

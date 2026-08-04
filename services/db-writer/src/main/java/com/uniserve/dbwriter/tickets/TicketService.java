@@ -473,9 +473,60 @@ public class TicketService {
         msg.authorLabel = str(body, "authorLabel");
         msg.content = content;
         msg.isAiGenerated = intOr(body, "isAiGenerated", 0);
+        // Feature 24: the provider's own id for this message, when the caller
+        // already has it (inbound). Outbound sends only learn it from the send
+        // response, so those come back through `setMessageChannelId` instead.
+        msg.channelMessageId = str(body, "channelMessageId");
+        msg.isIntakeRequest = intOr(body, "isIntakeRequest", 0);
         msg.persistAndFlush();
         return msg.toMap();
     }
+
+    /**
+     * Record the provider id of a message we have just sent (Feature 24).
+     *
+     * Separate from {@link #addMessage} because of the order forced by the
+     * channel: the message row must exist BEFORE the send (so a failed send
+     * still leaves a record of what we tried to say), but the wamid/Message-ID
+     * only exists AFTER it. One narrow setter rather than a general message
+     * PATCH — nothing else about a sent message may be rewritten.
+     */
+    @Transactional
+    public Map<String, Object> setMessageChannelId(String messageId, String channelMessageId) {
+        TicketMessage msg = TicketMessage.findById(messageId);
+        if (msg == null) {
+            throw new ApiException(404, "NOT_FOUND", "message not found: " + messageId);
+        }
+        if (channelMessageId == null || channelMessageId.isBlank()) {
+            throw new ApiException(422, "CHANNEL_MESSAGE_ID_REQUIRED", "channelMessageId is required");
+        }
+        msg.channelMessageId = channelMessageId;
+        Panache.getEntityManager().flush();
+        return msg.toMap();
+    }
+
+    /**
+     * The message a provider id belongs to (Feature 24) — the lookup behind
+     * routing rung 0. An inbound reply names the message it replies to; this
+     * turns that into the ticket it happened on, exactly, with no heuristic.
+     *
+     * Tenant-scoped: provider ids are globally unique in practice, but a lookup
+     * that could cross tenants has no business existing in a multi-tenant table.
+     */
+    public Optional<Map<String, Object>> findByChannelMessageId(String tenantId, String channelMessageId) {
+        if (channelMessageId == null || channelMessageId.isBlank()) {
+            return Optional.empty();
+        }
+        return TicketMessage.<TicketMessage>find(
+                        "tenantId = ?1 and channelMessageId = ?2", tenantId, channelMessageId)
+                .firstResultOptional().map(TicketMessage::toMap);
+    }
+
+    // NOTE: there is deliberately no "last outbound message" endpoint. Routing
+    // needs BOTH a candidate ticket's original complaint and the last thing we
+    // asked on it, and `messages(id)` already returns the whole timeline in one
+    // round trip — a dedicated endpoint would double the calls per candidate to
+    // save nothing. See ai-core's `_ticket_dialogue`.
 
     public List<Map<String, Object>> notes(String id) {
         return TicketNote.<TicketNote>find("ticketId", Sort.by("createdAt"), id)

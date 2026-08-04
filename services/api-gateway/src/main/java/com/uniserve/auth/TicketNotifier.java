@@ -51,6 +51,7 @@ public class TicketNotifier {
         }
 
         try {
+            com.uniserve.adapters.SendResult result;
             if ("email".equals(channel)) {
                 String toAddress = str(identity.body(), "email");
                 if (toAddress == null || toAddress.isBlank()) {
@@ -58,17 +59,60 @@ public class TicketNotifier {
                 }
                 String subject = "Your complaint " + ticketNumber + " is now " + toStatus;
                 body.append("\nIf you have further questions, just reply to this email.");
-                emailAdapter.sendReply(toAddress, subject, body.toString(), str(ticket, "origin_message_id"));
+                result = emailAdapter.sendReply(
+                        toAddress, subject, body.toString(), str(ticket, "origin_message_id"));
             } else {
                 String toPhone = str(identity.body(), "phone");
                 if (toPhone == null || toPhone.isBlank()) {
                     return;
                 }
                 body.append("\nIf you have further questions, just reply to this message.");
-                whatsAppAdapter.sendReply(toPhone, body.toString(), str(ticket, "origin_message_id"));
+                result = whatsAppAdapter.sendReply(
+                        toPhone, body.toString(), str(ticket, "origin_message_id"));
             }
+            recordOnConversation(str(ticket, "id"), channel, body.toString(),
+                    result == null ? null : result.channelMessageId());
         } catch (Exception e) {
             LOG.errorf(e, "Failed to send status-update notification for ticket %s", ticket.get("id"));
+        }
+    }
+
+    /**
+     * Put the notification we just sent onto the ticket's conversation
+     * (Feature 24).
+     *
+     * It was previously sent and then forgotten — invisible in the dashboard, so
+     * an agent could not see what the citizen had been told, and invisible to
+     * routing, which matters more than it sounds: this message explicitly invites
+     * a reply ("just reply to this email"), and a citizen who takes it up on that
+     * produces exactly the inbound "no, it's not fixed" that routing has to
+     * attribute. With no record of the question, there is nothing for the reply
+     * to be an answer TO.
+     *
+     * Best-effort: the citizen already has the notification.
+     */
+    private void recordOnConversation(String ticketId, String channel, String body, String channelMessageId) {
+        if (ticketId == null) {
+            return;
+        }
+        try {
+            Map<String, Object> message = new java.util.LinkedHashMap<>();
+            message.put("channel", channel);
+            message.put("direction", "outbound");
+            message.put("authorType", "system");
+            message.put("content", body);
+            if (channelMessageId != null) {
+                message.put("channelMessageId", channelMessageId);
+            }
+            DbWriterClient.ApiResult recorded = db.call(
+                    "POST", "/api/v1/db/tickets/" + ticketId + "/messages", message);
+            if (recorded.status() >= 400) {
+                LOG.warnf("status-update notification sent but not recorded for ticket %s: %s",
+                        ticketId, recorded.body());
+            }
+        } catch (Exception e) {
+            LOG.warnf("status-update notification sent but not recorded for ticket %s: %s",
+                    ticketId, e.getMessage());
         }
     }
 
