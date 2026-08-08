@@ -34,7 +34,15 @@
       "Bash(curl -s -o /dev/null -w \"dbw %{http_code} \" http://localhost:8090/q/health/ready)",
       "Bash(curl -s -o /dev/null -w \"ai %{http_code} \" http://localhost:8001/api/v1/health)",
       "Bash(curl -s -o /dev/null -w \"dash %{http_code}\\\\n\" http://localhost:3000)",
-      "Bash(xargs ls -la)"
+      "Bash(xargs ls -la)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(curl *)",
+      "Bash(python -c \"import bcrypt; print\\(bcrypt.hashpw\\(b'Admin@123', bcrypt.gensalt\\(\\)\\).decode\\(\\)\\)\")",
+      "Bash(pip install *)",
+      "Bash(python *)",
+      "Bash(xargs grep -liE \"onrender\\\\.com|vercel\\\\.app|railway\\\\.app|upstash\")"
     ]
   }
 }
