@@ -699,6 +699,28 @@ BFF routes: `/api/unrouted-messages`, `/api/unrouted-messages/[id]/attach`,
 `/api/unrouted-messages/[id]/discard` — thin pass-throughs so a 403 from the
 gateway's RBAC reaches the UI intact.
 
+**If the tab shows an error instead of a queue**, read it: the panel renders
+`error.message` from the gateway verbatim, and the two it is most likely to show
+both name the cause.
+
+- *"The data service does not have GET /api/v1/db/unrouted-messages (HTTP 404)…"*
+  — db-writer is deployed behind api-gateway. Redeploy db-writer from current
+  `main`; see the README's *Deploy db-writer before (or with) api-gateway*. This
+  view is the first place that drift shows, because it is the only screen reading
+  an endpoint nothing else calls — the rest of the dashboard looks fine.
+- *"…answered … with HTTP 5xx and a body that is not JSON…"* — db-writer is down,
+  restarting, or still waking, and a platform error page came back instead of
+  data. Retry once the service is up.
+
+Neither should ever appear as raw parser text again. An HTML response used to
+reach the panel as Jackson's `Unexpected character ('<' (code 60))…`, which named
+nothing useful; `DbWriterClient` now turns an unparseable body into a named error
+(`DbWriterNonJsonResponseTest`, `UnroutedMessagesResourceTest`).
+
+An empty queue is **not** an error — it renders "Nothing unrouted — every recent
+message reached a ticket." Seeing that on a healthy stack means routing attributed
+everything, which is the intended steady state.
+
 **A reply on a resolved ticket is not visually flagged** (the user's explicit
 choice: "audit only, add to conversation"). It appears at the top of the
 conversation and as a `ticket.reply_after_resolution` line in the audit trail;

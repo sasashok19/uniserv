@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.net.URLEncoder;
@@ -23,6 +24,8 @@ import java.util.Optional;
  */
 @ApplicationScoped
 public class DbWriterClient {
+
+    private static final Logger LOG = Logger.getLogger(DbWriterClient.class);
 
     @Inject
     ObjectMapper mapper;
@@ -131,11 +134,11 @@ public class DbWriterClient {
                         : HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body));
                 b.method(method, publisher);
                 HttpResponse<String> resp = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
-                Map<String, Object> parsed = (resp.body() == null || resp.body().isBlank())
-                        ? Map.of()
-                        : mapper.readValue(resp.body(), new TypeReference<>() {
-                        });
-                return new ApiResult(resp.statusCode(), parsed);
+                // Parsing happens inside toResult, NOT here: a parse failure is
+                // not a transport failure, and letting it fall into the catch
+                // below is exactly what leaked Jackson's parser message to the
+                // dashboard. See toResult.
+                return toResult(resp.statusCode(), resp.body(), method, path);
             } catch (Exception e) {
                 last = e;
                 if (attempt == CONNECT_RETRIES || !isConnectFailure(e)) {
@@ -172,6 +175,72 @@ public class DbWriterClient {
 
     // ---- internals -------------------------------------------------------
 
+    /**
+     * Turn an upstream response into an {@link ApiResult} without ever letting a
+     * JSON parse failure escape as Jackson's own words.
+     *
+     * <p>db-writer does not always answer in JSON. An unmatched path gets
+     * Quarkus's built-in {@code <html><body><h1>Resource not found</h1></body></html>},
+     * and the platforms in front of it (Railway, Render) serve their own HTML
+     * pages while an instance is down or still waking. Feeding either to
+     * {@code mapper.readValue} throws, and the old code let that land in the
+     * transport handler below — so {@code error.message} became the parser's
+     * own text, <em>"Unexpected character ('&lt;' (code 60)): expected a valid
+     * value ... at [Source: REDACTED ...]"</em>, and the dashboard showed that
+     * to the admin verbatim.
+     *
+     * <p>That is the reported "Unrouted" tab failure: api-gateway shipped
+     * Feature 24, the deployed db-writer had not, so
+     * {@code /api/v1/db/unrouted-messages} 404'd with an HTML page. The
+     * deployment is the root cause, but the parser message was pure noise —
+     * it named neither the endpoint nor the status that would point at it.
+     *
+     * <p>The upstream status is preserved on a failure so the caller can still
+     * surface a 404 as a 404. A NON-failure status with an unparseable body is
+     * downgraded to 502: a "200 OK" the gateway cannot read is not a success,
+     * and passing it through would hand callers an empty map that looks like a
+     * legitimately empty result.
+     */
+    private ApiResult toResult(int status, String raw, String method, String path) {
+        if (raw == null || raw.isBlank()) {
+            return new ApiResult(status, Map.of());
+        }
+        try {
+            return new ApiResult(status, mapper.readValue(raw, new TypeReference<Map<String, Object>>() {
+            }));
+        } catch (Exception parseFailure) {
+            LOG.errorf("db-writer %s %s -> HTTP %d with a body that is not JSON: %s",
+                    method, path, status, snippet(raw));
+            return new ApiResult(status >= 400 ? status : 502,
+                    Map.of("error", nonJsonError(status, method, path)));
+        }
+    }
+
+    /**
+     * A message an admin can act on. A 404 here is almost always version drift —
+     * the gateway calling an endpoint the deployed db-writer does not have yet —
+     * so it says so rather than making someone read a stack trace.
+     */
+    private static Map<String, Object> nonJsonError(int status, String method, String path) {
+        String endpoint = method + " " + path.split("\\?")[0];
+        if (status == 404) {
+            return Map.of("code", "DB_WRITER_ENDPOINT_MISSING",
+                    "message", "The data service does not have " + endpoint + " (HTTP 404). "
+                            + "db-writer is most likely running an older build than api-gateway — "
+                            + "redeploy db-writer from the current main branch.");
+        }
+        return Map.of("code", "DB_WRITER_BAD_RESPONSE",
+                "message", "The data service answered " + endpoint + " with HTTP " + status
+                        + " and a body that is not JSON (an error page, not data). "
+                        + "It is most likely down, restarting, or still waking.");
+    }
+
+    /** Bounded and single-line: an HTML error page must not flood the log. */
+    private static String snippet(String raw) {
+        String flat = raw.replaceAll("\\s+", " ").trim();
+        return flat.length() <= 200 ? flat : flat.substring(0, 200) + "…";
+    }
+
     private List<Map<String, Object>> dataList(String path) {
         Map<String, Object> body = send("GET", path, null);
         Object data = body.get("data");
@@ -199,13 +268,18 @@ public class DbWriterClient {
             HttpResponse<String> resp = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() >= 400) {
                 throw new DbWriterException(resp.statusCode(),
-                        "db-writer " + method + " " + path + " -> " + resp.statusCode() + ": " + resp.body());
+                        "db-writer " + method + " " + path + " -> " + resp.statusCode()
+                                + ": " + snippet(String.valueOf(resp.body())));
             }
-            if (resp.body() == null || resp.body().isBlank()) {
-                return Map.of();
+            // Routed through toResult for the same reason as call(): a body that
+            // is not JSON must surface as a named failure, never as Jackson's
+            // "Unexpected character ('<' (code 60))" handed to a caller.
+            ApiResult parsed = toResult(resp.statusCode(), resp.body(), method, path);
+            if (parsed.status() >= 400) {
+                throw new DbWriterException(parsed.status(),
+                        "db-writer " + method + " " + path + " returned a non-JSON body");
             }
-            return mapper.readValue(resp.body(), new TypeReference<>() {
-            });
+            return parsed.body();
         } catch (DbWriterException e) {
             throw e;
         } catch (Exception e) {

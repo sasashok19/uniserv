@@ -474,3 +474,100 @@ fixed" continue the same complaint and say a colleague will look again; and NEVE
 claim to have reopened/resolved/closed anything (the assistant cannot change
 status — only a human decides, per the user's audit-only decision). Pushed to
 `asst_FX75qlIQVJohreLhh2ugyFKm`.
+
+---
+
+# Session handoff — "Unrouted" tab error, 2026-08-08
+
+## The bug (user's words)
+> when I log in as admin I see tab called "Unrouted" and when I click that I get
+> this error, why?
+> `Unexpected character ('<' (code 60)): expected a valid value (JSON String,
+> Number, Array, Object or token 'null', 'true' or 'false') at [Source: REDACTED
+> (StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION disabled); line: 1, column: 1]`
+
+Plus: "Not sure why we have this tab at the first place."
+
+## Root cause — TWO layers, only one of which is code
+
+**1. Deployment drift (the actual cause of the failure).** The Feature 24
+deployment note above says "db-writer FIRST (V13)". That did not happen.
+api-gateway on Render has `UnroutedMessagesResource`; db-writer on Railway does
+not have `UnroutedMessageResource`, so `/api/v1/db/unrouted-messages` 404s there.
+Proven against the live services — a route that exists answers 401 JSON
+(`InternalKeyFilter`), a route that does not answers 404 HTML:
+
+```
+GET /api/v1/db/tickets?tenantId=t1            -> 401 application/json  {"error":{"code":"UNAUTHORIZED"...
+GET /api/v1/db/agents?tenantId=t1             -> 401 application/json
+GET /api/v1/db/unrouted-messages?tenantId=t1  -> 404 text/html  <html><body><h1>Resource not found</h1></body></html>
+GET /q/health/ready                           -> 200 UP
+```
+
+**2. The code defect (why the error was gibberish).** `DbWriterClient.call()`
+parsed the response body INSIDE the try block that handles transport faults, so
+Jackson's parse failure on that HTML page fell into the `catch` and its own
+message — the text above — was put into `error.message`, returned as a 502, and
+rendered verbatim by `UnroutedPanel`. It named neither the endpoint nor the
+status, so nothing in it pointed at the real cause. `send()` had the same naked
+`readValue`.
+
+## Changes
+- `services/api-gateway/.../auth/DbWriterClient.java` — parsing moved into a new
+  `toResult(status, raw, method, path)`, called after `http.send` returns.
+  Unparseable body → named error, never parser text:
+  404 → `DB_WRITER_ENDPOINT_MISSING` (says "redeploy db-writer"), other 4xx/5xx →
+  `DB_WRITER_BAD_RESPONSE`, both keeping the upstream status; **2xx with an
+  unparseable body is downgraded to 502** (a 200 the gateway cannot read is not a
+  success, and passing it through gives callers an empty map that looks like a
+  legitimately empty result). Logs the failure with a 200-char single-line
+  `snippet()` of the body. `send()` routed through the same helper and its
+  exception message no longer pastes a whole HTML page.
+- `services/api-gateway/.../auth/UnroutedMessagesResource.java` — `list` returns
+  `messages: []` / `total: 0` instead of nulls when db-writer's payload lacks
+  `data`/`total`.
+- Docs: README *Deploy db-writer before (or with) api-gateway* (with the
+  401-vs-404 curl check), `docs/04_DB_WRITER_SERVICE.md` (unrouted endpoints +
+  "Callers must not assume db-writer answers in JSON", with the status table),
+  `docs/12_AGENT_DASHBOARD.md` (what each error on the tab means).
+
+## Tests — 90/90 api-gateway pass
+New: `DbWriterNonJsonResponseTest` (9) — real `com.sun.net.httpserver` stub
+serving the exact Quarkus 404 page, a platform 503 page, an HTML 200, a JSON
+array, valid JSON, a JSON 401 passed through untouched, an empty body, and both
+`send()` paths; every message asserted free of `Unexpected character` / `[Source:`
+/ `<html`. New: `UnroutedMessagesResourceTest` (8) — the same 404 end-to-end
+through the resource the dashboard calls, plus RBAC (agent 403 on list/attach/
+discard), happy path, missing-`data` defaults, `TICKET_REQUIRED` 422,
+`TICKET_NOT_FOUND` 404, and the default `pending,escalated` + tenant scoping.
+
+```
+export JAVA_HOME="/c/Program Files/Java/jdk-21.0.10"
+cd services/api-gateway && mvn -o test
+```
+
+## STILL OUTSTANDING — the tab will not work until this is done
+**Redeploy db-writer (Railway) from current `main`.** That ships the route and
+runs migration V13 (creates `unrouted_messages`). Until then the tab correctly
+reports `DB_WRITER_ENDPOINT_MISSING` — and note ai-core is *also* failing to
+write to the queue, silently: `create_unrouted_message` errors are swallowed by
+design (an unhandled error there would break the citizen's inbound message) and
+logged as `UNROUTED MESSAGE COULD NOT BE STORED`. So the queue is not merely
+unreadable right now; nothing is landing in it.
+
+## Why the tab exists (the user's second question)
+Feature 24, rung 5 of the inbound routing ladder. A citizen message that answers
+nothing we asked and describes no problem ("yes", "ok", "you are correct")
+creates NO ticket. Before F24 it either minted a junk ticket or was appended to
+an unrelated one. Dropping it would be worse — nobody can fix what was never
+stored — so it is parked in `unrouted_messages` and a lead/admin either
+**Attach**es it to the ticket it belonged to (which also copies it onto that
+ticket's conversation) or **Discard**s it as noise. On a healthy stack it is
+usually empty, and empty is the intended steady state.
+
+## Side task, same session (unrelated to the bug)
+Built the submission index doc for the professor:
+`artifacts/Group 4 - IITM AI Powered Product Design and Management - Uniserv.docx`
+and `.pdf` — one page, 8 live hyperlinks in both, with the "log in as admin →
+System tab → Refresh twice to wake the Render services" warning called out.
+Not committed unless the user asks.

@@ -139,6 +139,55 @@ GET    /api/v1/db/analytics/priority       → priority distribution
 GET    /api/v1/db/analytics/agents         → per-agent performance
 ```
 
+### Unrouted messages (Feature 24)
+```
+POST   /api/v1/db/unrouted-messages        → park a message routing could not attribute
+GET    /api/v1/db/unrouted-messages        → list (tenantId required; status, page, pageSize)
+GET    /api/v1/db/unrouted-messages/ask-count → times this contact was already asked
+POST   /api/v1/db/unrouted-messages/{id}/attach  → file onto a ticket + copy to its conversation
+POST   /api/v1/db/unrouted-messages/{id}/discard → mark noise (row kept, never deleted)
+```
+
+---
+
+## Callers must not assume db-writer answers in JSON
+
+db-writer's *own* errors are JSON — `ApiException` and `InternalKeyFilter` both
+produce `{"error":{"code":…,"message":…}}`. But two things in front of the
+application are not:
+
+- **An unmatched path** gets Quarkus's built-in page,
+  `<html><body><h1>Resource not found</h1></body></html>`, with `Content-Type:
+  text/html`. Requests are matched *before* `InternalKeyFilter` runs, so a route
+  that does not exist 404s as HTML rather than 401ing as JSON — which makes this
+  a reliable deploy check (see README, *Deploy db-writer before api-gateway*).
+- **The platform edge** (Railway, Render) serves its own HTML while an instance
+  is down, restarting, or waking.
+
+`DbWriterClient` in api-gateway therefore parses response bodies in a step of
+their own, never inside the try block that handles transport faults. A body that
+will not parse becomes a named error:
+
+| Upstream | Result status | `error.code` |
+|---|---|---|
+| `404` + non-JSON | `404` (preserved) | `DB_WRITER_ENDPOINT_MISSING` |
+| other `4xx`/`5xx` + non-JSON | preserved | `DB_WRITER_BAD_RESPONSE` |
+| `2xx` + non-JSON | **`502`** | `DB_WRITER_BAD_RESPONSE` |
+| unreachable / connect timeout | `502` | `DB_WRITER_UNAVAILABLE` |
+
+A non-failure status with an unreadable body is deliberately downgraded to 502:
+a `200 OK` the gateway cannot parse is not a success, and passing it through
+would hand the caller an empty map indistinguishable from a genuinely empty
+result — the Unrouted tab would have read "Nothing unrouted" while the queue was
+in fact unreadable.
+
+This exists because it once failed the other way. The parse ran inside the
+transport `catch`, so a 404 HTML page surfaced as Jackson's own text —
+`Unexpected character ('<' (code 60)): expected a valid value … at [Source:
+REDACTED …]` — which the dashboard showed an admin verbatim, naming neither the
+endpoint nor the status that would have pointed at the real cause. Pinned by
+`DbWriterNonJsonResponseTest` and `UnroutedMessagesResourceTest`.
+
 ---
 
 ## Mandatory Note Validation

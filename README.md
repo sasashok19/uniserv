@@ -1287,6 +1287,40 @@ and the `unrouted_messages` table. Note that `channel_message_id` is only
 populated for messages sent **after** deploy, so rung 0 begins working from each
 ticket's next outbound message; rungs 1–5 work immediately.
 
+### Deploy db-writer before (or with) api-gateway
+
+The Unrouted view is the one screen that reads an endpoint **db-writer** owns and
+nothing else calls. If api-gateway ships Feature 24 and the deployed db-writer has
+not, `GET /api/v1/db/unrouted-messages` does not exist there, and the tab fails
+for every lead and admin while the rest of the dashboard looks perfectly healthy.
+
+That is not a code bug — it is version drift — but the gateway now names it. The
+tab reads:
+
+> The data service does not have GET /api/v1/db/unrouted-messages (HTTP 404).
+> db-writer is most likely running an older build than api-gateway — redeploy
+> db-writer from the current main branch.
+
+**Fix:** redeploy db-writer (Railway) from current `main`. That ships the
+`UnroutedMessageResource` route and runs migration **V13**, which creates the
+`unrouted_messages` table the route reads. To check from a shell without any
+secret — a route that exists answers `401` JSON because
+[`InternalKeyFilter`](services/db-writer/src/main/java/com/uniserve/dbwriter/security/InternalKeyFilter.java)
+guards it, while a route that is missing answers `404` HTML:
+
+```bash
+curl -s -o /dev/null -w '%{http_code} %{content_type}\n' \
+  "$DB_WRITER_URL/api/v1/db/unrouted-messages?tenantId=t1"
+# 401 application/json  -> deployed, working
+# 404 text/html         -> db-writer is behind api-gateway; redeploy it
+```
+
+ai-core survives the same drift quietly: `create_unrouted_message` failing is
+caught and logged as `UNROUTED MESSAGE COULD NOT BE STORED`, because an
+unhandled error there would break the citizen's inbound message. So while
+db-writer is stale the queue is not merely unreadable — nothing is being written
+to it either, and those log lines are the only record.
+
 ---
 
 ## Chief complaint

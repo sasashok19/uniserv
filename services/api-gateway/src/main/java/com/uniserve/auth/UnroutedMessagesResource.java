@@ -51,11 +51,19 @@ public class UnroutedMessagesResource {
         }
         DbWriterClient.ApiResult result = db.call("GET", "/api/v1/db/unrouted-messages?" + q, null);
         if (result.status() >= 400) {
+            // Carries db-writer's own error through untouched — including the
+            // named DB_WRITER_ENDPOINT_MISSING a 404 produces, which is what an
+            // admin sees when db-writer is deployed behind the gateway and has
+            // no unrouted-messages route yet.
             return Response.status(result.status()).entity(result.body()).build();
         }
+        Map<String, Object> upstream = result.body() == null ? Map.of() : result.body();
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("messages", result.body() == null ? java.util.List.of() : result.body().get("data"));
-        body.put("total", result.body() == null ? 0 : result.body().get("total"));
+        // Defaults, not nulls: the panel renders `total` directly and iterates
+        // `messages`, so a response missing either must still be a usable one.
+        Object data = upstream.get("data");
+        body.put("messages", data instanceof List<?> ? data : List.of());
+        body.put("total", upstream.get("total") instanceof Number n ? n : 0);
         return Response.ok(body).build();
     }
 
