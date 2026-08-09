@@ -1,3 +1,33 @@
+# Session handoff — landing page "Agent sign in" visibility, 2026-08-09
+
+## Task
+User reported that on the deployed landing page (https://uniserv-delta.vercel.app/)
+"Agent sign in" was "very little and barely visible". It was a single
+`text-xs text-white/50` link at the bottom of the page.
+
+## Status: DONE — `npx tsc --noEmit` clean, `npx next build` passes
+Not yet committed or pushed at time of writing.
+
+## Change (apps/dashboard/src/app/page.tsx only)
+User picked "top-right header + outlined button" from four offered options.
+- New absolutely-positioned `<header>` (`absolute inset-x-0 top-0 z-20`) with
+  a small "UniServe" wordmark left and a bordered "Agent sign in" link right.
+  Absolute so the hero `<div>` stays vertically centred in the flex `<main>`.
+- `<main>` padding `py-16` → `pb-16 pt-28` so the header can't crowd the hero
+  on short viewports.
+- Bottom link `text-xs text-white/50` → outlined pill (`rounded-full
+  border-white/40`, `text-sm font-semibold text-white`), plus a `text-xs`
+  caption "For UniServe staff and support agents".
+- Both get `focus-visible:ring-[#02C39A]` with a `#0D1B2A` ring offset.
+- The file's top doc comment and README (both `src/app/page.tsx` entries)
+  were updated to match. No tests referenced this page.
+
+## Deliberately NOT changed
+Agent sign-in is still visually quieter than the orange "Track complaint"
+submit button — citizens remain this page's primary audience.
+
+---
+
 # Session handoff — Features 20/21/22, 2026-08-03
 
 ## Task

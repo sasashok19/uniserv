@@ -11,9 +11,12 @@ import { useState } from "react";
  * This is now a working search that submits to `/status/{ref}`
  * (`PublicStatusResource` accepts a `TKT-XXXXX` ticket number, an
  * `ANON-XXXX` reference, or an email — NOT a phone number, so the copy
- * below must not imply that works). "Agent sign in" is kept as a small,
- * secondary link — citizens are the primary audience of this page, staff
- * are not.
+ * below must not imply that works). "Agent sign in" appears twice — a
+ * top-right header link (where staff instinctively look for it) and an
+ * outlined button below the fold — because at `text-xs text-white/50` in
+ * one corner it was effectively invisible to the people who need it. Both
+ * are still visually quieter than "Track complaint": citizens are the
+ * primary audience of this page, staff are not.
  */
 export default function Home() {
   const router = useRouter();
@@ -32,13 +35,24 @@ export default function Home() {
   }
 
   return (
-    <main className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden bg-gradient-to-br from-[#0D1B2A] via-[#1B3A52] to-[#028090] px-6 py-16 text-white">
+    <main className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden bg-gradient-to-br from-[#0D1B2A] via-[#1B3A52] to-[#028090] px-6 pb-16 pt-28 text-white">
       {/* Decorative glows — same device as the login page's brand panel, so
           this reads as the same product, just brighter/higher-contrast for
           a public-facing "front door" rather than a staff work surface. */}
       <div aria-hidden className="pointer-events-none absolute -right-32 -top-32 h-96 w-96 rounded-full bg-[#02C39A]/30 blur-3xl" />
       <div aria-hidden className="pointer-events-none absolute -left-24 bottom-0 h-80 w-80 rounded-full bg-[#F4A261]/25 blur-3xl" />
       <div aria-hidden className="pointer-events-none absolute right-1/4 bottom-1/3 h-64 w-64 rounded-full bg-[#E07B54]/20 blur-3xl" />
+
+      {/* Header sits absolutely so the hero below stays vertically centred. */}
+      <header className="absolute inset-x-0 top-0 z-20 flex items-center justify-between gap-4 px-6 py-5 sm:px-8">
+        <span className="text-sm font-semibold tracking-wide text-white/70">UniServe</span>
+        <Link
+          href="/login"
+          className="rounded-lg border border-white/30 bg-white/10 px-4 py-2 text-sm font-semibold text-white shadow-sm backdrop-blur-sm transition hover:border-white/60 hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#02C39A] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]"
+        >
+          Agent sign in
+        </Link>
+      </header>
 
       <div className="relative z-10 flex w-full max-w-xl flex-col items-center text-center">
         <h1 className="bg-gradient-to-r from-[#02C39A] via-[#F4A261] to-[#E07B54] bg-clip-text text-5xl font-extrabold tracking-tight text-transparent drop-shadow-sm sm:text-6xl">
@@ -85,10 +99,11 @@ export default function Home() {
 
         <Link
           href="/login"
-          className="mt-10 text-xs font-medium text-white/50 underline-offset-4 transition hover:text-white/85 hover:underline"
+          className="mt-10 inline-flex items-center gap-2 rounded-full border border-white/40 px-6 py-2.5 text-sm font-semibold text-white transition hover:border-white hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#02C39A] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1B2A]"
         >
-          Agent sign in →
+          Agent sign in <span aria-hidden>→</span>
         </Link>
+        <p className="mt-2 text-xs text-white/50">For UniServe staff and support agents</p>
       </div>
     </main>
   );

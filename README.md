@@ -386,8 +386,8 @@ cd services/db-writer  && mvn quarkus:dev
 
 ### dashboard (Next.js 14, port 3000)
 
-- `src/app/page.tsx` — landing page (agent sign-in / track-a-complaint
-  links).
+- `src/app/page.tsx` — landing page (track-a-complaint search + agent
+  sign-in, in a top-right header and as an outlined button below the fold).
 - **Backgrounds** — the login brand panel and every `/dashboard` route
   (via `src/app/dashboard/layout.tsx`) render layered, colourful backdrops:
   a gradient/glow treatment that also acts as the fallback, with an
@@ -510,9 +510,15 @@ cd services/db-writer  && mvn quarkus:dev
   Now a branded, high-contrast hero with a working search form that submits
   to `/status/{value}` (client-side `router.push`), matching what
   `PublicStatusResource` accepts — **not** a phone number, so the copy
-  deliberately doesn't imply that works. "Agent sign in" is kept as a
-  small, secondary link to `/login` — citizens are this page's primary
-  audience, not staff.
+  deliberately doesn't imply that works. "Agent sign in" links to `/login`
+  from **two** places: a top-right header link (an absolutely-positioned
+  `<header>`, so the hero stays vertically centred) and an outlined pill
+  button below the fold, captioned "For UniServe staff and support agents".
+  It was previously a single `text-xs text-white/50` link in one corner —
+  visible in the design, effectively invisible on a real screen, which is
+  the one thing staff open this page to find. Both treatments are still
+  quieter than the orange "Track complaint" submit button: citizens are
+  this page's primary audience, not staff.
 - `src/app/api/*` — Next.js route handlers acting as a thin BFF: proxy to
   api-gateway, forwarding the JWT cookie.
 - The fuller component library documented in
