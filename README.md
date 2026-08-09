@@ -30,6 +30,7 @@ resolution workflow and full audit trail.
 - [Chief complaint](#chief-complaint)
 - [Configurable per-channel intake fields](#configurable-per-channel-intake-fields)
 - [Configurable priority rubric & general settings](#configurable-priority-rubric--general-settings)
+- [Configurable landing page](#configurable-landing-page)
 - [HTTP API reference](#http-api-reference)
 - [Environment variables](#environment-variables)
 - [Logging, log levels & transaction tracing](#logging-log-levels--transaction-tracing)
@@ -386,8 +387,10 @@ cd services/db-writer  && mvn quarkus:dev
 
 ### dashboard (Next.js 14, port 3000)
 
-- `src/app/page.tsx` — landing page (track-a-complaint search + agent
-  sign-in, in a top-right header and as an outlined button below the fold).
+- `src/app/page.tsx` — landing page (track-a-complaint search + agent sign-in
+  in the header, below the hero and in the footer; About/How-it-works/Contact
+  sections; footer). Server-rendered from tenant config — see
+  [Configurable landing page](#configurable-landing-page).
 - **Backgrounds** — the login brand panel and every `/dashboard` route
   (via `src/app/dashboard/layout.tsx`) render layered, colourful backdrops:
   a gradient/glow treatment that also acts as the fallback, with an
@@ -463,6 +466,13 @@ cd services/db-writer  && mvn quarkus:dev
   0–5); saves to `PUT /api/v1/tenant/general-settings`. Both panels are
   described in
   [Configurable priority rubric & general settings](#configurable-priority-rubric--general-settings).
+- `src/components/admin/LandingPagePanel.tsx` — Administration → Landing Page
+  sub-tab: every string on the public `/` page, plus the logo, the palette,
+  the About/How-it-works/Contact cards, up to 10 extra sections and the footer
+  links; saves the whole object to `PUT /api/v1/tenant/landing-page`. Each box
+  shows its default as the placeholder, because **blank means "use the
+  default"**, not "blank the live page". See
+  [Configurable landing page](#configurable-landing-page).
 - `src/components/admin/AnnouncementsPanel.tsx` — Administration →
   Announcements sub-tab: active + expired/inactive lists with
   create/edit/deactivate/delete (modal with char counters, optional expiry
@@ -511,14 +521,27 @@ cd services/db-writer  && mvn quarkus:dev
   to `/status/{value}` (client-side `router.push`), matching what
   `PublicStatusResource` accepts — **not** a phone number, so the copy
   deliberately doesn't imply that works. "Agent sign in" links to `/login`
-  from **two** places: a top-right header link (an absolutely-positioned
-  `<header>`, so the hero stays vertically centred) and an outlined pill
-  button below the fold, captioned "For UniServe staff and support agents".
-  It was previously a single `text-xs text-white/50` link in one corner —
-  visible in the design, effectively invisible on a real screen, which is
-  the one thing staff open this page to find. Both treatments are still
-  quieter than the orange "Track complaint" submit button: citizens are
-  this page's primary audience, not staff.
+  from **three** places: a top-right header link (an absolutely-positioned
+  `<header>`, so the hero stays vertically centred), an outlined pill button
+  below the fold with a caption naming its audience, and the footer. It was
+  previously a single `text-xs text-white/50` link in one corner — visible in
+  the design, effectively invisible on a real screen, which is the one thing
+  staff open this page to find. All three are still quieter than the
+  accent-coloured "Track complaint" submit button: citizens are this page's
+  primary audience, not staff.
+  Every string here, plus the logo and palette, is tenant configuration rather
+  than a literal — see [Configurable landing page](#configurable-landing-page).
+  The page is a **server** component (ISR, 60s) so the copy is in the initial
+  HTML; only `src/components/landing/TrackComplaintForm.tsx` ships JS.
+- `src/components/landing/TrackComplaintForm.tsx` — the lookup form, split out
+  of `page.tsx` when that became a server component. Holds the only client
+  state on the page.
+- `src/lib/landingPage.ts` — landing page types, the client-side mirror of the
+  gateway's defaults, and `coerceLandingPage` (merges an untrusted/partial
+  payload over those defaults; never throws). Must stay free of server-only
+  imports — the admin panel is a client component and imports from it.
+- `src/lib/landingPage.server.ts` — the server-side read
+  (`fetchLandingPage`), separate because `lib/gateway` imports `next/headers`.
 - `src/app/api/*` — Next.js route handlers acting as a thin BFF: proxy to
   api-gateway, forwarding the JWT cookie.
 - The fuller component library documented in
@@ -1552,6 +1575,75 @@ constant and a Python string) that must be kept in agreement by hand.
 
 ---
 
+## Configurable landing page
+
+The public `/` page is the one screen a citizen sees before they have any
+relationship with the product, and every word on it used to be a string literal
+in `apps/dashboard/src/app/page.tsx`. Deploying UniServe for a second tenant
+therefore meant editing and redeploying the frontend. It is now tenant
+configuration: **Administration → Landing Page**, stored as the `landingPage`
+key of the tenant's `config_json`.
+
+**What is configurable.** The brand name and logo; the tagline and sub-tagline;
+the "Track your complaint" box (heading, help text, input placeholder, button
+label); the "Haven't filed yet" line; the agent sign-in label and caption; the
+five palette colours; the About / How it works / Contact cards; up to 10 extra
+sections; and the footer note plus up to 10 footer links.
+
+**Blank means "use the default".** `LandingPageContent.resolve` lays the stored
+values over the built-in defaults field by field, so a tenant that configures
+only its brand name still gets a complete page, and clearing a box restores the
+default rather than blanking the live page. The admin panel shows each default
+as that field's placeholder, and repaints from the resolved response after a
+save so the fallback is visible.
+
+**Two endpoints, one owner.** `LandingPageResource`
+(`GET|PUT /api/v1/tenant/landing-page`, `admin.tenant.config`) reads and writes;
+`PublicLandingPageResource` (`GET /api/v1/public/landing-page`, no auth) serves
+the same resolved content to the page. Both delegate to `LandingPageContent`, so
+the admin screen and the live page cannot disagree. The public endpoint returns
+defaults with `200` on **any** failure — the front door renders complete copy
+even with db-writer cold. It must never grow to echo the rest of `config_json`
+(categories, SLA targets, routing rules), which is not public; a test asserts
+its response has exactly one key.
+
+**The logo.** One field accepts two shapes: a same-origin path
+(`/tenants/acme/logo.png`, for an image committed under
+`apps/dashboard/public/` — the same convention as `public/backgrounds/`), or an
+absolute `http(s)` URL for a logo the tenant already hosts. It renders through a
+plain `<img>`, deliberately not `next/image`: the latter requires every tenant
+domain to be whitelisted in `next.config.mjs` at build time, which is exactly
+the coupling this feature removes. Blank falls back to the brand name as text.
+
+**Why the validation is not cosmetic.** Colours are interpolated into a `style`
+attribute, so only `#RGB`/`#RRGGBB` is accepted — a free-form string there would
+let an admin inject CSS into a page every citizen loads unauthenticated. Logo
+and footer-link URLs become `src`/`href`, so only `/path`, `http(s)`, and (links
+only) `mailto:`/`tel:` are accepted; protocol-relative `//host` is rejected
+because it reads as same-origin but is not. Both rules are enforced again on
+*read*, not just on write, because `TenantConfigResource` replaces the whole
+`config_json` blob and can therefore land a `landingPage` object that never
+passed through this resource's `PUT`. Headings and bodies need no such handling
+because the page renders them as text nodes — never `dangerouslySetInnerHTML`.
+**Keep it that way.**
+
+**Rendering.** `page.tsx` is a server component, so the copy is in the initial
+HTML (no flash of default wording, and it is indexable); only the lookup form
+(`components/landing/TrackComplaintForm.tsx`) ships JS. The route is ISR at 60s
+(`export const revalidate = 60`, confirmed as `initialRevalidateSeconds: 60` in
+`.next/prerender-manifest.json`), so an admin's save goes public within about a
+minute instead of costing a gateway round-trip per visitor — which matters when
+the gateway is a free-tier instance that may be cold.
+
+**Client-side mirror.** `src/lib/landingPage.ts` holds a copy of the defaults
+plus `coerceLandingPage`, used when the gateway is unreachable and by the admin
+panel. Keep it in sync with `LandingPageContent.java` — drift shows up as the
+page changing wording the moment the backend comes back. The server-side fetch
+lives in `landingPage.server.ts` because `lib/gateway` imports `next/headers`,
+which cannot be bundled for the browser.
+
+---
+
 ## HTTP API reference
 
 ### api-gateway — `http://localhost:8080`
@@ -1606,9 +1698,18 @@ constant and a Python string) that must be kept in agreement by hand.
   `GET /api/v1/public/news-config` (`PublicNewsConfigResource`) so the
   dashboard's `/api/news` route can read it before its env/BBC-Tamil
   fallbacks.
-  Both endpoints reuse the `admin.tenant.config` RBAC action and the
+- `GET|PUT /api/v1/tenant/landing-page` — the public landing page's content
+  (`LandingPageResource`). `GET` returns `{content, defaults}` where `content`
+  is the tenant's stored values laid over the defaults; `PUT` validates the
+  whole object (`422 INVALID_LANDING_PAGE`) and merges only the `landingPage`
+  key. Served without auth to the `/` page via
+  `GET /api/v1/public/landing-page` (`PublicLandingPageResource`), which
+  returns the built-in defaults with `200` on ANY failure so the front door
+  still renders when db-writer is cold. See
+  [Configurable landing page](#configurable-landing-page).
+  All of these endpoints reuse the `admin.tenant.config` RBAC action and the
   merge-one-key pattern, so `categories`/`sla`/`intakeFields`/`priorityRubric`/
-  `generalSettings` never clobber one another.
+  `generalSettings`/`landingPage` never clobber one another.
 
 **Announcements** (UI_REVAMP_v2 Feature C; RBAC `announcements.view` = all
 roles, `announcements.manage` = admin)
@@ -1777,6 +1878,10 @@ Every route below is a thin proxy to the matching api-gateway endpoint via
   (Administration → Priority Rules)
 - `GET/PUT /api/tenant/general-settings` — proxies tenant general settings
   (Administration → Settings)
+- `GET/PUT /api/tenant/landing-page` — proxies the public landing page's
+  content (Administration → Landing Page). The page itself does **not** go
+  through this route: it reads `/api/v1/public/landing-page` from the gateway
+  directly, server-side and unauthenticated.
 - `GET /api/tickets` (forwards `?identityStatus=` for the Confirmed / Needs-identity
   queue toggle), `GET /api/tickets/[id]`, `GET /api/tickets/[id]/events` (the
   detail page's Audit trail section)
@@ -1939,8 +2044,19 @@ since they aren't part of an adapter-originated transaction — db-writer's
   "is a key configured?" (`message_quality`, `llm_scorer`, `chief_complaint`),
   so without it the suite would quietly reach the network. Tests that exercise
   the LLM path patch `settings` in their own module namespace, which still wins.
-- **dashboard**: no automated test suite yet in Phase 1; verified manually
-  through the browser and via the BFF route handlers.
+- **dashboard**: `npx tsc --noEmit` and `npx next build` for types/compile,
+  plus a Playwright E2E suite in `apps/dashboard/e2e` (`npm run test:e2e`).
+  The suite targets an **already-running** local dev stack (`scripts/dev.sh`)
+  rather than spawning its own server — most specs need the real
+  gateway/db-writer/ai-core to exercise RBAC and ticket lifecycle, so they
+  fail against a bare `next start`. Run **one spec file per CLI invocation**:
+  `playwright.config.ts` documents a sandbox crash when a second Chromium
+  browser context is created in the same OS process, which the worker-scoped
+  single-context fixture in `e2e/helpers.ts` avoids only within one process.
+  `e2e/landing-page.spec.ts` is the exception worth knowing: all of its
+  "public, no auth" tests except the `/status/{ref}` navigation pass against
+  a bare `next start`, because the landing page degrades to its built-in
+  defaults when the gateway is unreachable.
 
 ---
 

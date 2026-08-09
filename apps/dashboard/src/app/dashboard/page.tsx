@@ -8,6 +8,7 @@ import TeamPanel from "@/components/admin/TeamPanel";
 import IntakeFieldsPanel from "@/components/admin/IntakeFieldsPanel";
 import PriorityRulesPanel from "@/components/admin/PriorityRulesPanel";
 import GeneralSettingsPanel from "@/components/admin/GeneralSettingsPanel";
+import LandingPagePanel from "@/components/admin/LandingPagePanel";
 import AnnouncementsPanel from "@/components/admin/AnnouncementsPanel";
 import SystemPanel from "@/components/admin/SystemPanel";
 import AnnouncementBanner from "@/components/announcements/AnnouncementBanner";
@@ -543,7 +544,14 @@ function TicketQueue({ role }: { role: string }) {
   );
 }
 
-type AdminSubTab = "team" | "intake" | "priority" | "settings" | "announcements" | "system";
+type AdminSubTab =
+  | "team"
+  | "intake"
+  | "priority"
+  | "settings"
+  | "landing"
+  | "announcements"
+  | "system";
 const ADMIN_SUBTAB_KEY = "uniserve.adminSubTab";
 
 function Administration() {
@@ -552,7 +560,15 @@ function Administration() {
   const [subTab, setSubTab] = useState<AdminSubTab>(() => {
     if (typeof sessionStorage === "undefined") return "team";
     const saved = sessionStorage.getItem(ADMIN_SUBTAB_KEY);
-    const valid: AdminSubTab[] = ["team", "intake", "priority", "settings", "announcements", "system"];
+    const valid: AdminSubTab[] = [
+      "team",
+      "intake",
+      "priority",
+      "settings",
+      "landing",
+      "announcements",
+      "system",
+    ];
     return (valid as string[]).includes(saved ?? "") ? (saved as AdminSubTab) : "team";
   });
 
@@ -570,6 +586,7 @@ function Administration() {
     { key: "intake", label: "Intake Fields" },
     { key: "priority", label: "Priority Rules" },
     { key: "settings", label: "Settings" },
+    { key: "landing", label: "Landing Page" },
     { key: "announcements", label: "Announcements" },
     { key: "system", label: "System" },
   ];
@@ -593,6 +610,7 @@ function Administration() {
       {subTab === "intake" && <IntakeFieldsPanel />}
       {subTab === "priority" && <PriorityRulesPanel />}
       {subTab === "settings" && <GeneralSettingsPanel />}
+      {subTab === "landing" && <LandingPagePanel />}
       {subTab === "announcements" && <AnnouncementsPanel />}
       {subTab === "system" && <SystemPanel />}
     </div>

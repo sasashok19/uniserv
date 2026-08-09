@@ -1,3 +1,67 @@
+# Session handoff — configurable landing page (Feature 25), 2026-08-09
+
+## Task
+Follow-on from the sign-in fix below. User asked for (a) normal bottom-of-page
+sections — About, Contact us, etc. — and (b) EVERY string on the landing page
+to be admin-configurable, so deploying for a different tenant is a config edit
+rather than a code change.
+
+Choices the user made when asked:
+- Sections: **fixed set (About / How it works / Contact) + repeatable extras**
+- Also configurable: **logo** (committed `/path` OR absolute https URL) and
+  **brand colours**. NOT per-channel visibility toggles.
+
+## Status: DONE — 115/115 gateway tests pass (25 new), tsc + next build clean
+E2E: 5/6 of the new public landing tests pass against a bare `next start`; the
+6th (`/status/{ref}` navigation) and all 6 admin-panel tests need the full dev
+stack, as does the rest of the suite.
+
+## Shape of the change
+Follows the EXISTING merge-one-key pattern (`GeneralSettingsResource` +
+`PublicNewsConfigResource`), not a new mechanism.
+
+Gateway (`services/api-gateway/.../auth/`):
+- `LandingPageContent.java` — defaults, `resolve` (stored laid over defaults,
+  field by field) and `normalise` (validation). Single owner so the admin
+  screen and the live page cannot disagree.
+- `LandingPageResource.java` — `GET|PUT /api/v1/tenant/landing-page`, admin
+  only, read-merge-write of `config_json.landingPage`.
+- `PublicLandingPageResource.java` — `GET /api/v1/public/landing-page`, NO
+  auth (the `public/` segment keeps it out of `AuthFilter.isProtected`),
+  returns defaults with 200 on ANY failure.
+- `LandingPageResourceTest.java` — 25 tests.
+
+Dashboard:
+- `src/lib/landingPage.ts` — types, client mirror of defaults,
+  `coerceLandingPage`. MUST stay free of server-only imports (the admin panel
+  is a client component and imports from it).
+- `src/lib/landingPage.server.ts` — `fetchLandingPage`. Split out because
+  `lib/gateway` imports `next/headers`, which broke the client bundle.
+- `src/app/page.tsx` — now a SERVER component, ISR `revalidate = 60`
+  (verified: `initialRevalidateSeconds: 60` in `.next/prerender-manifest.json`).
+- `src/components/landing/TrackComplaintForm.tsx` — the client-state form.
+- `src/components/admin/LandingPagePanel.tsx` + new "Landing Page" subtab.
+- `src/app/api/tenant/landing-page/route.ts` — BFF proxy.
+- `e2e/landing-page.spec.ts`.
+
+## Things that will bite whoever picks this up
+- **Blank means "use the default"**, everywhere. Clearing a field does not
+  blank the public page.
+- **Colours and URLs are validated on READ as well as write.**
+  `TenantConfigResource` replaces the whole `config_json` blob, so a
+  `landingPage` object can reach the DB without passing `normalise`. Colours
+  reach a `style` attribute and logo/links reach `src`/`href` on a page every
+  citizen loads unauthenticated.
+- Section bodies are rendered as **text nodes, never
+  `dangerouslySetInnerHTML`** — that is the whole XSS story for admin copy.
+  Do not "improve" this into rich text without rethinking it.
+- `src/lib/landingPage.ts` defaults are a **mirror** of
+  `LandingPageContent.java`. Drift = the page re-wording itself when the
+  backend comes back.
+- ISR 60s means an admin's save is NOT instantly visible on `/`.
+
+---
+
 # Session handoff — landing page "Agent sign in" visibility, 2026-08-09
 
 ## Task

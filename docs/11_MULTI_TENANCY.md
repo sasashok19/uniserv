@@ -118,6 +118,32 @@ Config JSON structure:
 }
 ```
 
+### Implementation note — merge-one-key resources
+
+`TenantConfigResource` above **replaces the whole `config_json` object**. Every
+later config feature therefore got its own resource that reads the blob, edits a
+single key and writes it back, so two admin screens can never clobber each
+other's settings:
+
+| Key | Resource | Endpoint |
+|---|---|---|
+| `intakeFields` | `IntakeFieldsResource` | `GET|PUT /api/v1/tenant/intake-fields` |
+| `priorityRubric` | `PriorityRubricResource` | `GET|PUT /api/v1/tenant/priority-rubric` |
+| `generalSettings` | `GeneralSettingsResource` | `GET|PUT /api/v1/tenant/general-settings` |
+| `landingPage` | `LandingPageResource` | `GET|PUT /api/v1/tenant/landing-page` |
+
+All four gate on the same `admin.tenant.config` RBAC action.
+
+Two of these keys are also readable **without auth**, because the pages that
+need them (login, landing) are public: `generalSettings.newsFeedUrl` via
+`GET /api/v1/public/news-config`, and the whole of `landingPage` via
+`GET /api/v1/public/landing-page`. Both live under the `/api/v1/public/`
+segment, which `AuthFilter.isProtected` deliberately does not match, and both
+expose only their own key — never the rest of `config_json`, which holds
+routing rules and SLA targets. See the README's *Configurable landing page*
+section for the validation rules that apply because that content reaches
+`style`/`src`/`href` attributes on an unauthenticated page.
+
 ---
 
 ## Environment Variables

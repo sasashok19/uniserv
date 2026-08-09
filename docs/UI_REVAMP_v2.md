@@ -63,7 +63,7 @@ Present a summary of what exists. Wait for "proceed".
 Based on the README, the following is already functional:
 
 ### Already-built dashboard components
-- `src/app/page.tsx` — landing page
+- `src/app/page.tsx` — landing page (server component; content from tenant config)
 - `src/app/login/page.tsx` — agent login
 - `src/app/dashboard/page.tsx` — role-gated dashboard
   with Analytics / Ticket Queue / Administration tabs
@@ -97,7 +97,10 @@ Based on the README, the following is already functional:
 - Team (agent management)
 - Intake Fields
 - Priority Rules
-- Settings (maxFollowupQuestions)
+- Settings (maxFollowupQuestions, login-page news feed URL)
+- Landing Page (all public `/` copy, logo, palette, sections, footer)
+- Announcements
+- System (service health + danger-zone reset)
 
 ### Already-built API BFF routes
 - auth, agents, tenant, tickets, analytics (all standard routes)
@@ -106,6 +109,7 @@ Based on the README, the following is already functional:
 - `GET|PUT /api/tenant/intake-fields`
 - `GET|PUT /api/tenant/priority-rubric`
 - `GET|PUT /api/tenant/general-settings`
+- `GET|PUT /api/tenant/landing-page`
 - `GET /api/analytics/agents-directory`
 - `GET /api/analytics/customers?q=`
 
