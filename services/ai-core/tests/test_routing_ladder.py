@@ -519,26 +519,149 @@ def test_an_llm_outage_still_opens_a_ticket_for_prose():
 
 # --- Feature 22's duplicate question, still reachable from rung 4 ---------
 
-def test_an_unclear_duplicate_still_creates_a_ticket_and_flags_the_suspicion():
-    """Carried over from Feature 22: when the duplicate check cannot tell, a
-    ticket IS created and the suspicion recorded, so the citizen is asked rather
-    than a heuristic silently merging or duplicating."""
+def test_an_unclear_duplicate_asks_before_creating_anything():
+    """Feature 26 replaces the Feature 22 behaviour here.
+
+    It used to create the ticket and ask afterwards, so an open "Power Cut in
+    Madambakkam" plus a bare "Power cut" produced two rows from the first
+    message and only merged if the citizen bothered to reply. Now nothing is
+    created until they answer.
+    """
     db = _db(tickets=[_ticket("t-1", "TKT-00001")],
-             messages={"t-1": [_msg("inbound", "Water logging in Madambakkam")]})
+             messages={"t-1": [_msg("inbound", "Power cut in Madambakkam")]})
 
     with patch("app.tickets.intake.assess_inbound",
                AsyncMock(return_value=_intent(is_new_complaint=True))), \
          patch("app.tickets.intake.match_open_ticket",
                AsyncMock(return_value={"index": 0, "verdict": "unclear",
-                                       "reason": "no location given"})):
+                                       "reason": "no location given",
+                                       "question": "Which area is the power cut in?"})):
         stub = _run(ensure_ticket_stub(
-            db, "t1", "whatsapp:+91900", "whatsapp", raw_text="Water logging again",
+            db, "t1", "whatsapp:+91900", "whatsapp", raw_text="Power cut",
             channel_identity_type="phone", channel_identity_value="+91900", trace_id="tr-28"))
 
+    assert "id" not in stub, "no ticket may exist until the citizen confirms"
+    db.create_ticket.assert_not_awaited()
+    assert stub["awaitingDuplicateConfirmation"] is True
+    # The question must name the complaint we already hold — a citizen cannot
+    # answer a question about a record they cannot see.
+    assert "TKT-00001" in stub["ask"]
+    assert "Madambakkam" in stub["ask"]
+    assert "Which area is the power cut in?" in stub["ask"]
+
+
+def test_the_answer_to_a_duplicate_question_reaches_the_existing_ticket():
+    """"Madambakkam" names no ticket, replies to no message and reads as no
+    complaint — every other rung would decline it. Rung -1 is what stops it
+    being parked as unrouted, losing both the answer and the complaint."""
+    db = _db(tickets=[_ticket("t-1", "TKT-00001")],
+             messages={"t-1": [_msg("inbound", "Power cut in Madambakkam")]})
+
+    with patch("app.tickets.intake.assess_inbound",
+               AsyncMock(return_value=_intent(is_new_complaint=True))), \
+         patch("app.tickets.intake.match_open_ticket",
+               AsyncMock(return_value={"index": 0, "verdict": "unclear",
+                                       "reason": "no location",
+                                       "question": "Which area?"})):
+        _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+91900", "whatsapp", raw_text="Power cut",
+            channel_identity_type="phone", channel_identity_value="+91900", trace_id="tr-28a"))
+
+    # Round two: they answer, and the answer resolves to the same complaint.
+    with patch("app.dedup.confirmation.match_open_ticket",
+               AsyncMock(return_value={"index": 0, "verdict": "same", "reason": "same place",
+                                       "question": None})):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+91900", "whatsapp", raw_text="Madambakkam",
+            channel_identity_type="phone", channel_identity_value="+91900", trace_id="tr-28b"))
+
+    assert stub["duplicateResolved"] == "same"
+    assert stub["id"] == "t-1"
+    db.create_ticket.assert_not_awaited()
+    # The citizen's ORIGINAL words go onto the ticket, not just the one-word answer.
+    attached = [payload["content"] for _, payload in
+                [c.args for c in db.add_message.await_args_list]]
+    assert any("Power cut" in c for c in attached)
+
+
+def test_a_denied_duplicate_creates_the_ticket_with_the_whole_complaint():
+    """"No, this one is in Velachery" is a new complaint — and the ticket must
+    describe the original problem plus the detail just added, not only the answer."""
+    db = _db(tickets=[_ticket("t-1", "TKT-00001")],
+             messages={"t-1": [_msg("inbound", "Power cut in Madambakkam")]})
+
+    with patch("app.tickets.intake.assess_inbound",
+               AsyncMock(return_value=_intent(is_new_complaint=True))), \
+         patch("app.tickets.intake.match_open_ticket",
+               AsyncMock(return_value={"index": 0, "verdict": "unclear", "reason": "no location",
+                                       "question": "Which area?"})):
+        _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+91900", "whatsapp", raw_text="Power cut",
+            channel_identity_type="phone", channel_identity_value="+91900", trace_id="tr-30a"))
+
+    with patch("app.dedup.confirmation.match_open_ticket",
+               AsyncMock(return_value={"index": None, "verdict": "different",
+                                       "reason": "different locality", "question": None})):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+91900", "whatsapp", raw_text="Velachery",
+            channel_identity_type="phone", channel_identity_value="+91900", trace_id="tr-30b"))
+
     assert stub["id"] == "new-1"
+    assert stub["duplicateResolved"] == "different"
+    assert "Power cut" in stub["pendingText"] and "Velachery" in stub["pendingText"]
+
+
+def test_a_bare_yes_settles_the_duplicate_without_an_llm_call():
+    """A citizen who answered plainly should not have their answer re-interpreted."""
+    db = _db(tickets=[_ticket("t-1", "TKT-00001")],
+             messages={"t-1": [_msg("inbound", "Power cut in Madambakkam")]})
+
+    with patch("app.tickets.intake.assess_inbound",
+               AsyncMock(return_value=_intent(is_new_complaint=True))), \
+         patch("app.tickets.intake.match_open_ticket",
+               AsyncMock(return_value={"index": 0, "verdict": "unclear", "reason": "no location",
+                                       "question": "Which area?"})):
+        _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+91900", "whatsapp", raw_text="Power cut",
+            channel_identity_type="phone", channel_identity_value="+91900", trace_id="tr-31a"))
+
+    rejudge = AsyncMock()
+    with patch("app.dedup.confirmation.match_open_ticket", rejudge):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+91900", "whatsapp", raw_text="yes",
+            channel_identity_type="phone", channel_identity_value="+91900", trace_id="tr-31b"))
+
+    assert stub["duplicateResolved"] == "same"
+    assert stub["id"] == "t-1"
+    rejudge.assert_not_awaited()
+
+
+def test_a_second_ambiguous_answer_creates_and_flags_rather_than_asking_again():
+    """Exactly one confirmation round. A citizen who cannot be understood twice
+    must not be trapped in a loop that never files their complaint — a flagged
+    ticket an agent can settle is the better failure."""
+    db = _db(tickets=[_ticket("t-1", "TKT-00001")],
+             messages={"t-1": [_msg("inbound", "Power cut in Madambakkam")]})
+
+    unclear = {"index": 0, "verdict": "unclear", "reason": "still no location",
+               "question": "Which area?"}
+    with patch("app.tickets.intake.assess_inbound",
+               AsyncMock(return_value=_intent(is_new_complaint=True))), \
+         patch("app.tickets.intake.match_open_ticket", AsyncMock(return_value=unclear)):
+        _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+91900", "whatsapp", raw_text="Power cut",
+            channel_identity_type="phone", channel_identity_value="+91900", trace_id="tr-32a"))
+
+    with patch("app.dedup.confirmation.match_open_ticket", AsyncMock(return_value=unclear)):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+91900", "whatsapp", raw_text="near the temple",
+            channel_identity_type="phone", channel_identity_value="+91900", trace_id="tr-32b"))
+
+    assert stub["id"] == "new-1"
+    assert stub["duplicateResolved"] == "unclear"
     assert stub["suspectedDuplicateOf"]["ticketNumber"] == "TKT-00001"
     # ...and recorded on the ticket itself, so an agent can settle it even if the
-    # citizen never answers.
+    # citizen never answers again.
     events = [c.args for c in db.add_event.await_args_list]
     assert any(payload["eventType"] == "ticket.possible_duplicate" for _, payload in events)
 
@@ -547,15 +670,20 @@ def test_routing_survives_a_failed_suspicion_write():
     """The audit write is best-effort — routing must not fail over it."""
     db = _db(tickets=[_ticket("t-1", "TKT-00001")],
              messages={"t-1": [_msg("inbound", "Water logging in Madambakkam")]})
-    db.add_event = AsyncMock(side_effect=RuntimeError("db down"))
+    unclear = {"index": 0, "verdict": "unclear", "reason": "x", "question": "Which area?"}
 
     with patch("app.tickets.intake.assess_inbound",
                AsyncMock(return_value=_intent(is_new_complaint=True))), \
-         patch("app.tickets.intake.match_open_ticket",
-               AsyncMock(return_value={"index": 0, "verdict": "unclear", "reason": "x"})):
-        stub = _run(ensure_ticket_stub(
+         patch("app.tickets.intake.match_open_ticket", AsyncMock(return_value=unclear)):
+        _run(ensure_ticket_stub(
             db, "t1", "whatsapp:+91900", "whatsapp", raw_text="Water logging again",
-            channel_identity_type="phone", channel_identity_value="+91900", trace_id="tr-29"))
+            channel_identity_type="phone", channel_identity_value="+91900", trace_id="tr-29a"))
+
+    db.add_event = AsyncMock(side_effect=RuntimeError("db down"))
+    with patch("app.dedup.confirmation.match_open_ticket", AsyncMock(return_value=unclear)):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+91900", "whatsapp", raw_text="somewhere over there",
+            channel_identity_type="phone", channel_identity_value="+91900", trace_id="tr-29b"))
 
     assert stub["id"] == "new-1"
 

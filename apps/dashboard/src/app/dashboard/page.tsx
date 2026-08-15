@@ -9,6 +9,7 @@ import IntakeFieldsPanel from "@/components/admin/IntakeFieldsPanel";
 import PriorityRulesPanel from "@/components/admin/PriorityRulesPanel";
 import GeneralSettingsPanel from "@/components/admin/GeneralSettingsPanel";
 import LandingPagePanel from "@/components/admin/LandingPagePanel";
+import WhatsAppMenuPanel from "@/components/admin/WhatsAppMenuPanel";
 import AnnouncementsPanel from "@/components/admin/AnnouncementsPanel";
 import SystemPanel from "@/components/admin/SystemPanel";
 import AnnouncementBanner from "@/components/announcements/AnnouncementBanner";
@@ -550,6 +551,7 @@ type AdminSubTab =
   | "priority"
   | "settings"
   | "landing"
+  | "whatsapp"
   | "announcements"
   | "system";
 const ADMIN_SUBTAB_KEY = "uniserve.adminSubTab";
@@ -566,6 +568,7 @@ function Administration() {
       "priority",
       "settings",
       "landing",
+      "whatsapp",
       "announcements",
       "system",
     ];
@@ -587,6 +590,7 @@ function Administration() {
     { key: "priority", label: "Priority Rules" },
     { key: "settings", label: "Settings" },
     { key: "landing", label: "Landing Page" },
+    { key: "whatsapp", label: "WhatsApp Menu" },
     { key: "announcements", label: "Announcements" },
     { key: "system", label: "System" },
   ];
@@ -611,6 +615,7 @@ function Administration() {
       {subTab === "priority" && <PriorityRulesPanel />}
       {subTab === "settings" && <GeneralSettingsPanel />}
       {subTab === "landing" && <LandingPagePanel />}
+      {subTab === "whatsapp" && <WhatsAppMenuPanel />}
       {subTab === "announcements" && <AnnouncementsPanel />}
       {subTab === "system" && <SystemPanel />}
     </div>

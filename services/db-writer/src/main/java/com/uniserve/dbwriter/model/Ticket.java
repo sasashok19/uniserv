@@ -101,6 +101,19 @@ public class Ticket extends PanacheEntityBase {
     @Column(name = "sla_due_at")
     public String slaDueAt;
 
+    /** When the agent expects this to be done (Feature 26) — the promise made to
+     * the citizen, distinct from {@link #slaDueAt}, which is the policy deadline
+     * the tenant is measured against. Mandatory on the first transition; see
+     * {@link com.uniserve.dbwriter.tickets.TicketService#transition}. */
+    @Column(name = "eta_at")
+    public String etaAt;
+
+    /** Stamped once, by the first status transition (Feature 26). Its NULLness is
+     * what "first transition" means — without it, enforcing the ETA rule would
+     * mean scanning ticket_events on every transition. */
+    @Column(name = "first_transition_at")
+    public String firstTransitionAt;
+
     @Column(name = "resolved_at")
     public String resolvedAt;
 
@@ -170,6 +183,8 @@ public class Ticket extends PanacheEntityBase {
         m.put("chief_complaint", chiefComplaint);
         m.put("resolution", resolution);
         m.put("sla_due_at", slaDueAt);
+        m.put("eta_at", etaAt);
+        m.put("first_transition_at", firstTransitionAt);
         m.put("resolved_at", resolvedAt);
         m.put("closed_at", closedAt);
         m.put("reopened_count", reopenedCount);

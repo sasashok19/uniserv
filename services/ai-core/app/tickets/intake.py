@@ -114,9 +114,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from app.classify.message_intent import assess_inbound
-from app.classify.message_quality import match_open_ticket
+from app.classify.message_quality import FALLBACK_DUPLICATE_QUESTION, match_open_ticket
 from app.classify.text_cleanup import strip_quoted_reply
 from app.config import settings
+from app.dedup import confirmation
 from app.dedup.service import ADDRESSABLE_STATUSES, OPEN_STATUSES, TERMINAL_STATUSES
 from app.identity.db_client import DbWriterClient
 
@@ -487,6 +488,21 @@ async def ensure_ticket_stub(
     # almost anything.
     clean_text = strip_quoted_reply(raw_text)
 
+    # --- Rung -1: the answer to a duplicate question we asked (Feature 26) ---
+    #
+    # Above everything, because this answer routes nowhere else. "Madambakkam"
+    # names no ticket, replies to no message, answers no question recorded
+    # against a ticket (none exists yet — that is the point), and reads as no
+    # complaint. Every other rung would decline it and rung 5 would park it,
+    # losing both the answer and the complaint it was about.
+    pending = await confirmation.load_pending(tenant_id, thread_key)
+    if pending:
+        resolved = await _resolve_pending_duplicate(
+            db, tenant_id, thread_key, channel, pending, clean_text, raw_text,
+            origin_message_id, trace_id)
+        if resolved is not None:
+            return resolved
+
     reference_ticket = await _resolve_by_reference(db, tenant_id, subject, raw_text, trace_id)
     reply_ticket = await _resolve_by_reply_to(db, tenant_id, in_reply_to, trace_id) if in_reply_to else None
 
@@ -575,7 +591,7 @@ async def ensure_ticket_stub(
         if open_tickets:
             resolved = await _match_against_open_tickets(
                 db, tenant_id, thread_key, channel, open_tickets, clean_text,
-                origin_message_id, trace_id)
+                origin_message_id, trace_id, tenant_config)
             if resolved is not None:
                 return resolved
         return await _create_stub(db, tenant_id, thread_key, channel, origin_message_id, trace_id)
@@ -721,6 +737,7 @@ async def _park_unrouted(
 async def _match_against_open_tickets(
     db: DbWriterClient, tenant_id: str, thread_key: str, channel: str, open_tickets: list[dict],
     raw_text: Optional[str], origin_message_id: Optional[str], trace_id: Optional[str],
+    tenant_config: Optional[dict] = None,
 ) -> Optional[dict]:
     """Decide, in ONE judgment, which of the citizen's open tickets this
     message continues (Feature 22).
@@ -786,17 +803,107 @@ async def _match_against_open_tickets(
                     trace_id, chosen["id"], match.get("reason"))
         return {"id": chosen["id"], "ticketNumber": chosen.get("ticket_number")}
 
-    # unclear — create the ticket, flag the suspicion, and let the citizen settle it.
+    # unclear — Feature 26: ASK FIRST, create nothing.
+    #
+    # This used to create the ticket immediately and ask afterwards, which meant
+    # an open "Power Cut in Madambakkam" plus a bare "Power cut" produced two
+    # rows from the first message and only merged if the citizen replied. The
+    # question now comes first and the citizen's words are held in Valkey until
+    # they answer (app/dedup/confirmation.py). Exactly one round: an answer that
+    # is still ambiguous falls through to create-and-flag, so nobody's complaint
+    # can be trapped in a loop.
+    summary = candidates[index]["text"][:300]
+    question = match.get("question") or FALLBACK_DUPLICATE_QUESTION
     logger.info(
-        "possible duplicate of ticketId=%s but the message is ambiguous — creating a new ticket "
-        "and asking the citizen traceId=%s reason=%s",
+        "possible duplicate of ticketId=%s and the message is ambiguous — asking the citizen "
+        "BEFORE creating anything traceId=%s reason=%s",
         chosen["id"], trace_id, match.get("reason"),
     )
+    pending = confirmation.as_pending(raw_text or "", chosen, summary, question)
+    await confirmation.save_pending(tenant_id, thread_key, pending)
+    return {
+        "awaitingDuplicateConfirmation": True,
+        "ask": confirmation.build_question(
+            _menu_copy(tenant_config, channel), pending["duplicateOf"], question),
+        "duplicateOf": pending["duplicateOf"],
+    }
+
+
+async def _resolve_pending_duplicate(
+    db: DbWriterClient, tenant_id: str, thread_key: str, channel: str, pending: dict,
+    clean_text: Optional[str], raw_text: Optional[str], origin_message_id: Optional[str],
+    trace_id: Optional[str],
+) -> Optional[dict]:
+    """Turn the citizen's answer into a routing decision (Feature 26, rung -1).
+
+    Returns None only when the confirmation state was unusable, in which case
+    the caller carries on down the normal ladder rather than losing the message.
+    """
+    duplicate_of = pending.get("duplicateOf") or {}
+    if not duplicate_of.get("id"):
+        await confirmation.clear_pending(tenant_id, thread_key)
+        return None
+
+    outcome = await confirmation.resolve(
+        db, tenant_id, thread_key, pending, clean_text, trace_id=trace_id)
+    await confirmation.clear_pending(tenant_id, thread_key)
+
+    if outcome["outcome"] == "same":
+        # No ticket is created — this is the whole point of the feature. The
+        # citizen's words go onto the ticket they confirmed.
+        attached = await confirmation.attach_to_existing(
+            db, tenant_id, outcome["ticketId"], channel,
+            f"{pending.get('text') or ''}\n{raw_text or ''}".strip(), trace_id=trace_id)
+        return {
+            "duplicateResolved": "same",
+            "id": outcome["ticketId"],
+            "ticketNumber": outcome.get("ticketNumber"),
+            "attached": attached,
+        }
+
+    if outcome["outcome"] == "different":
+        stub = await _create_stub(db, tenant_id, thread_key, channel, origin_message_id, trace_id)
+        stub["duplicateResolved"] = "different"
+        stub["pendingText"] = outcome.get("text")
+        return stub
+
+    # Still unclear after one round: create and flag, as Feature 22 did.
+    stub = await _create_flagged_stub(
+        db, tenant_id, thread_key, channel, origin_message_id,
+        duplicate_of["id"], duplicate_of.get("ticketNumber"),
+        duplicate_of.get("summary") or "", "ambiguous after one confirmation round", trace_id)
+    stub["duplicateResolved"] = "unclear"
+    stub["pendingText"] = outcome.get("text")
+    return stub
+
+
+def _menu_copy(tenant_config: Optional[dict], channel: str) -> Optional[dict]:
+    """The tenant's WhatsApp menu copy, when this message is on WhatsApp.
+
+    Email has no configurable menu, so it gets ``confirmation.build_question``'s
+    plain composition rather than a WhatsApp-shaped template.
+    """
+    if channel != "whatsapp":
+        return None
+    from app.conversation import menu_content
+    return menu_content.resolve(tenant_config)
+
+
+async def _create_flagged_stub(
+    db: DbWriterClient, tenant_id: str, thread_key: str, channel: str,
+    origin_message_id: Optional[str], chosen_id: str, chosen_number: Optional[str],
+    summary: str, reason: Optional[str], trace_id: Optional[str],
+) -> dict:
+    """Create the stub AND carry the duplicate suspicion (the Feature 22 path).
+
+    Reached only after a confirmation round failed to settle it — see
+    ``app/dedup/confirmation.resolve``.
+    """
     stub = await _create_stub(db, tenant_id, thread_key, channel, origin_message_id, trace_id)
     stub["suspectedDuplicateOf"] = {
-        "id": chosen["id"],
-        "ticketNumber": chosen.get("ticket_number"),
-        "summary": candidates[index]["text"][:300],
+        "id": chosen_id,
+        "ticketNumber": chosen_number,
+        "summary": summary,
     }
     # Record the suspicion on the ticket itself, not just in the conversation
     # turn. The citizen may never answer the question — they often don't — and
@@ -809,9 +916,9 @@ async def _match_against_open_tickets(
             "eventType": "ticket.possible_duplicate",
             "actorType": "ai",
             "meta": {
-                "duplicateOfId": chosen["id"],
-                "duplicateOfNumber": chosen.get("ticket_number"),
-                "reason": match.get("reason"),
+                "duplicateOfId": chosen_id,
+                "duplicateOfNumber": chosen_number,
+                "reason": reason,
             },
         }, trace_id=trace_id)
     except Exception:  # noqa: BLE001 - see above

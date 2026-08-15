@@ -740,3 +740,103 @@ now returns its row id and marks `isIntakeRequest`; `_send_reply` carries
 provider id (returned by the gateway's adapter endpoints) via
 `set_message_channel_id` after delivery. Best-effort throughout — the citizen has
 the message; losing the shortcut costs a rung, not the reply.
+
+
+---
+
+## Feature 26 - the WhatsApp menu and asking before duplicating
+
+### The menu sits in front of the pipeline (WhatsApp only)
+
+`app/conversation/menu.py` is a deterministic state machine - no LLM, no
+heuristics - that runs on every inbound WhatsApp message **before**
+`ensure_ticket_stub`. It has to run first because two of its three options
+create no ticket at all: option 1 reads back one named ticket's status/ETA/last
+update and optionally appends a note; option 3 says goodbye.
+
+```
+(no session)     --any message-->  MENU
+MENU             --"1"-->          AWAIT_TICKET_ID --ticket id--> AWAIT_NOTE --note--> (cleared)
+MENU             --"2"-->          INTAKE  --> ensure_ticket_stub + ConversationAgent
+MENU             --"3"-->          (cleared)
+any              --"#"-->          MENU
+```
+
+Session state: Valkey `wamenu:{tenantId}:{threadKey}`, TTL from
+`whatsappMenu.sessionTtlHours` (default 12h, capped at 24h - Meta's free-form
+reply window). Copy: `config_json.whatsappMenu`, resolved by
+`app/conversation/menu_content.py`, which mirrors the gateway's
+`WhatsAppMenuContent.java` (a test parses the Java file and fails on drift).
+
+Why deterministic: the status and ETA a citizen is read back are facts. This is
+the same reasoning `status_lookup.py` already documents - a model that rephrases
+can rephrase wrongly, and a citizen acting on a hallucinated status is worse
+than one who was told nothing.
+
+**Strict at the top level only.** The menu decides which *flow* the citizen is
+in; inside a flow their text is that flow's input (a ticket ID, a note, an
+intake answer) and is not matched against menu keys. Only `#` pulls out. This is
+what keeps the Feature 20 intake exchange intact - "Nithya" is an answer to the
+form, not an unrecognised option.
+
+**Option 2 reuses the intake renderer.** `intake_fields.render_field_form` was
+extracted out of `build_identity_request_message` so the menu's list of required
+details and the AI intake that follows can never ask for different fields. A
+citizen told to send four details and then asked for a fifth has been misled by
+us, not confused.
+
+**A first message is never discarded.** A citizen who opens with a complaint
+rather than a greeting still gets the menu, but their words are held in the
+session's `carryOver` and prepended to the intake when they press 2.
+
+### Ask before creating a duplicate - routing rung -1
+
+Feature 22's `unclear` verdict used to create the ticket and ask afterwards.
+Feature 26 inverts that: nothing is created until the citizen answers.
+
+| Step | Where |
+|---|---|
+| `match_open_ticket` returns `unclear` **and a `question`** asking for the missing detail | `app/classify/message_quality.py` |
+| The citizen's words + the candidate are held in Valkey `dupconfirm:{tenantId}:{threadKey}` (24h) | `app/dedup/confirmation.py` |
+| `ensure_ticket_stub` returns `awaitingDuplicateConfirmation` + `ask` with **no id**; the dispatcher sends the ask and stops | `app/tickets/intake.py` |
+| Their answer is caught by **rung -1**, above every other signal | `_resolve_pending_duplicate` |
+
+Rung -1 has to outrank everything because the answer routes nowhere else:
+"Madambakkam" names no ticket, replies to no message, answers no question
+recorded *against* a ticket (none exists yet - that is the point), and reads as
+no complaint. Every other rung would decline it and rung 5 would park it as
+unrouted, losing both the answer and the complaint it was about.
+
+The question itself names the existing complaint ("we already have ticket
+TKT-00042 open for ..."), because a citizen cannot answer a question about a
+record they cannot see. The prompt explicitly forbids asking "is this a
+duplicate?" and requires asking for the missing detail instead, usually the
+locality.
+
+Resolution: a plain yes/no is matched deterministically (no LLM call - a citizen
+who answered plainly should not have their answer re-interpreted); anything
+substantive is re-judged as **original + answer combined**, because judging the
+answer alone would compare "Madambakkam" to a power-cut complaint and conclude,
+correctly but uselessly, that they differ.
+
+- `same` -> attach the message to the existing ticket, emit
+  `ticket.duplicate_prevented`. No row is created, so there is nothing to mark
+  `is_duplicate` and nothing to close - that IS the merge.
+- `different` -> create the stub carrying the whole complaint, not just the answer.
+- still `unclear`, or the model is unavailable -> create and flag with
+  `suspectedDuplicateOf` + `ticket.possible_duplicate`, exactly as Feature 22
+  did. **One round only**: a citizen who cannot be understood twice must not be
+  trapped in a loop that never files their complaint, and an unavailable model
+  is a network condition rather than a decision about this message.
+
+### Prompt changes
+
+`ASSISTANT_INSTRUCTIONS` (`app/conversation/tools.py`) gained: the tenant's own
+name via a per-turn `company=` line (the Assistant object is shared and lives on
+OpenAI's side, so this is the only way a tenant name can reach the model at
+all); "you are only ever invoked inside option 2, do not present a menu"; a hard
+ban on inventing ETAs, ticket numbers, or status changes; safety-first handling
+of live wires and gas leaks; reply-in-the-citizen's-language; and the
+unactionable-message cases (media-only, several unrelated problems, small talk,
+out-of-scope questions). `scripts/update_assistant.py` **must be re-run** for
+any of it to reach the live Assistant. Guarded by `tests/test_tools.py`.

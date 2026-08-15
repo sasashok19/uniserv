@@ -246,3 +246,28 @@ HTTP/1.1 401 Unauthorized
 - `quarkus.smallrye-jwt.enabled=false` — the built-in MP-JWT mechanism would otherwise intercept and reject our HS256 Bearer tokens before the custom filter runs.
 - On dev startup the gateway **reseeds the seed agents' bcrypt password hashes** (admin/lead/agent) so the documented dev credentials work.
 - Refresh tokens are rotated with a Valkey-backed revocation entry. A dev-only helper `GET /api/v1/auth/_dev/expired-token` exists to exercise the `TOKEN_EXPIRED` path.
+- **Feature 26 - `whatsappMenu`.** `GET|PUT /api/v1/tenant/whatsapp-menu`
+  (`WhatsAppMenuResource`, `admin.tenant.config`) is the seventh consumer of the
+  read-merge-write `config_json` pattern, alongside `generalSettings`,
+  `intakeFields`, `intakeFieldCatalog`, `priorityRubric` and `landingPage`.
+  It holds every string a citizen reads on WhatsApp plus `enabled` and
+  `sessionTtlHours`.
+  - `companyName` **cascades**: explicit value -> `landingPage.brandName` ->
+    `"UniServe"`. A tenant that has already branded its public page should not
+    have to type its own name again to brand WhatsApp.
+  - Validation rejects a `menuPrompt` that has lost one of the option numbers
+    (the branch stays reachable by typing but undiscoverable), a
+    `ticketDetails`/`ticketCreated` without the `{ticket}` placeholder, and a
+    `sessionTtlHours` outside 1-24.
+  - `sessionTtlHours` is clamped on **read** as well as write, because
+    `TenantConfigResource` replaces the whole `config_json` blob and a
+    `whatsappMenu` object can therefore reach the database without ever passing
+    through `normalise` - the same trap documented for the landing page.
+  - There is **no public counterpart** to this resource. Unlike the landing
+    page, nothing renders this content to an anonymous browser: ai-core reads
+    the stored blob directly from db-writer over the internal network.
+  - `app/conversation/menu_content.py` mirrors the Java defaults, and
+    `services/ai-core/tests/test_menu_content.py` parses
+    `WhatsAppMenuContent.java` and fails on any drift - key set, every default
+    string, and the TTL bounds. Without that guard the admin screen and the
+    citizen could silently disagree about what the welcome message says.

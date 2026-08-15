@@ -143,7 +143,10 @@ class UnroutedMessageServiceTest {
     void theAskCountLookupIsWhatStopsTheClarifyLoop() {
         // "Send us your ticket number" -> "I don't have it" is ALSO unroutable.
         // ai-core reads this to escalate instead of asking a second time.
-        String contact = "+919000012345";
+        // Unique per run, like `park` above: @QuarkusTest writes to a real,
+        // persistent uniserve.db, so a fixed contact accumulates a row on every
+        // execution and this assertion only ever held on a virgin database.
+        String contact = "+9190000" + UUID.randomUUID().toString().substring(0, 5);
         unrouted.create(Map.of("tenantId", TENANT, "channel", "whatsapp",
                 "channelIdentityValue", contact, "content", "yes", "askCount", 1));
 

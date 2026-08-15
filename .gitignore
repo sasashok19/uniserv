@@ -41,3 +41,6 @@ scripts/.dev-local.pids
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Recorded outbound sends from the integration Meta stub (scripts/integration)
+scripts/integration/sent.jsonl

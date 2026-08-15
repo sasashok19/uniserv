@@ -425,3 +425,55 @@ ticket when a citizen confirms another ticket was a duplicate of it.
 `actorType` is validated here against the table's own CHECK
 (`system`/`ai`/`agent`) so a bad value fails as a 422 rather than an opaque
 500 from the constraint. No schema change was needed.
+
+## Ticket ETA (Feature 26, migration V14)
+
+`V14__ticket_eta.sql` adds two columns to `tickets`:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `eta_at` | TEXT NULL | When the agent expects the work to be done — the promise made to the CITIZEN. |
+| `first_transition_at` | TEXT NULL | Stamped once, by the first status transition. |
+
+Both are plain additive `ALTER TABLE ... ADD COLUMN`, so unlike `V9`/`V11` this
+migration does **not** rebuild the table — it touches no CHECK constraint, and
+SQLite can only alter one by rebuilding.
+
+**`eta_at` is not `sla_due_at`.** They answer different questions and would
+fight each other if merged. `sla_due_at` is the deadline the TENANT is held to,
+derived from category/priority policy, and what a breach report counts against.
+`eta_at` is what an agent told a citizen after looking at the actual work. A
+ticket can be inside SLA and still have an honest ETA past it (parts on order),
+and the citizen must be told the second. `sla_due_at` also has no writer today
+— nothing in the repo computes it — so overloading it would have quietly
+changed the meaning of an unused column the moment something did.
+
+**Why `first_transition_at` exists.** "Mandatory as part of the first
+transition" needs "first" to be a fact rather than a guess. It was previously
+only derivable by scanning `ticket_events` for `status.%` and taking the
+earliest — a read every transition would then have to perform in order to decide
+whether to enforce the rule. One stamped column turns that into a null check.
+It is deliberately NOT inferred from `status`: the unvalidated `PATCH` path can
+change a status without a transition ever happening (ai-core closes a confirmed
+duplicate that way), and that must not count as an agent picking the ticket up.
+
+**The backfill matters.** The migration seeds `first_transition_at` from the
+existing audit trail (`MIN(created_at)` over `ticket_events` where
+`event_type LIKE 'status.%'`). Without it every pre-existing ticket would demand
+an ETA the next time an agent touched it — but the rule is "set an ETA when you
+first pick this up", and those were picked up long ago. Tickets that genuinely
+never transitioned stay NULL and are asked on their first move, which is right.
+
+Index: `idx_tickets_eta ON tickets(tenant_id, eta_at)` — both the citizen-facing
+"when will this be done?" read (WhatsApp menu option 1) and the agent queue's
+overdue-ETA view filter on it.
+
+Storage format is `yyyy-MM-dd HH:mm:ss` UTC, matching every other timestamp
+here, because these columns are compared and sorted as strings — a mixed format
+would sort wrongly rather than fail loudly. A bare date supplied by an agent is
+stored as **23:59:59** of that day: typing `2026-08-18` promises "by the 18th",
+and `00:00:00` would mark the ticket overdue for the whole day it was due.
+
+New `ticket_events` types: `ticket.eta_changed` (meta `{from, to}`),
+`ticket.citizen_note` (a note dropped through the WhatsApp menu),
+`ticket.duplicate_prevented` (a duplicate settled before a second row existed).

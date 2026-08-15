@@ -31,6 +31,9 @@ resolution workflow and full audit trail.
 - [Configurable per-channel intake fields](#configurable-per-channel-intake-fields)
 - [Configurable priority rubric & general settings](#configurable-priority-rubric--general-settings)
 - [Configurable landing page](#configurable-landing-page)
+- [WhatsApp conversation menu](#whatsapp-conversation-menu)
+- [Ticket ETA](#ticket-eta)
+- [Asking before creating a duplicate](#asking-before-creating-a-duplicate)
 - [HTTP API reference](#http-api-reference)
 - [Environment variables](#environment-variables)
 - [Logging, log levels & transaction tracing](#logging-log-levels--transaction-tracing)
@@ -257,7 +260,21 @@ cd services/db-writer  && mvn quarkus:dev
 
 - `app/events/dispatcher.py` — the live consumer loop: reads
   `channel.message.received` off Valkey and hands each event to
-  `ConversationAgent.process()`.
+  `ConversationAgent.process()`. For WhatsApp the **conversation menu**
+  (`app/conversation/menu.py`, Feature 26) runs first and may answer the
+  message entirely on its own — options 1 and 3 create no ticket, so the menu
+  sits ahead of `ensure_ticket_stub`. It also appends the "press # for the main
+  menu" line to outgoing AI replies (`_append_menu_hint`) and, on
+  `complaint.ready`, closes out a menu-registered ticket with its details
+  instead of the ordinary acknowledgement. See
+  [WhatsApp conversation menu](#whatsapp-conversation-menu).
+- `app/conversation/menu.py` + `menu_content.py` — the deterministic WhatsApp
+  state machine and its tenant-configurable copy. No LLM: the status and ETA a
+  citizen is read back are facts composed from the ticket row.
+- `app/dedup/confirmation.py` — holds a citizen's words while the AI asks
+  whether a suspected duplicate really is one, so that **no ticket is created
+  until they answer**. See
+  [Asking before creating a duplicate](#asking-before-creating-a-duplicate).
 - `app/conversation/agent.py` — identity gate (declines to proceed until the
   citizen is identified or explicitly anonymous), info-gathering follow-up
   questions, and either the OpenAI Assistants API path (tool-calling
@@ -473,6 +490,14 @@ cd services/db-writer  && mvn quarkus:dev
   shows its default as the placeholder, because **blank means "use the
   default"**, not "blank the live page". See
   [Configurable landing page](#configurable-landing-page).
+- `src/components/admin/WhatsAppMenuPanel.tsx` — Administration → WhatsApp
+  Menu sub-tab: every string a citizen reads on WhatsApp, grouped the way the
+  conversation actually runs (welcome & menu, option 1, option 2, duplicates,
+  ending the chat), plus the `enabled` toggle and the session length; saves to
+  `PUT /api/v1/tenant/whatsapp-menu`. Same convention as the landing page —
+  **blank means "use the default"**, and the server's resolved view is echoed
+  back after a save so a cleared field visibly refills. See
+  [WhatsApp conversation menu](#whatsapp-conversation-menu).
 - `src/components/admin/AnnouncementsPanel.tsx` — Administration →
   Announcements sub-tab: active + expired/inactive lists with
   create/edit/deactivate/delete (modal with char counters, optional expiry
@@ -494,7 +519,13 @@ cd services/db-writer  && mvn quarkus:dev
   internal note** panel (one note textarea with a grey "Add internal note"
   placeholder + one button per allowed next status — the note rides along
   with the transition; a small "Save note only" link covers notes without a
-  status change), **"Ask a follow-up / update the customer"** (a **Send**
+  status change), the **ETA** date picker inside that same panel (Feature 26 —
+  mandatory the first time a ticket moves, so the transition buttons carry an
+  "ETA required" badge and stay disabled until one is set; an "Update ETA only"
+  button covers later revisions via `PATCH /api/v1/tickets/{id}/eta`, and the
+  ETA is also shown in the header field row because an agent answering the
+  phone needs it without scrolling — see [Ticket ETA](#ticket-eta)),
+  **"Ask a follow-up / update the customer"** (a **Send**
   button with a busy spinner and an explicit ✓ sent / ✗ failed confirmation,
   so a connection failure is never silent), and the internal-notes history
   list.
@@ -590,10 +621,10 @@ See [05_TICKET_SCHEMA](docs/05_TICKET_SCHEMA.md) for full DDL.
 | `tenants` | `id`, `name`, `slug` (unique), `deployment_mode`, `llm_provider`, `config_json` |
 | `agents` | `id`, `tenant_id`, `name`, `email` (unique/tenant), `password_hash`, `role` (admin\|lead\|agent), `is_active` |
 | `identity_profiles` | `id`, `tenant_id`, `master_id` (unique), `name`/`email`/`phone`, `channel_ids_json`, `is_anonymous`, `anon_ref_id` (e.g. `ANON-7X3K`), `merged_into` |
-| `tickets` | `id`, `tenant_id`, `ticket_number` (e.g. `TKT-00142`), `identity_id`, `identity_status` (pending\|anonymous\|confirmed), `assigned_to`, `status` (open\|assigned\|in_progress\|pending_customer\|resolved\|closed\|reopened — `pending_customer` added by `V9`, a table rebuild since SQLite can't alter a CHECK), `chief_complaint` (`V12`, see [Chief complaint](#chief-complaint)), `category`/`subcategory`, `priority_score` (0–10), `priority_label`, `sentiment_score`, `channel_origin`, `thread_id`, `archived_at`, `is_duplicate`, `parent_ticket_id`, `service_id`, `sla_due_at` |
+| `tickets` | `id`, `tenant_id`, `ticket_number` (e.g. `TKT-00142`), `identity_id`, `identity_status` (pending\|anonymous\|confirmed), `assigned_to`, `status` (open\|assigned\|in_progress\|pending_customer\|resolved\|closed\|reopened — `pending_customer` added by `V9`, a table rebuild since SQLite can't alter a CHECK), `chief_complaint` (`V12`, see [Chief complaint](#chief-complaint)), `category`/`subcategory`, `priority_score` (0–10), `priority_label`, `sentiment_score`, `channel_origin`, `thread_id`, `archived_at`, `is_duplicate`, `parent_ticket_id`, `service_id`, `sla_due_at`, `eta_at` + `first_transition_at` (`V14`, see [Ticket ETA](#ticket-eta)) |
 | `ticket_messages` | `channel`, `direction`, `author_type` (ai\|agent\|user\|system), `content`, `media_urls_json`, `is_ai_generated` |
 | `ticket_notes` | `content`, `is_mandatory`, `transition_from`/`transition_to` |
-| `ticket_events` | `event_type`, `actor_type`, `actor_id`, `meta_json` (full audit trail) |
+| `ticket_events` | `event_type`, `actor_type`, `actor_id`, `meta_json` (full audit trail). Feature 26 adds `ticket.eta_changed` (old/new ETA), `ticket.citizen_note` (a note dropped through the WhatsApp menu) and `ticket.duplicate_prevented` (a duplicate settled before any second row existed) |
 | `identity_pending_queue` | `thread_id`, `channel`, `channel_identity_value`, `raw_message`, `timeout_at` (default 48h) |
 | `announcements` | `tenant_id`, `title` (≥3 chars), `body` (≥10 chars), `created_by` (agent), `is_active`, `expires_at` (NULL = never; evaluated at read time, no sweep), `created_at`/`updated_at` — migration `V8__announcements.sql` |
 
@@ -603,7 +634,9 @@ with `Closed → Reopened → In-Progress`, and `In-Progress ⇄ Pending-Custome
 reply; also `Pending-Customer → Resolved`). Any role may move a ticket to
 pending-customer (`ticket.status.to_pending_customer`). Mandatory
 ≥20-character notes are enforced (application layer) on In-Progress→Resolved,
-Resolved→Closed, and Closed→Reopened.
+Resolved→Closed, and Closed→Reopened. An **ETA is mandatory on a ticket's
+FIRST transition** (`422 ETA_REQUIRED`), cancelling excepted — see
+[Ticket ETA](#ticket-eta).
 
 **Dev seed logins** (tenant `t1`, "TNEB Demo"): `admin@tneb.demo` /
 `Admin@123`, `lead@tneb.demo` / `Lead@123`, `agent@tneb.demo` / `Agent@123`.
@@ -1644,6 +1677,252 @@ which cannot be bundled for the browser.
 
 ---
 
+## WhatsApp conversation menu
+
+**Feature 26.** WhatsApp is now a guided conversation with a fixed menu, and the
+AI speaks first.
+
+### What the citizen sees
+
+```
+Citizen: hi
+   AI:   Welcome to TNEB!
+
+         Please choose an option:
+         Press 1 to know the status, ETA and last update for an existing ticket.
+         Press 2 to register a new ticket.
+         Press 3 to end this chat.
+
+         You can press # at any time to return to the main menu.
+```
+
+| Option | What happens |
+|---|---|
+| **1** | Asks for a Ticket ID, then returns **that one ticket only** — status, ETA, last updated — and invites a note. A note is appended to the ticket's conversation, acknowledged ("the team will revert"), and the conversation ends. |
+| **2** | Lists the details needed (the tenant's own [intake fields](#configurable-per-channel-intake-fields)), then hands off to the existing AI intake and routing ladder. On creation the citizen gets the ticket details and the conversation ends. |
+| **3** | "Thanks for reaching out. Have a great time" — session cleared, no hint appended. |
+| **#** | Returns to the main menu from any state. |
+
+Every message except the goodbye carries the `#` hint. For menu-owned messages
+that is part of the composed text; for the AI's own replies during option 2 it
+is appended in `dispatcher._append_menu_hint`, deterministically rather than by
+asking the model — "in all conversation" is not something a prompt instruction
+delivers reliably.
+
+### The state machine
+
+`services/ai-core/app/conversation/menu.py`, session in Valkey at
+`wamenu:{tenantId}:{threadKey}` (the thread key for WhatsApp is
+`whatsapp:<phone>`).
+
+```
+(no session)     --any message-->  MENU              [welcome + 1/2/3]
+MENU             --"1"-->          AWAIT_TICKET_ID
+MENU             --"2"-->          INTAKE            [hands off to the AI pipeline]
+MENU             --"3"-->          (cleared)         [farewell]
+AWAIT_TICKET_ID  --ticket id-->    AWAIT_NOTE        [details: status/ETA/updated]
+AWAIT_NOTE       --any message-->  (cleared)         [note appended to the ticket]
+INTAKE           --ticket filed--> (cleared)         [details + "message us again"]
+any              --"#"-->          MENU
+```
+
+It runs **before** `ensure_ticket_stub`, because options 1 and 3 must create no
+ticket at all.
+
+### Decisions worth knowing
+
+**Strict, but strict at the top level.** The menu decides which *flow* you are
+in. Inside a flow your text is that flow's input — a ticket ID, a note, an
+intake answer — and is not matched against the menu. Only `#` pulls out. This is
+what keeps the Feature 20 intake exchange working: "Nithya" is an answer to the
+form, not an unrecognised menu option.
+
+**A first message is never thrown away.** A citizen who opens with "power cut in
+Madambakkam" gets the welcome menu, and their words are held in the session's
+`carryOver` until they press 2 — at which point they are prepended to the
+intake. Nobody is made to retype a complaint they already sent. A message that
+is only a menu key is not carried over ("2" is not a complaint).
+
+**Deliberate consequence: with no live session, a swipe-reply or a typed
+`TKT-00042` gets the menu** rather than routing straight to its ticket
+(routing rungs 0-1). That is what strict mode means. It is reversible per tenant
+with `whatsappMenu.enabled = false`, which restores the pre-Feature-26 behaviour
+exactly.
+
+**Ownership is checked on option 1.** Ticket numbers are sequential and
+guessable, so a ticket that exists but belongs to someone else is reported
+exactly like one that does not exist — saying "that ticket isn't yours" would
+itself confirm it exists.
+
+**Composed in code, never paraphrased.** The status and ETA read back to a
+citizen are facts, built from the ticket row — the same rule
+`status_lookup.py` already follows.
+
+**Button replies work.** WhatsApp interactive buttons arrive as the button's
+*title*, not its number (see `WhatsAppParser`), so the option matcher accepts
+`1`, `1.`, `1)`, `one`, `status`, and a leading word from a button title.
+
+### Configuration
+
+Admin → **WhatsApp Menu** (`WhatsAppMenuPanel.tsx`), stored as
+`config_json.whatsappMenu`, served by
+`GET|PUT /api/v1/tenant/whatsapp-menu` (admin only, read-merge-write).
+
+| Key | Default | Notes |
+|---|---|---|
+| `companyName` | *(blank)* | Cascades to `landingPage.brandName`, then `"UniServe"`. Fills `{company}`. |
+| `welcome` | `Welcome to {company}!` | |
+| `menuPrompt` | the 1/2/3 block | Rejected on save if it has lost an option number |
+| `menuHint` | `You can press # …` | Appended to every message except the goodbye |
+| `unknownOption`, `askTicketId`, `ticketNotFound` | see `WhatsAppMenuContent.java` | |
+| `ticketDetails`, `ticketCreated` | `{ticket}/{status}/{eta}/{updated}` | Rejected on save without `{ticket}` |
+| `inviteNote`, `noteAdded`, `registerIntro` | | |
+| `duplicateAsk`, `duplicateMerged` | | `{existing}`, `{question}` |
+| `conversationEnd`, `farewell`, `etaUnknown` | | |
+| `enabled` | `true` | `false` restores the pre-menu behaviour |
+| `sessionTtlHours` | `12` | 1-24. Capped at 24 because Meta only permits a free-form reply within 24h of the citizen's last message, so a longer session could never be answered. Clamped on read as well as write. |
+
+Blank means **use the default**, everywhere — a blank welcome would otherwise
+send an empty WhatsApp message. Placeholders are filled by plain string
+replacement, not `str.format`, so an admin's stray `{` produces a visible typo
+rather than a citizen receiving no reply at all.
+
+**Mirror.** `app/conversation/menu_content.py` mirrors
+`WhatsAppMenuContent.java` (ai-core reads the stored blob directly from
+db-writer and must apply the same defaults). `tests/test_menu_content.py`
+**parses the Java file and fails on any drift** — key set, every default string,
+and the TTL bounds.
+
+---
+
+## Ticket ETA
+
+**Feature 26.** `tickets.eta_at` — when the agent expects the work to be done.
+Mandatory as part of the **first transition**.
+
+**Why not reuse `sla_due_at`.** They answer different questions and would fight
+each other. `sla_due_at` is the deadline the *tenant* is held to, derived from
+policy, and what a breach report counts against. `eta_at` is the promise an
+*agent* made to a *citizen* after looking at the actual work. A ticket can be
+inside SLA and still have an honest ETA past it (parts on order), and the
+citizen must be told the second, not the first.
+
+**The rule** (`TicketService.transition`):
+
+```
+POST /api/v1/db/tickets/{id}/transition   { "toStatus": "assigned" }
+  -> 422 ETA_REQUIRED
+
+POST /api/v1/db/tickets/{id}/transition   { "toStatus": "assigned", "eta": "2026-08-18" }
+  -> 200
+```
+
+- "First" means **`first_transition_at is null`**, not `status == 'open'` — the
+  unvalidated PATCH path can change a status without a transition happening (it
+  is how ai-core closes a confirmed duplicate), and that must not count as an
+  agent picking the ticket up.
+- `first_transition_at` is stamped **only after every check passes**, so a
+  transition rejected for a short note or a missing ETA does not burn the one
+  chance to demand one.
+- **Cancelling is exempt.** An ETA is a promise about work that will happen, and
+  cancelling is the declaration that it will not.
+- Clearing the ETA later does **not** re-arm the rule.
+
+**Accepted formats** (`TicketEta.normalise`): `yyyy-MM-dd`,
+`yyyy-MM-dd HH:mm[:ss]`, `yyyy-MM-ddTHH:mm[:ss]`, and ISO-8601 with an offset or
+`Z`. Stored as `yyyy-MM-dd HH:mm:ss` UTC like every other timestamp here, so
+string comparison sorts correctly.
+
+**A bare date means the END of that day.** An agent typing `2026-08-18` is
+promising "by the 18th"; storing `00:00:00` would mark the ticket overdue for
+the entire day it was actually due.
+
+Rejected: free text (`ETA_INVALID`), ambiguous `03/04/2027` (3 April in India,
+4 March in the US — guessing would put a wrong promise in front of a citizen),
+past dates (`ETA_IN_PAST`), and anything more than 5 years out (`ETA_TOO_FAR` —
+the realistic typo is `2226` for `2026`).
+
+**Revising it** is normal and expected (the part arrived early; the crew got
+pulled to an outage). `PATCH /api/v1/tickets/{id}/eta` (`ticket.edit`), audited
+as a `ticket.eta_changed` event carrying the old and new values.
+
+**Where it shows up:** the citizen sees it on WhatsApp menu option 1; the agent
+sees it in the ticket header and the Status box; it is in the CSV export next to
+`sla_due_at`; and `etaAt` is a sortable queue column.
+
+**Migration `V14__ticket_eta.sql`** adds both columns and **backfills
+`first_transition_at`** from `ticket_events` `status.%`. Without that backfill
+every existing ticket would demand an ETA the next time an agent touched it —
+the rule is "set an ETA when you first pick this up", and those were picked up
+long ago. Plain additive `ALTER`s, so no CHECK rebuild (unlike V9/V11).
+
+---
+
+## Asking before creating a duplicate
+
+**Feature 26**, strengthening Feature 22.
+
+**The problem.** A citizen with an open *"Power Cut in Madambakkam"* sends
+*"Power cut"*. The old behaviour created the second ticket immediately and asked
+about it afterwards: two rows existed from the first message, the queue showed
+both, and the merge only happened if the citizen bothered to answer.
+
+**Now nothing is created until they answer.**
+
+```
+Citizen: Power cut
+   AI:   Before I raise a new ticket — we already have ticket TKT-00042 open for
+         "Power cut in Madambakkam since yesterday evening". Which area is the
+         power cut in?
+
+Citizen: Madambakkam
+   AI:   Thanks for confirming. I've added your message to the existing ticket
+         TKT-00042 rather than raising a duplicate.
+         Status: Work in progress
+         ETA: 18 Aug 2026
+```
+
+- `match_open_ticket` (`app/classify/message_quality.py`) now also returns a
+  **`question`** on an `unclear` verdict — one short question asking for the
+  detail it is missing, usually the locality. The prompt forbids "is this a
+  duplicate?": a citizen cannot answer a question about a record they cannot see.
+  `FALLBACK_DUPLICATE_QUESTION` covers a model that returns none.
+- The citizen's own words are held in Valkey at
+  `dupconfirm:{tenantId}:{threadKey}` (TTL 24h) by
+  `app/dedup/confirmation.py`.
+- Their answer is picked up by **routing rung -1**, above everything else in the
+  ladder — "Madambakkam" names no ticket, replies to no message, answers no
+  question recorded against a ticket (none exists yet), and reads as no
+  complaint, so every other rung would decline it and rung 5 would park it,
+  losing both the answer and the complaint.
+
+**Resolving the answer:**
+
+| Answer | Outcome |
+|---|---|
+| A plain yes (`yes`, `same`, `correct`, `aama`…) | No LLM call. Attaches to the existing ticket. |
+| A plain no (`no`, `different`, `illai`…) | New complaint, carrying the original words. |
+| Anything substantive ("Madambakkam", "no, this one is in Velachery") | Re-judged as **original + answer combined** against the same candidate. Judging the answer alone would compare "Madambakkam" to a power-cut complaint and conclude, correctly but uselessly, that they differ. |
+
+**Confirmed same → no new ticket.** The message is appended to the existing
+ticket's conversation and a `ticket.duplicate_prevented` event is recorded. That
+is what "merged appropriately" means when no second row was ever created —
+there is nothing to mark `is_duplicate` and nothing to close. The agent-facing
+`POST /api/v1/tickets/{id}/duplicate` still handles the case where two rows
+really do exist.
+
+**Exactly one round.** An answer that is still ambiguous creates the ticket and
+flags it with `suspectedDuplicateOf` + `ticket.possible_duplicate`, as Feature
+22 did. A citizen who cannot be understood twice must not be trapped in a loop
+that never files their complaint — a flagged pair an agent can settle is the
+better failure. The assistant prompt carries the same rule ("never ask the same
+distinguishing question three times").
+
+**An unavailable model creates and flags** rather than dropping the complaint: a
+network condition is not a decision.
+
+---
+
 ## HTTP API reference
 
 ### api-gateway — `http://localhost:8080`
@@ -1707,6 +1986,14 @@ which cannot be bundled for the browser.
   returns the built-in defaults with `200` on ANY failure so the front door
   still renders when db-writer is cold. See
   [Configurable landing page](#configurable-landing-page).
+- `GET|PUT /api/v1/tenant/whatsapp-menu` — the WhatsApp conversation menu's
+  copy and behaviour (`WhatsAppMenuResource`, Feature 26). `GET` returns
+  `{content, defaults}`; `PUT` validates the whole object
+  (`422 INVALID_WHATSAPP_MENU` — a `menuPrompt` that has lost an option number,
+  a `ticketDetails`/`ticketCreated` without `{ticket}`, a `sessionTtlHours`
+  outside 1-24) and merges only the `whatsappMenu` key. No public counterpart:
+  ai-core reads the stored blob directly from db-writer. See
+  [WhatsApp conversation menu](#whatsapp-conversation-menu).
   All of these endpoints reuse the `admin.tenant.config` RBAC action and the
   merge-one-key pattern, so `categories`/`sla`/`intakeFields`/`priorityRubric`/
   `generalSettings`/`landingPage` never clobber one another.
@@ -1828,7 +2115,10 @@ own tickets and `/agents` performance are lead/admin only via
   — `identityStatus`, `threadId`, `ticketNumber`, `originMessageId` (Feature
   19 — swipe-reply/In-Reply-To matching), `includeArchived`, etc.),
   `GET/PATCH /api/v1/db/tickets/{id}`
-- `POST /api/v1/db/tickets/{id}/transition`
+- `POST /api/v1/db/tickets/{id}/transition` — accepts `eta` (Feature 26);
+  returns `422 ETA_REQUIRED` on a ticket's FIRST transition when no ETA is
+  set, and `422 ETA_INVALID`/`ETA_IN_PAST`/`ETA_TOO_FAR` on a bad value.
+  `cancelled` is exempt. See [Ticket ETA](#ticket-eta).
 - `POST/GET /api/v1/db/tickets/{id}/notes`, `GET/POST /api/v1/db/tickets/{id}/messages`, `GET /api/v1/db/tickets/{id}/events`
 - `POST /api/v1/db/tickets/{id}/generate-resolution-summary` — 503 in Phase 1 (no AI wired here yet)
 - `POST /api/v1/db/tickets/archive-stale` — soft-delete (sets `archived_at`)
@@ -1882,12 +2172,16 @@ Every route below is a thin proxy to the matching api-gateway endpoint via
   content (Administration → Landing Page). The page itself does **not** go
   through this route: it reads `/api/v1/public/landing-page` from the gateway
   directly, server-side and unauthenticated.
+- `GET/PUT /api/tenant/whatsapp-menu` — proxies the WhatsApp conversation menu's
+  copy (Administration → WhatsApp Menu)
 - `GET /api/tickets` (forwards `?identityStatus=` for the Confirmed / Needs-identity
   queue toggle), `GET /api/tickets/[id]`, `GET /api/tickets/[id]/events` (the
   detail page's Audit trail section)
 - `PUT /api/tenant/intake-fields/catalog` — add/remove custom intake fields
   (Administration → Intake Fields → "Add field")
-- `POST /api/tickets/[id]/transition`, `PATCH /api/tickets/[id]/assign`,
+- `POST /api/tickets/[id]/transition` (carries `eta` on the first transition),
+  `PATCH /api/tickets/[id]/eta` (revise the ETA without a status change),
+  `PATCH /api/tickets/[id]/assign`,
   `GET/POST /api/tickets/[id]/notes`, `POST /api/tickets/[id]/reply`,
   `POST /api/tickets/[id]/generate-resolution-summary`
 - `GET /api/analytics/volume|sla|priority|agents|agents-directory|customers`
@@ -2044,6 +2338,14 @@ since they aren't part of an adapter-originated transaction — db-writer's
   "is a key configured?" (`message_quality`, `llm_scorer`, `chief_complaint`),
   so without it the suite would quietly reach the network. Tests that exercise
   the LLM path patch `settings` in their own module namespace, which still wins.
+  A second autouse fixture, `fake_valkey`, swaps the shared Valkey client for an
+  in-memory fake (it patches `app.events.client.Valkey` and clears the
+  `lru_cache`, because every consumer holds its own imported reference to
+  `get_valkey`). Feature 26 put real conversation state behind Valkey — the
+  WhatsApp menu session and the pending duplicate-confirmation state — so tests
+  need to set that state up and assert on it rather than watching every read
+  fail against an absent broker. `test_event_bus_integration.py` is unaffected:
+  it builds its own client and skips when no broker is reachable.
 - **dashboard**: `npx tsc --noEmit` and `npx next build` for types/compile,
   plus a Playwright E2E suite in `apps/dashboard/e2e` (`npm run test:e2e`).
   The suite targets an **already-running** local dev stack (`scripts/dev.sh`)
@@ -2091,6 +2393,7 @@ where the actual code deviated from (or corrected) the original spec:
 | [11_MULTI_TENANCY.md](docs/11_MULTI_TENANCY.md) | JWT auth, RBAC, tenant config |
 | [12_AGENT_DASHBOARD.md](docs/12_AGENT_DASHBOARD.md) | Full dashboard spec (target vs. built) |
 | [13_to_16_REMAINING.md](docs/13_to_16_REMAINING.md) | Analytics, notifications, Phase-2 encryption design, deployment |
+| [UI_REVAMP_v2.md](docs/UI_REVAMP_v2.md) | Dashboard UI revamp spec |
 
 ---
 

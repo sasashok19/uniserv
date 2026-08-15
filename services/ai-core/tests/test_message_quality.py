@@ -169,7 +169,8 @@ def test_match_open_ticket_returns_zero_based_index_of_the_named_ticket():
         settings.openai_model = "gpt-4o-mini"
         result = _run(match_open_ticket(_CANDIDATES, "Still no power in Tambaram"))
 
-    assert result == {"index": 1, "verdict": "same", "reason": "same outage"}
+    # `question` is Feature 26's disambiguating question; None unless unclear.
+    assert result == {"index": 1, "verdict": "same", "reason": "same outage", "question": None}
 
 
 def test_match_open_ticket_treats_a_null_ticket_as_no_match():

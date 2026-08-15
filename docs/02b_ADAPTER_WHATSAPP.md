@@ -225,3 +225,41 @@ HTTP/1.1 200 OK
   is channel-agnostic code but WhatsApp-only in effect: email never reaches
   the identity/open-count branch, since it has subject-line matching. See
   the README's "Intake answers are not new complaints" section.
+- **Conversation menu (Feature 26).** WhatsApp is no longer a free-text-only
+  channel: ai-core's `app/conversation/menu.py` runs a deterministic state
+  machine in front of everything else on this channel. The AI sends the first
+  message (a welcome naming the tenant's configured company, plus options
+  1/2/3), `#` returns to the main menu from anywhere, and every message except
+  the goodbye carries that hint. Options 1 (status/ETA/last-updated for one
+  named ticket, then an optional note) and 3 (goodbye) are answered entirely by
+  the menu and **create no ticket**, so it runs BEFORE `ensure_ticket_stub`.
+  Only option 2 falls through to the existing intake + routing ladder.
+  Session state lives in Valkey at `wamenu:{tenantId}:whatsapp:<phone>` with a
+  tenant-configurable TTL (default 12h, hard-capped at 24h — see the
+  customer-service window above; a session that outlived it could never be
+  answered). Copy is per-tenant under `config_json.whatsappMenu`
+  (`GET|PUT /api/v1/tenant/whatsapp-menu`, admin only) and can be switched off
+  entirely with `whatsappMenu.enabled = false`, which restores the previous
+  behaviour exactly. Full write-up: the README's "WhatsApp conversation menu".
+  - **Interactive button replies matter here.** As documented above, a button
+    reply arrives as the button's *title*, not its number, so the option matcher
+    accepts `1`/`1.`/`1)`/`one`/`status` and a leading word from a button title
+    — otherwise buttons would be inert.
+  - **Deliberate consequence for rungs 0-1.** With no live session, a
+    swipe-reply (`context.id`) or a typed `TKT-00042` now receives the welcome
+    menu rather than routing straight to its ticket. This is what the strict
+    menu means and is the documented trade-off; `whatsappMenu.enabled` is the
+    escape hatch.
+  - **Ownership is checked** before any ticket's status is read out. Ticket
+    numbers are sequential and guessable, so a ticket belonging to someone else
+    is reported exactly like one that does not exist.
+  - Tests: `services/ai-core/tests/test_whatsapp_menu.py` (35),
+    `test_menu_content.py` (11, including a guard that parses
+    `WhatsAppMenuContent.java` and fails if the Java and Python default copy
+    ever drift), plus the menu cases in `test_dispatcher.py`.
+- **Ask before creating a duplicate (Feature 26).** An ambiguous repeat
+  complaint now asks the citizen a distinguishing question and creates nothing
+  until they answer (`app/dedup/confirmation.py`, state at
+  `dupconfirm:{tenantId}:{threadKey}`). Confirmed-same attaches the message to
+  the existing ticket rather than creating and merging a second row. See the
+  README's "Asking before creating a duplicate".

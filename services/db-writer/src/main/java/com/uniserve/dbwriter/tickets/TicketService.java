@@ -86,6 +86,11 @@ public class TicketService {
         t.serviceId = str(body, "serviceId");
         t.chiefComplaint = str(body, "chiefComplaint");
         t.slaDueAt = str(body, "slaDueAt");
+        // Feature 26: normally NULL at creation — the ETA is the agent's promise,
+        // made on the first transition. Accepted here only so a caller that
+        // genuinely knows it up front (an import, a test fixture) isn't forced to
+        // create-then-patch.
+        t.etaAt = TicketEta.normalise(body.get("eta"));
         // Flush immediately so any CHECK-constraint violation (bad status/priority
         // label/etc.) surfaces here rather than being deferred to commit time.
         t.persistAndFlush();
@@ -191,6 +196,7 @@ public class TicketService {
             Map.entry("priorityLabel", "t.priority_label"),
             Map.entry("channel", "t.channel_origin"),
             Map.entry("chiefComplaint", "t.chief_complaint"),
+            Map.entry("etaAt", "t.eta_at"),
             Map.entry("identityStatus", "t.identity_status"),
             Map.entry("citizenName", "ip.name"),
             Map.entry("citizenEmail", "ip.email"),
@@ -202,6 +208,7 @@ public class TicketService {
             "priority_label", "sentiment_score", "channel_origin", "assigned_to", "identity_id",
             "identity_status", "identity_source", "thread_id", "origin_message_id", "is_duplicate",
             "parent_ticket_id", "service_id", "chief_complaint", "resolution", "sla_due_at",
+            "eta_at", "first_transition_at",
             "resolved_at", "closed_at", "reopened_count", "reopened_by", "created_at", "updated_at");
 
     private static List<String> listSelectColumns() {
@@ -321,6 +328,24 @@ public class TicketService {
         if (body.containsKey("slaDueAt")) {
             t.slaDueAt = str(body, "slaDueAt");
         }
+        if (body.containsKey("eta")) {
+            // Revising an ETA later is a normal, expected act (the part arrived
+            // early; the crew got pulled to an outage). It is audited rather
+            // than blocked — see the ticket.eta_changed event below.
+            String newEta = TicketEta.normalise(body.get("eta"));
+            if (!java.util.Objects.equals(t.etaAt, newEta)) {
+                TicketEvent event = new TicketEvent();
+                event.id = UUID.randomUUID().toString();
+                event.tenantId = t.tenantId;
+                event.ticketId = t.id;
+                event.eventType = "ticket.eta_changed";
+                event.actorType = str(body, "actorAgentId") == null ? "system" : "agent";
+                event.actorId = str(body, "actorAgentId");
+                event.metaJson = "{\"from\":" + jsonOrNull(t.etaAt) + ",\"to\":" + jsonOrNull(newEta) + "}";
+                event.persist();
+            }
+            t.etaAt = newEta;
+        }
         if (body.containsKey("identityId")) {
             t.identityId = str(body, "identityId");
         }
@@ -378,6 +403,29 @@ public class TicketService {
             }
         }
 
+        // Feature 26: an ETA is mandatory as part of the FIRST transition.
+        //
+        // "First" is `first_transition_at is null`, not `status == 'open'`: a
+        // ticket can reach a non-open status through the unvalidated PATCH path
+        // (ai-core closes a confirmed duplicate that way), and that must not
+        // count as having been picked up by an agent, nor silently excuse the
+        // ETA forever after.
+        //
+        // Cancelling is exempt. An ETA is a promise about work that will happen,
+        // and cancelling is the declaration that it will not — demanding a
+        // completion date in order to say "we are not doing this" is nonsense,
+        // and the mandatory note already covers the audit question.
+        boolean firstTransition = t.firstTransitionAt == null;
+        String suppliedEta = TicketEta.normalise(body.get("eta"));
+        if (suppliedEta != null) {
+            t.etaAt = suppliedEta;
+        }
+        if (firstTransition && !CANCELLED.equals(toStatus) && t.etaAt == null) {
+            throw new ApiException(422, "ETA_REQUIRED",
+                    "An ETA is required on the first transition of a ticket. "
+                            + "Supply `eta` as a date (yyyy-MM-dd) or timestamp (yyyy-MM-dd HH:mm:ss).");
+        }
+
         // Record the mandatory note (when supplied with an agent).
         if (noteContent != null && !noteContent.isBlank() && agentId != null) {
             TicketNote note = new TicketNote();
@@ -414,6 +462,12 @@ public class TicketService {
             t.reopenedBy = agentId;
         }
 
+        // Stamped after every check has passed, so a rejected transition (short
+        // note, missing ETA) does not burn the one chance to demand an ETA.
+        if (firstTransition) {
+            t.firstTransitionAt = SqliteTime.now();
+        }
+
         recordEvent(t.tenantId, t.id, "status." + toStatus, agentId == null ? "system" : "agent", agentId);
         cache.invalidate(id);
         Panache.getEntityManager().flush();
@@ -421,6 +475,7 @@ public class TicketService {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("status", toStatus);
         result.put("resolvedAt", t.resolvedAt);
+        result.put("etaAt", t.etaAt);
         return result;
     }
 
@@ -681,6 +736,13 @@ public class TicketService {
         event.actorType = actorType;
         event.actorId = actorId;
         event.persist();
+    }
+
+    /** A JSON string literal, or the bare token {@code null}. Both ETA values in
+     * an eta_changed event are optional (the first ever ETA has no `from`), and
+     * {@code "null"} quoted as a string would read back as the text "null". */
+    private static String jsonOrNull(String value) {
+        return value == null ? "null" : "\"" + value.replace("\"", "\\\"") + "\"";
     }
 
     private static String str(Map<String, Object> body, String key) {

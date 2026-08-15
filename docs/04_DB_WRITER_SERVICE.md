@@ -411,3 +411,28 @@ HTTP/1.1 503 Service Unavailable
   There is deliberately **no** "last outbound message" endpoint: routing needs a
   candidate's complaint AND the last thing we asked, and `messages(id)` returns
   the whole timeline in one round trip.
+- **Feature 26 (migration V14) — the ticket ETA.**
+  `POST /api/v1/db/tickets/{id}/transition` now accepts an `eta` and enforces
+  the rule that gives it meaning: a ticket's FIRST transition is refused with
+  `422 ETA_REQUIRED` unless an ETA is supplied or already set. Enforced here,
+  in the single transition entry point every caller goes through, rather than
+  in the dashboard — which is only one of them, and the rule exists so that a
+  citizen asking "when will this be fixed?" always gets an answer.
+  - "First" is `first_transition_at IS NULL`, and that column is stamped only
+    **after every check has passed**, so a transition rejected for a short note
+    or a missing ETA does not burn the one chance to demand one.
+  - `cancelled` is exempt: an ETA is a promise about work that will happen, and
+    cancelling is the declaration that it will not.
+  - Value validation lives in `TicketEta.normalise` (pure, unit-tested without a
+    container, like `buildWhere`): accepts `yyyy-MM-dd`,
+    `yyyy-MM-dd HH:mm[:ss]`, the `T` separator, and ISO-8601 with an offset/`Z`;
+    rejects free text (`ETA_INVALID`), ambiguous `03/04/2027` (guessing would
+    put a wrong promise in front of a citizen), past dates (`ETA_IN_PAST`) and
+    anything beyond 5 years (`ETA_TOO_FAR` — the realistic typo is `2226`).
+  - `PATCH /api/v1/db/tickets/{id}` accepts `eta` for later revisions, which are
+    normal and expected, and emits `ticket.eta_changed` carrying the old and new
+    values. Clearing it does NOT re-arm the first-transition rule.
+  - `eta_at` and `first_transition_at` are in `toMap()` and in the list
+    projection, and `etaAt` is a whitelisted sort key.
+  - Tests: `TicketEtaTest` (16, pure) and `TicketEtaTransitionTest` (13,
+    `@QuarkusTest`, the rule end to end).

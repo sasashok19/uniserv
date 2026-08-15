@@ -422,28 +422,47 @@ def missing_fields(extracted: dict, field_configs: list[dict], declared_anonymou
     return missing
 
 
-def build_identity_request_message(
+def render_field_form(
     field_configs: list[dict], channel: str, channel_identity_verified: bool,
-    missing: list[str], is_first_ask: bool, catalog: Optional[dict] = None,
+    catalog: Optional[dict] = None,
 ) -> str:
-    """First ask: show every askable (non-native) field as a numbered form,
-    mandatory ones marked. Later asks: list only what's still missing."""
-    spec_by_key = catalog if catalog is not None else FIELD_CATALOG
-    if not is_first_ask:
-        bullets = "\n".join(f"- {item}" for item in missing)
-        return f"Thanks for the details. We still need:\n{bullets}"
+    """The tenant's intake form as a numbered list, mandatory fields marked.
 
+    Native fields are skipped — WhatsApp already gives us the phone number, so
+    asking for it makes us look like we weren't paying attention.
+
+    Extracted from :func:`build_identity_request_message` (Feature 26) so the
+    WhatsApp menu's "press 2" reply can show the same list the AI intake will
+    then ask for. Two renderers would drift, and a citizen told to send four
+    details and then asked for a fifth has been misled by us, not confused.
+    """
+    spec_by_key = catalog if catalog is not None else FIELD_CATALOG
     lines = []
     n = 1
     for fc in field_configs:
         key = fc["key"]
         if is_native_field(key, channel, channel_identity_verified):
             continue
-        label = spec_by_key[key]["label"]
+        spec = spec_by_key.get(key)
+        if not spec:
+            continue
         required = fc.get("mandatory", False)
-        lines.append(f"{n}. {label}{' (required)' if required else ' (if available)'}:")
+        lines.append(f"{n}. {spec['label']}{' (required)' if required else ' (if available)'}:")
         n += 1
-    bullets = "\n".join(lines)
+    return "\n".join(lines)
+
+
+def build_identity_request_message(
+    field_configs: list[dict], channel: str, channel_identity_verified: bool,
+    missing: list[str], is_first_ask: bool, catalog: Optional[dict] = None,
+) -> str:
+    """First ask: show every askable (non-native) field as a numbered form,
+    mandatory ones marked. Later asks: list only what's still missing."""
+    if not is_first_ask:
+        bullets = "\n".join(f"- {item}" for item in missing)
+        return f"Thanks for the details. We still need:\n{bullets}"
+
+    bullets = render_field_form(field_configs, channel, channel_identity_verified, catalog)
     return (
         "Thanks for reaching out. To register your complaint, please reply with "
         "the following details:\n\n" + bullets + "\n\n"

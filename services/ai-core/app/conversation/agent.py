@@ -27,6 +27,7 @@ from app.conversation.intake_fields import (
     suggest_email_correction,
     validate_email,
 )
+from app.conversation import menu_content
 from app.conversation.openai_gateway import OpenAIAssistantGateway
 from app.conversation.status_lookup import summarize_recent_tickets
 from app.events import streams
@@ -591,7 +592,8 @@ class ConversationAgent:
 
         user_message = self._render_user_message(req)
         additional_instructions = self._render_additional_instructions(
-            req, state, field_configs, max_followups, catalog, missing)
+            req, state, field_configs, max_followups, catalog, missing,
+            company=menu_content.resolve(tenant_config).get("companyName"))
 
         submitted_this_turn = False
 
@@ -921,6 +923,7 @@ class ConversationAgent:
     def _render_additional_instructions(
         req: TestEventRequest, state: dict, field_configs: list[dict], max_followups: int,
         catalog: Optional[dict] = None, missing: Optional[list[str]] = None,
+        company: Optional[str] = None,
     ) -> str:
         # max_followups is the tenant-effective budget (Feature 04) threaded in
         # by the caller — generalSettings.maxFollowupQuestions when valid, else
@@ -931,6 +934,12 @@ class ConversationAgent:
             f"questions_asked={state['questions_asked']}",
             f"max_followup_questions={max_followups}",
         ]
+        # Feature 26: the tenant's own name. The Assistant object is shared by
+        # every tenant and lives on OpenAI's side, so its baked-in instructions
+        # cannot name one — this per-turn line is the only place a tenant name
+        # can reach the model at all.
+        if company:
+            parts.append(f"company={company}")
         # Feature 22: routing suspected this continues an existing complaint but
         # couldn't tell. Surfaced with the other complaint's own words so the
         # model can ask a specific question ("...the water logging in

@@ -13,6 +13,7 @@ import re
 
 from app.classify.message_quality import assess_coherence
 from app.config import settings
+from app.conversation import menu
 from app.conversation.agent import ChannelIdentityIn, ConversationAgent, TestEventRequest
 from app.events import streams
 from app.events.consumer import BaseConsumer
@@ -104,11 +105,23 @@ async def _handle_channel_message(tenant_id: str, event: dict) -> None:
             except Exception:  # noqa: BLE001 - the rejection itself is best-effort
                 logger.exception("failed to send rejection email traceId=%s", trace_id)
             return
+    db = DbWriterClient()
+    # Feature 26: on WhatsApp the deterministic menu owns the conversation. It
+    # decides which flow the citizen is in and answers options 1 and 3 entirely
+    # by itself — no ticket is created, so this runs BEFORE ensure_ticket_stub.
+    # Only option 2's intake falls through to the AI pipeline below, and it
+    # arrives with any carried-over first message already merged in.
+    if req.channel == menu.CHANNEL:
+        outcome = await _run_menu(db, tenant_id, thread_key, req, trace_id)
+        if outcome.stop:
+            return
+        req.rawText = outcome.text or req.rawText
+
     # Feature 12/15: a ticket exists from the very first message, not only
     # once identity is confirmed — see app/tickets/intake.py. A subject-line
     # ticket reference (email only) takes priority over thread matching.
     stub = await ensure_ticket_stub(
-        DbWriterClient(), tenant_id, thread_key, req.channel,
+        db, tenant_id, thread_key, req.channel,
         subject=req.subject, raw_text=req.rawText,
         channel_identity_type=req.channelIdentity.type, channel_identity_value=req.channelIdentity.value,
         origin_message_id=req.messageId, in_reply_to=req.inReplyTo, trace_id=trace_id)
@@ -128,11 +141,31 @@ async def _handle_channel_message(tenant_id: str, event: dict) -> None:
                 }, trace_id=trace_id)
             except Exception:  # noqa: BLE001 - the message is stored either way
                 logger.exception("failed to send the ask-for-reference reply traceId=%s", trace_id)
+        if stub.get("awaitingDuplicateConfirmation"):
+            # Feature 26: deliberately NOT parked as unrouted. The message is
+            # held in the pending-confirmation state and will be filed the
+            # moment the citizen answers — there is nothing for a lead to do.
+            logger.info(
+                "asked the citizen to confirm a possible duplicate before creating traceId=%s "
+                "duplicateOf=%s", trace_id, (stub.get("duplicateOf") or {}).get("ticketNumber"))
+            return
         logger.info(
             "message parked as unrouted traceId=%s channel=%s escalated=%s asked=%s reason=%s",
             trace_id, req.channel, stub.get("escalated"), bool(stub.get("ask")), stub.get("reason"),
         )
         return
+
+    # Feature 26: the citizen confirmed the ambiguous complaint was the one they
+    # already have open. It has already been appended to that ticket, so the
+    # conversation agent must not run — it would treat the answer ("Madambakkam")
+    # as a fresh turn and ask for details we are not waiting for.
+    if stub.get("duplicateResolved") == "same":
+        await _acknowledge_duplicate_merge(db, tenant_id, req, stub, trace_id)
+        return
+    # Resolved as a genuinely different complaint: the ticket describes the
+    # ORIGINAL complaint plus the detail just added, not just the answer.
+    if stub.get("pendingText"):
+        req.rawText = stub["pendingText"]
     req.ticketId = stub["id"]
     req.ticketNumber = stub.get("ticketNumber")
     # Feature 22: routing judged this MIGHT continue an existing complaint but
@@ -151,6 +184,118 @@ async def _handle_channel_message(tenant_id: str, event: dict) -> None:
         "processed channel.message.received traceId=%s threadId=%s result=%s",
         trace_id, ConversationAgent._thread_key(req), result,
     )
+
+
+async def _append_menu_hint(tenant_id: str, payload: dict, trace_id: str | None) -> dict:
+    """Add "press # for the main menu" to an outgoing WhatsApp AI reply.
+
+    Best-effort in the strictest sense: if anything at all goes wrong the
+    original payload is returned unchanged, because a missing hint is a cosmetic
+    loss and a message that never reaches the citizen is not.
+    """
+    if payload.get("channel") != menu.CHANNEL or not payload.get("messageText"):
+        return payload
+    try:
+        thread_key = payload.get("threadId") or f"{menu.CHANNEL}:{payload.get('channelIdentityValue')}"
+        if not await menu.load_session(tenant_id, thread_key):
+            return payload
+        content = menu.menu_content.resolve(
+            await DbWriterClient().get_tenant_config(tenant_id, trace_id=trace_id))
+        hint = menu.menu_content.render(content, "menuHint")
+        if not hint or hint in payload["messageText"]:
+            return payload
+        return {**payload, "messageText": f"{payload['messageText']}\n\n{hint}"}
+    except Exception:  # noqa: BLE001 - see the docstring
+        logger.warning("could not append the menu hint traceId=%s", trace_id)
+        return payload
+
+
+async def _acknowledge_duplicate_merge(
+    db: DbWriterClient, tenant_id: str, req: TestEventRequest, stub: dict, trace_id: str | None,
+) -> None:
+    """Tell the citizen their message went onto the existing ticket (Feature 26).
+
+    Composed from the ticket row rather than by the assistant — the status and
+    ETA quoted here are facts, and the same reasoning applies as everywhere else
+    in this feature: a paraphrased status can be a wrong status.
+    """
+    if not stub.get("attached"):
+        # Nothing was written, so nothing may be acknowledged. Falling silent is
+        # worse than a generic reply, so let the normal pipeline speak instead.
+        logger.warning("confirmed duplicate was not attached traceId=%s ticketId=%s",
+                       trace_id, stub.get("id"))
+        return
+    try:
+        tenant_config = await db.get_tenant_config(tenant_id, trace_id=trace_id)
+        content = menu.menu_content.resolve(tenant_config)
+        ticket = await db.get_ticket(stub["id"], trace_id=trace_id)
+        text = menu.format_ticket_details(content, ticket, key="duplicateMerged")
+    except Exception:  # noqa: BLE001 - the merge already happened; only the wording is at risk
+        logger.exception("could not compose the duplicate-merge acknowledgement traceId=%s", trace_id)
+        text = (f"Thanks — I've added your message to your existing ticket "
+                f"{stub.get('ticketNumber') or ''}.".strip())
+    replies = [text]
+    if req.channel == menu.CHANNEL:
+        # The registration the citizen started has resolved onto an existing
+        # ticket, so the menu flow it belonged to is finished. Leaving the
+        # session in INTAKE would send their next message — very likely a fresh
+        # complaint — into an intake that no longer has a ticket waiting.
+        thread_key = ConversationAgent._thread_key(req)
+        try:
+            content = menu.menu_content.resolve(
+                await db.get_tenant_config(tenant_id, trace_id=trace_id))
+            if (await menu.load_session(tenant_id, thread_key)):
+                await menu.clear_session(tenant_id, thread_key)
+                replies.append(menu.menu_content.render(content, "conversationEnd"))
+        except Exception:  # noqa: BLE001 - the merge stands regardless
+            logger.warning("could not close the menu session after a duplicate merge traceId=%s", trace_id)
+
+    for reply in replies:
+        try:
+            await deliver_reply({
+                "channel": req.channel,
+                "channelIdentityValue": req.channelIdentity.value,
+                "messageText": reply,
+                "ticketId": stub["id"],
+            }, trace_id=trace_id)
+        except Exception:  # noqa: BLE001 - the message is on the ticket either way
+            logger.exception("failed to send the duplicate-merge acknowledgement traceId=%s", trace_id)
+
+
+async def _run_menu(
+    db: DbWriterClient, tenant_id: str, thread_key: str, req: TestEventRequest,
+    trace_id: str | None,
+) -> "menu.MenuOutcome":
+    """Run the WhatsApp menu and send whatever it decided to say.
+
+    A failure here falls through to the AI pipeline rather than dropping the
+    message: the menu is how the conversation is *meant* to go, but a citizen
+    with a real complaint must never be silenced by a Valkey blip or a bad
+    tenant config.
+    """
+    try:
+        tenant_config = await db.get_tenant_config(tenant_id, trace_id=trace_id)
+        outcome = await menu.handle_inbound(
+            db, tenant_id, thread_key, req.rawText,
+            identity_value=req.channelIdentity.value, tenant_config=tenant_config,
+            trace_id=trace_id)
+    except Exception:  # noqa: BLE001 - see the docstring
+        logger.exception("whatsapp menu failed traceId=%s; falling through to the AI pipeline", trace_id)
+        return menu.MenuOutcome(replies=[], stop=False, text=req.rawText)
+
+    for text in outcome.replies:
+        try:
+            await deliver_reply({
+                "channel": req.channel,
+                "channelIdentityValue": req.channelIdentity.value,
+                "messageText": text,
+            }, trace_id=trace_id)
+        except Exception:  # noqa: BLE001 - one failed send must not swallow the rest
+            logger.exception("failed to send a menu reply traceId=%s", trace_id)
+    if outcome.replies:
+        logger.info("whatsapp menu replied traceId=%s replies=%d stop=%s",
+                    trace_id, len(outcome.replies), outcome.stop)
+    return outcome
 
 
 async def run_channel_message_consumer(client, tenant_id: str, stop_event: asyncio.Event) -> None:
@@ -189,6 +334,34 @@ async def _handle_complaint_ready(tenant_id: str, event: dict) -> None:
         )
         raise
     logger.info("complaint.ready processed traceId=%s result=%s", trace_id, result)
+
+    # Feature 26: a ticket registered through the WhatsApp menu closes its own
+    # conversation — the citizen gets the ticket's details (including the ETA)
+    # and is told to message again for the menu. This REPLACES the ordinary ack
+    # rather than adding to it; two "your ticket is registered" messages in a
+    # row is the kind of thing that makes an automated line feel broken.
+    if payload.get("channel") == menu.CHANNEL:
+        try:
+            tenant_config = await db.get_tenant_config(tenant_id, trace_id=trace_id)
+            closing = await menu.finish_registration(
+                db, tenant_id, payload.get("threadId") or "",
+                result.get("ticketId"), result.get("ticketNumber"),
+                tenant_config, trace_id=trace_id)
+        except Exception:  # noqa: BLE001 - fall back to the ordinary ack below
+            logger.exception("menu registration close-out failed traceId=%s", trace_id)
+            closing = None
+        if closing:
+            for text in closing:
+                try:
+                    await deliver_reply({
+                        "channel": menu.CHANNEL,
+                        "channelIdentityValue": payload.get("channelIdentityValue"),
+                        "messageText": text,
+                        "ticketNumber": result.get("ticketNumber"),
+                    }, trace_id=trace_id)
+                except Exception:  # noqa: BLE001 - the ticket is saved either way
+                    logger.exception("failed to send the registration close-out traceId=%s", trace_id)
+            return
 
     try:
         await send_ticket_ack(
@@ -231,6 +404,13 @@ async def _handle_ai_reply_send(tenant_id: str, event: dict) -> None:
         "ai.reply.send received traceId=%s tenantId=%s channel=%s threadId=%s",
         trace_id, tenant_id, payload.get("channel"), payload.get("threadId"),
     )
+    # Feature 26: "in all conversation it should mention press # to return to
+    # the main menu". Applied here, deterministically, rather than asked of the
+    # assistant — a prompt instruction is followed most of the time, and "most
+    # of the time" is not what "in all conversation" means. Only for WhatsApp
+    # threads that actually have a live menu session, so email is untouched and
+    # a citizen whose session has ended is not pointed at a menu that is gone.
+    payload = await _append_menu_hint(tenant_id, payload, trace_id)
     try:
         result = await deliver_reply(payload, trace_id=trace_id)
     except Exception:

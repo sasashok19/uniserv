@@ -35,6 +35,13 @@ type TicketDetail = {
   citizenPhone: string | null;
   serviceId: string | null;
   priorityLabel: string | null;
+  /** Feature 26: when the agent expects this to be done — the promise made to
+   * the citizen, distinct from the SLA deadline the tenant is measured against.
+   * Mandatory on the first transition; see `firstTransitionAt`. */
+  etaAt: string | null;
+  /** Stamped by the first status transition. Null means no ETA has ever been
+   * demanded on this ticket, so the next transition will require one. */
+  firstTransitionAt: string | null;
   assignedTo: string | null;
   assignedToName: string | null;
   canAssign: boolean;
@@ -129,6 +136,33 @@ function needsNote(from: string, to: string): boolean {
   return to === "cancelled" || MANDATORY_NOTE_TRANSITIONS.has(`${from}->${to}`);
 }
 
+/**
+ * Feature 26: an ETA is mandatory as part of the FIRST transition.
+ *
+ * Mirrors db-writer's rule (see TicketService.transition) — UI hint only, the
+ * server enforces it and returns 422 ETA_REQUIRED. Keyed on `firstTransitionAt`
+ * being null rather than on the status, because the unvalidated PATCH path can
+ * move a ticket's status without a transition ever having happened.
+ *
+ * Cancelling is exempt: an ETA is a promise about work that will happen, and
+ * cancelling is the declaration that it will not.
+ */
+function needsEta(ticket: TicketDetail | null, to: string): boolean {
+  if (!ticket || to === "cancelled") return false;
+  return !ticket.firstTransitionAt && !ticket.etaAt;
+}
+
+/** `2026-08-18 23:59:59` (UTC, as db-writer stores it) -> `2026-08-18` for a date input. */
+function etaInputValue(etaAt: string | null): string {
+  return etaAt ? etaAt.slice(0, 10) : "";
+}
+
+/** Today in the browser's own timezone, as the `min` for the ETA picker. */
+function todayIso(): string {
+  const now = new Date();
+  return new Date(now.getTime() - now.getTimezoneOffset() * 60_000).toISOString().slice(0, 10);
+}
+
 const STATUS_LABEL = (s: string) => s.replace(/_/g, " ");
 
 function InfoField({ label, value }: { label: string; value: string | null }) {
@@ -151,6 +185,8 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [transitioning, setTransitioning] = useState<string | null>(null);
   const [savingNote, setSavingNote] = useState(false);
+  const [etaText, setEtaText] = useState("");
+  const [savingEta, setSavingEta] = useState(false);
   const [resolvingDuplicate, setResolvingDuplicate] = useState(false);
   // Follow-up send lifecycle: the agent must SEE whether the message reached
   // the citizen or failed (e.g. connection issue) — busy spinner, then an
@@ -163,6 +199,7 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
     const resp = await fetch(`/api/tickets/${params.id}`);
     const data = await resp.json();
     setTicket(resp.ok ? data : null);
+    if (resp.ok) setEtaText(etaInputValue(data.etaAt ?? null));
     setLoading(false);
     if (resp.ok && data.canAssign) {
       const agentsResp = await fetch("/api/analytics/agents-directory");
@@ -280,6 +317,10 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
       setStatusMsg("This transition requires a note of at least 20 characters — type it in the note box.");
       return;
     }
+    if (needsEta(ticket, toStatus) && !etaText) {
+      setStatusMsg("Set an expected completion date first — it is required the first time a ticket moves, and the citizen is told it.");
+      return;
+    }
     if (toStatus === "cancelled" &&
         !window.confirm(
           `Cancel ${ticket?.ticketNumber}? This marks it as never having been real work — it will not ` +
@@ -290,12 +331,33 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
     const resp = await fetch(`/api/tickets/${params.id}/transition`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ toStatus, note: noteText.trim() || undefined }),
+      body: JSON.stringify({
+        toStatus,
+        note: noteText.trim() || undefined,
+        // Only sent when the agent actually picked one: an explicit null would
+        // read as "clear the ETA" on the server.
+        eta: etaText || undefined,
+      }),
     });
     const data = await resp.json().catch(() => ({}));
     setTransitioning(null);
     setStatusMsg(resp.ok ? `Status changed to ${STATUS_LABEL(toStatus)}.` : (data?.error?.message ?? "Transition failed."));
     if (resp.ok) setNoteText("");
+    await load();
+  }
+
+  /** Revise the ETA without a status change (Feature 26) — the part arrived
+   * early, the crew got pulled to an outage. Audited server-side. */
+  async function saveEta() {
+    setSavingEta(true);
+    const resp = await fetch(`/api/tickets/${params.id}/eta`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ eta: etaText || null }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    setSavingEta(false);
+    setStatusMsg(resp.ok ? "ETA updated." : (data?.error?.message ?? "Could not update the ETA."));
     await load();
   }
 
@@ -404,6 +466,19 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
                 </div>
               </div>
               <InfoField label="Channel" value={ticket.channelOrigin} />
+              {/* Feature 26: shown here as well as in the transition box, because
+                  this is the number the citizen is read back and an agent
+                  answering the phone needs it without scrolling. */}
+              <div>
+                <span className="text-xs text-slate-600">ETA</span>
+                <div className="text-sm">
+                  {ticket.etaAt ? (
+                    ticket.etaAt.slice(0, 10)
+                  ) : (
+                    <span className="text-amber-700">not set</span>
+                  )}
+                </div>
+              </div>
               <div>
                 <span className="text-xs text-slate-600">Assigned to</span>
                 {ticket.canAssign ? (
@@ -483,10 +558,52 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
                   {noteText.trim().length}/20 characters — required for some transitions below
                 </p>
               )}
+
+              {/* Feature 26: the ETA. Sits with the transition buttons because
+                  that is where it is captured — it is mandatory the first time
+                  a ticket moves, and the citizen is read it back on WhatsApp. */}
+              <div className="mb-3 rounded border border-slate-200 bg-slate-50 p-3">
+                <label htmlFor="eta" className="block text-sm font-medium text-slate-800">
+                  Expected completion (ETA)
+                  {!ticket.firstTransitionAt && <span className="ml-1 text-amber-700">— required to move this ticket</span>}
+                </label>
+                <p className="mb-2 mt-0.5 text-xs text-slate-600">
+                  The date the citizen is told when they ask. Distinct from the SLA target — an honest
+                  ETA past the SLA is better than an SLA date nobody will meet.
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    id="eta"
+                    type="date"
+                    value={etaText}
+                    min={todayIso()}
+                    onChange={(e) => setEtaText(e.target.value)}
+                    className="rounded border p-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-teal"
+                  />
+                  {ticket.etaAt && (
+                    <button
+                      onClick={saveEta}
+                      disabled={savingEta || etaInputValue(ticket.etaAt) === etaText}
+                      className="inline-flex items-center gap-1.5 rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-100 active:scale-[0.97] disabled:opacity-50"
+                      title="Save the ETA without changing status"
+                    >
+                      {savingEta && <Loader2 className="h-4 w-4 animate-spin" />}
+                      {savingEta ? "Saving…" : "Update ETA only"}
+                    </button>
+                  )}
+                  {ticket.etaAt && (
+                    <span className="text-xs text-slate-600">
+                      Currently promised: {ticket.etaAt.slice(0, 10)}
+                    </span>
+                  )}
+                </div>
+              </div>
+
               <div className="flex flex-wrap items-center gap-2">
                 {statusActions.map((s) => {
                   const noteRequired = needsNote(ticket.status, s);
-                  const blocked = noteRequired && noteText.trim().length < 20;
+                  const etaRequired = needsEta(ticket, s);
+                  const blocked = (noteRequired && noteText.trim().length < 20) || (etaRequired && !etaText);
                   // Cancel is destructive and off the lifecycle path, so it
                   // reads as such rather than sitting in the row of teal
                   // "Move to ..." buttons as if it were the next step.
@@ -496,7 +613,13 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
                       key={s}
                       onClick={() => transition(s)}
                       disabled={transitioning !== null || blocked}
-                      title={blocked ? "Add a note of at least 20 characters first" : undefined}
+                      title={
+                        blocked
+                          ? (etaRequired && !etaText
+                              ? "Set an expected completion date first"
+                              : "Add a note of at least 20 characters first")
+                          : undefined
+                      }
                       className={
                         "inline-flex items-center gap-1.5 rounded px-3 py-2 text-sm font-medium transition-transform " +
                         "active:scale-[0.97] disabled:opacity-50 " +
@@ -515,6 +638,16 @@ export default function TicketDetailPage({ params }: { params: { id: string } })
                           }
                         >
                           Note required
+                        </span>
+                      )}
+                      {etaRequired && (
+                        <span
+                          className={
+                            "ml-1 rounded-full px-1.5 py-0.5 text-[10px] uppercase " +
+                            (isCancel ? "bg-red-100 text-red-700" : "bg-white/20")
+                          }
+                        >
+                          ETA required
                         </span>
                       )}
                     </button>

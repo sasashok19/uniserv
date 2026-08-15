@@ -72,9 +72,20 @@ _MATCH_OPEN_TICKET_SYSTEM_PROMPT = (
     "help\") continues the complaint it most plausibly refers to.\n"
     "You are given the citizen's open complaints, numbered. Reply with the number of the one this "
     "message concerns, or null if it concerns none of them.\n"
+    "When your verdict is \"unclear\", you MUST also supply \"question\": ONE short, specific "
+    "question that would settle it, addressed to the citizen in plain language. Ask for the exact "
+    "detail you are missing — usually the locality. Do not ask \"is this a duplicate?\"; a citizen "
+    "does not know what we have on file. Good: \"Which area is the power cut in?\". Bad: \"Is this "
+    "the same as your other complaint?\".\n"
     "Respond with STRICT JSON only, no prose: "
-    '{"ticket": <number|null>, "verdict": "same"|"different"|"unclear", "reason": "<short reason>"}'
+    '{"ticket": <number|null>, "verdict": "same"|"different"|"unclear", "reason": "<short reason>", '
+    '"question": "<question|null>"}'
 )
+
+# Used when the verdict is "unclear" but the model gave us no usable question.
+# Generic on purpose: it is better to ask something broad than to fall back to
+# creating the duplicate ticket the whole check exists to prevent.
+FALLBACK_DUPLICATE_QUESTION = "Could you tell me the area or location this is about?"
 
 
 def available() -> bool:
@@ -199,8 +210,12 @@ async def match_open_ticket(candidates: list[dict], new_text: str) -> Optional[d
             index = None
         else:
             index -= 1
+        question = parsed.get("question")
+        question = question.strip() if isinstance(question, str) and question.strip() else None
+        if verdict == "unclear" and not question:
+            question = FALLBACK_DUPLICATE_QUESTION
         logger.info("open-ticket match verdict=%s index=%s reason=%s", verdict, index, parsed.get("reason"))
-        return {"index": index, "verdict": verdict, "reason": parsed.get("reason")}
+        return {"index": index, "verdict": verdict, "reason": parsed.get("reason"), "question": question}
     except Exception as exc:  # noqa: BLE001 - best-effort, see docstring
         logger.warning("open-ticket match failed, falling back to channel default: %s", exc)
         return None

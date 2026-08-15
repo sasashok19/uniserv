@@ -254,7 +254,7 @@ public class TicketsResource {
             "priority_label", "priority_score", "sentiment_score", "channel_origin",
             "citizen_name", "citizen_email", "citizen_phone", "service_id",
             "assigned_to_name", "is_duplicate", "parent_ticket_id", "resolution",
-            "sla_due_at", "created_at", "updated_at", "resolved_at", "closed_at",
+            "sla_due_at", "eta_at", "created_at", "updated_at", "resolved_at", "closed_at",
             "reopened_count", "thread_id", "id");
 
     /**
@@ -458,6 +458,34 @@ public class TicketsResource {
         Map<String, Object> patch = new LinkedHashMap<>();
         patch.put("assignedTo", (assignedTo == null || assignedTo.isBlank()) ? null : assignedTo);
         // Who performed the (re)assignment — recorded in the ticket's audit trail.
+        patch.put("actorAgentId", user.agentId());
+        DbWriterClient.ApiResult result = db.call("PATCH", "/api/v1/db/tickets/" + id, patch);
+        return Response.status(result.status()).entity(result.body()).build();
+    }
+
+    /**
+     * Revise the ETA on a ticket that already has one (Feature 26).
+     *
+     * The ETA is first captured as part of the first transition, which is where
+     * it is mandatory. It gets its own narrow endpoint for the revisions that
+     * follow — the part arrived early, the crew got pulled to an outage — rather
+     * than a general ticket PATCH, because this is a promise already made to a
+     * citizen and every change to it is audited (db-writer emits
+     * {@code ticket.eta_changed} with the old and new values).
+     *
+     * A blank/absent value clears the ETA. That is allowed here but cannot be
+     * used to dodge the rule: clearing it leaves {@code first_transition_at}
+     * stamped, so the next transition does not re-demand one.
+     */
+    @PATCH
+    @Path("/{id}/eta")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response updateEta(@PathParam("id") String id, Map<String, Object> input) {
+        if (!user.can("ticket.edit")) {
+            return forbidden("INSUFFICIENT_ROLE", "Your role cannot change a ticket's ETA");
+        }
+        Map<String, Object> patch = new LinkedHashMap<>();
+        patch.put("eta", input == null ? null : input.get("eta"));
         patch.put("actorAgentId", user.agentId());
         DbWriterClient.ApiResult result = db.call("PATCH", "/api/v1/db/tickets/" + id, patch);
         return Response.status(result.status()).entity(result.body()).build();
@@ -702,6 +730,13 @@ public class TicketsResource {
         body.put("citizenPhone", citizenPhone);
         body.put("serviceId", serviceId);
         body.put("priorityLabel", t.get("priority_label"));
+        // Feature 26: the ETA promised to the citizen, and whether this ticket
+        // has ever been transitioned. The dashboard needs the second to know
+        // whether its transition buttons must demand an ETA — asking the server
+        // rather than inferring it from `status`, which the unvalidated PATCH
+        // path can change without a transition ever happening.
+        body.put("etaAt", t.get("eta_at"));
+        body.put("firstTransitionAt", t.get("first_transition_at"));
         String assignedTo = str(t, "assigned_to");
         body.put("assignedTo", assignedTo);
         body.put("assignedToName", assignedTo == null ? null : agentDirectory().get(assignedTo));
@@ -859,6 +894,14 @@ public class TicketsResource {
         body.put("toStatus", toStatus);
         body.put("noteContent", noteContent);
         body.put("agentId", user.agentId());
+        // Feature 26: the ETA the agent is committing to. Only forwarded when the
+        // client actually sent one — putting a null `eta` in the body would look
+        // identical to "clear the ETA" on the db-writer side. Validation
+        // (format, past, absurd) and the first-transition requirement both live
+        // there, so the rule cannot be bypassed by calling db-writer directly.
+        if (input != null && input.containsKey("eta")) {
+            body.put("eta", input.get("eta"));
+        }
 
         DbWriterClient.ApiResult result = db.call("POST", "/api/v1/db/tickets/" + id + "/transition", body);
         // Structured citizen-facing email (Feature 06 x 14): only on the

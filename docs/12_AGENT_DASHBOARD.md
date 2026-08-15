@@ -727,3 +727,44 @@ everything, which is the intended steady state.
 choice: "audit only, add to conversation"). It appears at the top of the
 conversation and as a `ticket.reply_after_resolution` line in the audit trail;
 the ticket's status is untouched.
+
+
+## Ticket ETA in the agent UI (Feature 26)
+
+The **Status & internal note** panel gained an ETA date picker, because that is
+where the value is actually captured: an ETA is mandatory the first time a
+ticket moves, and db-writer refuses the transition with `422 ETA_REQUIRED`
+otherwise.
+
+- Transition buttons carry an **"ETA required"** badge and stay disabled until a
+  date is set, alongside the existing "Note required" treatment. The client
+  check mirrors the server rule; the server still enforces it, and its 422
+  message is surfaced verbatim rather than swallowed - otherwise an agent would
+  be staring at a button that silently does nothing.
+- The rule keys on `firstTransitionAt` being null, **not** on `status`, so the
+  server decides. A ticket whose status was changed by the unvalidated PATCH
+  path (how ai-core closes a confirmed duplicate) has still never been picked up
+  by an agent, and must still be asked for an ETA.
+- **Cancel is exempt** and shows no badge.
+- An **"Update ETA only"** button appears once an ETA exists, for the ordinary
+  revisions (the part arrived early, the crew got pulled to an outage) -
+  `PATCH /api/v1/tickets/{id}/eta`, audited server-side as `ticket.eta_changed`.
+- The ETA is also in the header field row next to Category/Priority/Channel,
+  reading "not set" in amber when absent, because an agent on the phone needs it
+  without scrolling to the transition box.
+- The date input's `min` is today in the browser's timezone; the server
+  independently rejects past dates.
+
+## Administration - WhatsApp Menu (Feature 26)
+
+A seventh admin sub-tab (`WhatsAppMenuPanel.tsx`) editing every string a citizen
+reads on WhatsApp, grouped in the order the conversation actually runs -
+welcome and menu, option 1 (existing ticket), option 2 (new ticket), duplicates,
+ending the chat - plus the `enabled` toggle and the session length.
+
+Same conventions as the Landing Page panel, both load-bearing: **blank means
+"use the default"** (a blank welcome would otherwise send an empty WhatsApp
+message), and the server's RESOLVED view is echoed back after a save so a
+cleared field visibly refills with its default rather than looking as though it
+saved empty. Placeholder names (`{company}`, `{ticket}`, `{status}`, `{eta}`,
+`{updated}`, `{existing}`, `{question}`) are listed inline per field.
