@@ -152,6 +152,13 @@ async def _handle_channel_message(tenant_id: str, event: dict) -> None:
                 "asked the citizen to confirm a possible duplicate before creating traceId=%s "
                 "duplicateOf=%s", trace_id, (stub.get("duplicateOf") or {}).get("ticketNumber"))
             return
+        if stub.get("parked") is False:
+            # Feature 28: a bare greeting. Answered, but deliberately NOT left
+            # in the unrouted queue — there are no citizen's words in "Hi" to
+            # preserve, and a queue of them can only ever be discarded.
+            logger.info("pleasantry answered without parking traceId=%s channel=%s",
+                        trace_id, req.channel)
+            return
         logger.info(
             "message parked as unrouted traceId=%s channel=%s escalated=%s asked=%s reason=%s",
             trace_id, req.channel, stub.get("escalated"), bool(stub.get("ask")), stub.get("reason"),
@@ -175,6 +182,8 @@ async def _handle_channel_message(tenant_id: str, event: dict) -> None:
     # couldn't tell (typically the message omits the location the other one
     # names). The conversation asks the citizen instead of guessing.
     req.suspectedDuplicateOf = stub.get("suspectedDuplicateOf")
+    # Feature 28: what we asked, when this message is the answer to it.
+    req.answersQuestion = stub.get("answersQuestion")
     try:
         result = await ConversationAgent(tenant_id).process(req)
     except Exception:

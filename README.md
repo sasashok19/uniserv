@@ -1871,6 +1871,22 @@ swipe-reply or a typed `TKT-XXXXX`) still win — those are the citizen being
 explicit in the other direction — and the duplicate check at rung 4 still runs,
 which is what asks "is this the same power cut?" before creating.
 
+**The assistant is told what it is answering.** Routing rung 2 already knew a
+message was an answer and to which ticket, but the assistant was only handed the
+ticket — so a citizen who had just answered "Is this resolved?" got back *"please
+let me know what problem you are reporting"*. The resolved stub now carries
+`answersQuestion` (the text of our last outbound on that ticket), which reaches
+the model as a per-turn instruction telling it to read the message as the answer
+to exactly that and not to ask for a complaint again.
+
+**A bare greeting is not a lost complaint.** The unrouted queue exists because "a
+dropped message is invisible to everyone, which is worse than a misroute" — but
+that reasoning is about a citizen's *words*, and "Hi" has none to preserve.
+`looks_like_pleasantry` (deterministic, whole-message-only, ~30 entries
+including Tamil/Hindi greetings) short-circuits rung 5: the citizen still gets a
+reply, but no queue item is created. "hi, my power is out" is a complaint, not a
+pleasantry — only the entire message counts.
+
 **A menu key is the whole message.** `_match_option` used to also try the first
 word, to catch a button title. Button titles are matched against the tenant's
 configured labels now, and the first-word rule actively misfired: "new water

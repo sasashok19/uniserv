@@ -120,3 +120,37 @@ def test_the_assistant_stops_asking_the_duplicate_question_after_two_rounds():
 def test_the_assistant_stays_civil_with_an_angry_citizen():
     assert "Stay courteous if the citizen is angry or abusive" in ASSISTANT_INSTRUCTIONS
     assert "never threaten to end the conversation" in ASSISTANT_INSTRUCTIONS
+
+
+def test_the_assistant_is_told_what_it_is_answering():
+    """Live-reported: a citizen answered the agent's question and got back
+    "please let me know what problem you are reporting". Routing knew the
+    message was an answer; the model was never told WHAT it answered."""
+    from app.conversation.agent import ChannelIdentityIn, ConversationAgent, TestEventRequest
+
+    req = TestEventRequest(
+        tenantId="t1", channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+91900", verified=True),
+        rawText="Yes it is fixed now", ticketId="t-10",
+        answersQuestion="Is this resolved?")
+    state = {"identity_status": "confirmed", "questions_asked": 0, "complaint_ready": False}
+
+    rendered = ConversationAgent._render_additional_instructions(req, state, [], 2)
+
+    assert "THIS MESSAGE IS THE CITIZEN ANSWERING US" in rendered
+    assert "Is this resolved?" in rendered
+    assert "do NOT ask what problem they are reporting" in rendered
+
+
+def test_no_answer_context_means_no_such_instruction():
+    from app.conversation.agent import ChannelIdentityIn, ConversationAgent, TestEventRequest
+
+    req = TestEventRequest(
+        tenantId="t1", channel="whatsapp",
+        channelIdentity=ChannelIdentityIn(type="phone", value="+91900", verified=True),
+        rawText="My power is out", ticketId="t-10")
+    state = {"identity_status": "confirmed", "questions_asked": 0, "complaint_ready": False}
+
+    rendered = ConversationAgent._render_additional_instructions(req, state, [], 2)
+
+    assert "ANSWERING US" not in rendered

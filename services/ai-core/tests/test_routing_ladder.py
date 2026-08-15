@@ -100,7 +100,11 @@ def test_a_yes_reply_reaches_the_resolved_ticket_we_asked_on_not_another_one():
             channel_identity_type="phone", channel_identity_value="+919000000000",
             trace_id="tr-bug"))
 
-    assert stub == {"id": "t-10", "ticketNumber": "TKT-00010"}
+    assert stub["id"] == "t-10"
+    assert stub["ticketNumber"] == "TKT-00010"
+    # Feature 28: the assistant is told what it is an answer TO, so it does not
+    # reply "please let me know what problem you are reporting".
+    assert stub["answersQuestion"] == "Is this resolved?"
     db.create_ticket.assert_not_called()
 
 
@@ -390,7 +394,7 @@ def test_routing_survives_the_unrouted_store_itself_failing():
 
     with patch("app.tickets.intake.assess_inbound", AsyncMock(return_value=_intent())):
         stub = _run(ensure_ticket_stub(
-            db, "t1", "whatsapp:+91900", "whatsapp", raw_text="ok",
+            db, "t1", "whatsapp:+91900", "whatsapp", raw_text="you are correct about that",
             channel_identity_type="phone", channel_identity_value="+91900", trace_id="tr-17"))
 
     assert stub["unrouted"] is True
@@ -737,7 +741,7 @@ def test_the_stored_message_keeps_the_quoted_text_even_though_judging_does_not()
     needs the full context."""
     db = _db(tickets=[_ticket("t-1", "TKT-00001")],
              messages={"t-1": [_msg("inbound", "No power")]})
-    raw = "ok\n\n> Please confirm"
+    raw = "you are correct about that\n\n> Please confirm"
 
     with patch("app.tickets.intake.assess_inbound", AsyncMock(return_value=_intent())):
         _run(ensure_ticket_stub(
@@ -745,3 +749,51 @@ def test_the_stored_message_keeps_the_quoted_text_even_though_judging_does_not()
             channel_identity_type="email", channel_identity_value="x@y.com", trace_id="tr-27"))
 
     assert db.create_unrouted_message.await_args.args[0]["content"] == raw
+
+
+# --- Feature 28: pleasantries are not lost complaints ----------------------
+
+def test_a_bare_greeting_is_answered_but_not_parked():
+    """The unrouted queue exists because a dropped message is invisible to
+    everyone. That reasoning is about a citizen's WORDS, and "Hi" has none to
+    preserve — parking them leaves a lead a queue that can only be discarded
+    (live-reported: two "Hi" messages sitting in it)."""
+    db = _db(tickets=[_ticket("t-1", "TKT-00001")],
+             messages={"t-1": [_msg("inbound", "No power")]})
+
+    with patch("app.tickets.intake.assess_inbound", AsyncMock(return_value=_intent())):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+91900", "whatsapp", raw_text="Hi",
+            channel_identity_type="phone", channel_identity_value="+91900", trace_id="tr-p1"))
+
+    assert stub["parked"] is False
+    assert stub["ask"] == ASK_FOR_REFERENCE, "they still get a reply, just no queue item"
+    db.create_unrouted_message.assert_not_awaited()
+    db.create_ticket.assert_not_called()
+
+
+def test_a_greeting_with_a_complaint_attached_is_still_a_complaint():
+    """Only the WHOLE message counts. "hi, my power is out" must not be
+    mistaken for a pleasantry and lose the complaint."""
+    from app.tickets.intake import looks_like_pleasantry
+
+    assert looks_like_pleasantry("hi") is True
+    assert looks_like_pleasantry("  Thanks!  ") is True
+    assert looks_like_pleasantry("Vanakkam") is True
+    assert looks_like_pleasantry("hi, my power is out") is False
+    assert looks_like_pleasantry("thanks but it is still broken") is False
+    assert looks_like_pleasantry("") is False
+
+
+def test_a_substantive_unroutable_message_is_still_parked():
+    """The fix must not quietly widen into dropping real messages."""
+    db = _db(tickets=[_ticket("t-1", "TKT-00001")],
+             messages={"t-1": [_msg("inbound", "No power")]})
+
+    with patch("app.tickets.intake.assess_inbound", AsyncMock(return_value=_intent())):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+91900", "whatsapp", raw_text="you are correct about that",
+            channel_identity_type="phone", channel_identity_value="+91900", trace_id="tr-p2"))
+
+    assert stub.get("parked") is not False
+    db.create_unrouted_message.assert_awaited_once()

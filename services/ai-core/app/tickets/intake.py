@@ -296,6 +296,34 @@ def looks_like_intake_answer(text: Optional[str]) -> bool:
     return 1 <= len(leftover) <= _MAX_BARE_NAME_TOKENS
 
 
+# Whole-message greetings and sign-offs, in the languages this deployment
+# actually sees. Matched against the ENTIRE message, so "hi, my power is out"
+# is a complaint and only "hi" is a pleasantry.
+_PLEASANTRY = frozenset({
+    "hi", "hii", "hiii", "hello", "helo", "hey", "yo",
+    "good morning", "good afternoon", "good evening", "good day",
+    "thanks", "thank you", "thanks a lot", "thank u", "thx", "ty",
+    "ok", "okay", "k", "kk", "fine", "cool", "great", "nice",
+    "bye", "goodbye", "see you", "welcome",
+    "vanakkam", "nandri", "namaste", "namaskaram", "shukriya", "dhanyavad",
+})
+
+
+def looks_like_pleasantry(text: Optional[str]) -> bool:
+    """Is the WHOLE message just a greeting or a thank-you?
+
+    Deterministic and deliberately narrow — no LLM, no fuzzy matching. A false
+    positive here silently drops something a citizen wrote, so the rule is that
+    the entire message, stripped of punctuation and emoji-free padding, has to
+    be one of a short list.
+    """
+    stripped = (text or "").strip().lower()
+    if not stripped or len(stripped) > 20:
+        return False
+    stripped = stripped.strip(" .!?,;:-\u2026")
+    return stripped in _PLEASANTRY
+
+
 def extract_ticket_number(text: Optional[str]) -> Optional[str]:
     """Pull a ticket number (e.g. "TKT-00042") out of a subject line or
     message body — either way, an explicit citizen-visible reference."""
@@ -576,7 +604,14 @@ async def ensure_ticket_stub(
         answered = questions[intent["index"]]["ticket"]
         logger.info("ticket resolved as an answer to our own question traceId=%s ticketId=%s status=%s "
                     "reason=%s", trace_id, answered["id"], answered.get("status"), intent["reason"])
-        return await _resolved(db, answered, trace_id, "answer-to-our-question")
+        resolved = await _resolved(db, answered, trace_id, "answer-to-our-question")
+        # Carry WHAT we asked, not just which ticket it was on. Without it the
+        # assistant knows the message belongs here but not that it is an answer,
+        # and replies "please let me know what problem you are reporting" to
+        # someone who has just answered the agent's question (live-reported).
+        last_outbound = questions[intent["index"]].get("lastOutbound") or {}
+        resolved["answersQuestion"] = last_outbound.get("content")
+        return resolved
     if intent["index"] is not None:
         # The citizen pressed "register a new ticket" and then described it, so
         # they have already told us this is not a reply. Rung 2 guesses; they
@@ -607,6 +642,17 @@ async def ensure_ticket_stub(
         return await _create_stub(db, tenant_id, thread_key, channel, origin_message_id, trace_id)
 
     # --- Rung 5: unattributable, and not a complaint -----------------------
+    #
+    # A bare greeting is not a complaint anyone can lose. The unrouted queue
+    # exists because "a dropped message is invisible to everyone, which is worse
+    # than a misroute" — that reasoning applies to a citizen's WORDS, and "Hi"
+    # has none to preserve. Parking them fills a lead's queue with items that
+    # can only ever be discarded (live-reported: two "Hi" messages sitting in it).
+    # They still get a reply; they just leave no work behind.
+    if looks_like_pleasantry(clean_text):
+        logger.info("pleasantry not parked as unrouted traceId=%s", trace_id)
+        return {"unrouted": True, "parked": False, "ask": ASK_FOR_REFERENCE}
+
     return await _park_unrouted(
         db, tenant_id, channel, clean_text, raw_text, channel_identity_value,
         in_reply_to, intent["reason"] or "not an answer to anything we asked, and not a complaint",

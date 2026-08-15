@@ -280,6 +280,10 @@ class TestEventRequest(BaseModel):
     # {"id", "ticketNumber", "summary"}. Nothing is merged on this alone — the
     # assistant asks the citizen, and `resolve_duplicate` acts on their answer.
     suspectedDuplicateOf: Optional[dict] = None
+    #: What WE last asked on this complaint, when routing decided this message is
+    #: the answer to it (routing rung 2). Lets the assistant respond to the
+    #: question instead of asking what problem the citizen is reporting.
+    answersQuestion: Optional[str] = None
 
 
 class ConversationAgent:
@@ -942,6 +946,18 @@ class ConversationAgent:
         # can reach the model at all.
         if company:
             parts.append(f"company={company}")
+        # Feature 28: routing already decided this message answers something we
+        # asked. Telling the model WHAT we asked is the difference between
+        # "Thanks — I'll pass that to the team" and "please let me know what
+        # problem you are reporting" said to someone who just answered.
+        if req.answersQuestion:
+            parts.append(
+                "THIS MESSAGE IS THE CITIZEN ANSWERING US. The last thing we said on this "
+                "complaint was: " + json.dumps(req.answersQuestion[:400])
+                + ". Read their message as the answer to exactly that, acknowledge it briefly, "
+                "and do NOT ask what problem they are reporting or ask them to describe their "
+                "complaint again — they are continuing one you already have."
+            )
         # Feature 22: routing suspected this continues an existing complaint but
         # couldn't tell. Surfaced with the other complaint's own words so the
         # model can ask a specific question ("...the water logging in

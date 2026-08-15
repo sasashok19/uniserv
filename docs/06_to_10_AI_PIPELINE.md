@@ -850,6 +850,33 @@ A failed interactive send is retried as plain text.
 `{complaint}` from `tickets.chief_complaint`, falling back to
 `complaintUnknown` for a stub still mid-intake.
 
+### Feature 28 follow-ups (from live testing)
+
+**Only a human agent's message counts as "awaiting".** `awaiting_our_reply`
+originally accepted any outbound, which trapped citizens behind the assistant's
+own replies — every later message bypassed the menu into the ladder, was parked
+as unrouted, and then met silence once the ask escalated. `author_type` must be
+`agent`.
+
+**A chosen option is never an answer.** The option match runs before the
+awaiting check in both the no-session and at-menu branches. Without that
+ordering an outstanding agent question swallowed the citizen's own menu
+keypresses.
+
+**Rung 2 is suppressed for an explicitly-new complaint.**
+`ensure_ticket_stub(explicit_new_complaint=True)` when the citizen pressed
+"register a new ticket". Rungs 0/1 and the rung-4 duplicate check are untouched.
+
+**Rung 2 now reports WHAT was asked.** The resolved stub carries
+`answersQuestion`, which reaches the assistant as a per-turn instruction. Without
+it the model knew the message belonged to a ticket but not that it was an
+answer, and asked the citizen to describe their problem again.
+
+**Pleasantries are not parked.** `looks_like_pleasantry` short-circuits rung 5
+for a whole-message greeting or thank-you. They are answered; they leave no
+queue item. Deliberately deterministic and narrow — a false positive here
+silently drops something a citizen wrote.
+
 ### Prompt changes
 
 `ASSISTANT_INSTRUCTIONS` (`app/conversation/tools.py`) gained: the tenant's own

@@ -362,7 +362,23 @@ Now `author_type` must be **`agent`**. `ai` and `system` are excluded: an agent
 asking a question is a state we are waiting on, us having spoken is not. The
 rejection reason is logged as `last-outbound-was-ai` / `-system`.
 
-Counts after F28: db-writer **52**, api-gateway **171**, ai-core **435**,
+### F28 follow-up 4: the two loose ends from follow-up 3
+
+1. **The assistant did not know what it was answering.** Routing rung 2 knew the
+   message was an answer and to which ticket, but only passed the ticket — so a
+   citizen who had just answered "Is this resolved?" got "please let me know
+   what problem you are reporting". The resolved stub now carries
+   `answersQuestion` (our last outbound on that ticket) -> `req.answersQuestion`
+   -> a per-turn instruction. Guarded by `test_the_assistant_is_told_what_it_is_answering`.
+2. **Bare greetings no longer clutter the unrouted queue.**
+   `looks_like_pleasantry` (deterministic, whole-message, ~30 entries incl.
+   Tamil/Hindi) short-circuits rung 5: the citizen still gets a reply, no queue
+   item is created. "hi, my power is out" is still a complaint.
+
+The two "Hi" rows already in the queue are historical — discard them in
+Administration -> Unrouted. Nothing here rewrites existing data.
+
+Counts after F28: db-writer **52**, api-gateway **171**, ai-core **440**,
 dashboard tsc + build clean.
 
 ## Deploying this
