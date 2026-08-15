@@ -674,7 +674,8 @@ picks the environment. See the README's *Backfilling existing tickets*.
 `submit_complaint`'s `complaint_summary`, so `ASSISTANT_INSTRUCTIONS` requires
 that summary to be self-contained — the original complaint plus every detail the
 citizen has since added about the problem. Needs
-`scripts/update_assistant.py` to reach the live Assistant.
+a redeploy of ai-core to reach the live conversation — the instructions are
+sent with every request since the Feature 27 Responses API migration.
 
 **Prompt note.** The system prompt forbids narrating the reporter ("The citizen
 says their bill doubled") and requires the problem itself ("Bill doubled this
@@ -838,5 +839,7 @@ all); "you are only ever invoked inside option 2, do not present a menu"; a hard
 ban on inventing ETAs, ticket numbers, or status changes; safety-first handling
 of live wires and gas leaks; reply-in-the-citizen's-language; and the
 unactionable-message cases (media-only, several unrelated problems, small talk,
-out-of-scope questions). `scripts/update_assistant.py` **must be re-run** for
-any of it to reach the live Assistant. Guarded by `tests/test_tools.py`.
+out-of-scope questions). Since the Feature 27 Responses API migration these
+instructions are sent with every request, so a redeploy of ai-core is all it
+takes — there is no Assistant object to re-push. Guarded by
+`tests/test_tools.py`.

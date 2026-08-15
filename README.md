@@ -34,6 +34,7 @@ resolution workflow and full audit trail.
 - [WhatsApp conversation menu](#whatsapp-conversation-menu)
 - [Ticket ETA](#ticket-eta)
 - [Asking before creating a duplicate](#asking-before-creating-a-duplicate)
+- [OpenAI Responses API](#openai-responses-api)
 - [HTTP API reference](#http-api-reference)
 - [Environment variables](#environment-variables)
 - [Logging, log levels & transaction tracing](#logging-log-levels--transaction-tracing)
@@ -93,7 +94,7 @@ no service calls another's business logic directly.
   in-memory cache absorbs read load.
 - **ai-core** (Python 3.11 / FastAPI) — consumes `channel.message.received`
   events, runs the identity-gate + conversation flow, calls an LLM (OpenAI
-  Assistants API, with a deterministic rule-based fallback when no LLM key
+  Responses API, with a deterministic rule-based fallback when no LLM key
   is configured), scrubs PII before any LLM call, classifies/deduplicates/
   prioritizes complaints, and calls back into db-writer to resolve/create
   identities.
@@ -277,7 +278,7 @@ cd services/db-writer  && mvn quarkus:dev
   [Asking before creating a duplicate](#asking-before-creating-a-duplicate).
 - `app/conversation/agent.py` — identity gate (declines to proceed until the
   citizen is identified or explicitly anonymous), info-gathering follow-up
-  questions, and either the OpenAI Assistants API path (tool-calling
+  questions, and either the OpenAI Responses API path (tool-calling
   `confirm_identity`/`submit_complaint`) or a deterministic rule-based
   fallback when no LLM key is configured. The rule-based path asks a
   structured intake question driven entirely by the tenant's **configurable
@@ -878,12 +879,11 @@ recent outbound message if the ticket has no notes yet) as the "last
 action taken." The summary text is composed by code, not left to the LLM
 to paraphrase, so a citizen can never be told a hallucinated status or
 note — the assistant path is instructed to relay it verbatim.
-**Operational note:** the Assistant's tool schema lives on OpenAI's
-platform, created once via `scripts/create_assistant.py` — that script only
-ever *creates* a new Assistant, so adding `check_complaint_status` to
-`ASSISTANT_TOOLS` doesn't reach an already-existing, deployed Assistant on
-its own. Run the new `scripts/update_assistant.py` once to push the updated
-tools/instructions onto the existing `OPENAI_ASSISTANT_ID`.
+**Operational note:** the tool schema and the instructions are sent with
+every request (see [OpenAI Responses API](#openai-responses-api)), so editing
+`ASSISTANT_TOOLS` or `ASSISTANT_INSTRUCTIONS` reaches the live conversation as
+soon as ai-core is redeployed. Before Feature 27 they lived on a remote
+Assistant object and needed a separate push script; they no longer do.
 
 **Message quality — coherence & same-topic checks (Feature 18).** Two
 related content-level judgments, both live-testing-driven, both in the new
@@ -1080,8 +1080,8 @@ Four distinct defects, fixed together:
   the rule-based fallback keeps no cross-turn intake state at all, so with no
   `OPENAI_API_KEY` configured a flagged-but-real domain is re-asked each turn.
 - **Operational note:** `ASSISTANT_INSTRUCTIONS` changed, so run
-  `python scripts/update_assistant.py` once (from `services/ai-core`) against
-  the live `OPENAI_ASSISTANT_ID` for the intake-answer and email-correction
+  a redeploy of ai-core (the instructions ship with every request since
+  Feature 27) for the intake-answer and email-correction
   guidance to take effect — see the Feature 17 note above for why.
 
 **Cross-ticket duplicate detection, on every channel (Feature 22).** Features
@@ -1228,8 +1228,8 @@ ticket number or the word "registered"/"logged"/"created" — the
 structured ack remains the single authoritative confirmation with the
 real ticket number, sent once the ticket actually exists rather than
 guessed at mid-conversation. **Operational note:** this is an
-`ASSISTANT_INSTRUCTIONS` change, so it needs `scripts/update_assistant.py`
-run once against the live `OPENAI_ASSISTANT_ID` to take effect (see the
+`ASSISTANT_INSTRUCTIONS` change, so it takes effect on the next ai-core
+deploy — the instructions ship with every request since Feature 27 (see the
 Feature 17 status-inquiry note above for why).
 
 ---
@@ -1485,7 +1485,7 @@ requires that summary to be self-contained: the original complaint **and** every
 detail the citizen has since added about the problem, as one description —
 "No power" and "since Tuesday, whole of 2nd Street" are each useless alone.
 **Operational note:** that is an `ASSISTANT_INSTRUCTIONS` change, so it needs
-`scripts/update_assistant.py` run once against the live `OPENAI_ASSISTANT_ID`
+a redeploy of ai-core (the instructions ship with every request)
 to take effect.
 
 ---
@@ -1923,6 +1923,75 @@ network condition is not a decision.
 
 ---
 
+## OpenAI Responses API
+
+**Feature 27.** The conversation agent ran on the OpenAI **Assistants API**
+until this change. OpenAI sunsets it on **26 August 2026** — after that date
+`/v1/assistants`, `/v1/threads` and `/v1/threads/runs` stop answering, which
+would have taken the entire live AI path down with them. It now runs on the
+**Responses API** (`services/ai-core/app/conversation/openai_gateway.py`,
+`OpenAIResponsesGateway`).
+
+### What changed
+
+| | Before (Assistants) | After (Responses) |
+|---|---|---|
+| State | OpenAI **threads**, mapped in Valkey `openai:thread:*` | **Conversations**, mapped in Valkey `openai:conv:*` |
+| Prompt | Baked into a **remote Assistant object** | `instructions=` on **every request**, from `tools.py` |
+| Tools | Nested `{"type":"function","function":{...}}` | Flat `{"type":"function","name":...,"parameters":...}` |
+| Turn | `create_and_poll` -> `requires_action` -> `submit_tool_outputs_and_poll` | one `responses.create`; read `function_call` items from `output`; send `function_call_output` items back; repeat |
+| Reply | `threads.messages.list(order="desc", limit=1)` | `response.output_text` |
+| Config | `OPENAI_API_KEY` **and** `OPENAI_ASSISTANT_ID` | `OPENAI_API_KEY` alone |
+
+`openai==2.44.0` was already installed and supports all of it — no dependency
+change.
+
+### The prompt came home
+
+This is the part that is an improvement rather than a port. `ASSISTANT_INSTRUCTIONS`
+always lived in git, but it was *enforced* by a remote Assistant object, so
+editing `tools.py` changed nothing until somebody remembered to run
+`scripts/update_assistant.py` — a footgun this README used to warn about in
+three separate places. The instructions are now sent with every request, so git
+is the source of truth and a redeploy is all it takes.
+
+Both sync scripts (`create_assistant.py`, `update_assistant.py`) are **deleted**;
+they pointed at endpoints that are about to stop existing.
+
+**The official migration guide suggests dashboard-managed "Prompts" referenced
+by id (`prompt={"id": ...}`) — deliberately not used here**, because it puts the
+prompt back outside version control, which is the exact problem this fixes.
+
+### Details worth knowing
+
+- **The Valkey key prefix changed** (`openai:thread:` -> `openai:conv:`) and had
+  to. The old values are Assistants thread ids; handing one to `conversation=`
+  would fail on every turn until its TTL ran out. In-flight conversations start
+  a fresh context on deploy, which the existing `original_complaint` carry-
+  forward already covers.
+- **A vanished conversation is recovered, not fatal.** If the stored id no
+  longer resolves (404, or a 400 naming the conversation), the mapping is
+  dropped and a new conversation started for that same turn. The citizen loses
+  the model's recollection, not their message.
+- **The tool loop is bounded** at `MAX_TOOL_ROUNDS = 6`. An Assistants run was
+  bounded server-side; this loop is ours, and a model that kept re-calling a
+  failing tool would otherwise spin until the process died.
+- **`strict` mode is deliberately off.** It requires every property in
+  `required` and `additionalProperties: false` throughout, and these schemas are
+  built the other way round on purpose — most fields are optional because the
+  model should send only what the citizen actually gave it. Strict would force
+  it to invent the rest.
+- **`is_available()` widened.** It used to require an assistant id too, so a
+  deployment with a key but no assistant id silently used the rule-based path.
+  That deployment now uses the model.
+- **`OPENAI_ASSISTANT_ID` is deprecated**, not removed: the setting is kept so an
+  existing `.env` still loads, and nothing reads it.
+- A test (`test_nothing_still_calls_the_sunset_assistants_endpoints`) fails the
+  build if any module under `app/` reaches for the retired client attributes
+  again — the failure mode otherwise is code that works right up until a date.
+
+---
+
 ## HTTP API reference
 
 ### api-gateway — `http://localhost:8080`
@@ -2251,8 +2320,10 @@ handshake, so a shorter timeout than email's is enough),
 `IDENTITY_MERGE_CONFIDENCE_THRESHOLD`, `IDENTITY_PENDING_TIMEOUT_HOURS`,
 `IDENTITY_ANON_REF_PREFIX`, `DEFAULT_REGION`, `CONVERSATION_STATE_TTL_HOURS`,
 `AI_MAX_FOLLOWUP_QUESTIONS`, `DEFAULT_LLM_PROVIDER`, `ANTHROPIC_API_KEY`,
-`OPENAI_API_KEY`, `OPENAI_ASSISTANT_ID` (empty = rule-based fallback),
+`OPENAI_API_KEY` (empty = rule-based fallback),
 `OPENAI_MODEL`, `PII_SCRUBBER_ENABLED`.
+`OPENAI_ASSISTANT_ID` is **deprecated and unread** since the Feature 27
+Responses API migration; it is still accepted so an existing `.env` loads.
 
 ### dashboard
 `APP_ENV`, `NEXT_PUBLIC_TENANT_ID`, `NEXT_PUBLIC_API_GATEWAY_URL`

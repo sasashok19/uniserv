@@ -60,7 +60,6 @@ services:
       API_GATEWAY_URL: http://api-gateway:8080
       DEFAULT_LLM_PROVIDER: anthropic
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_ASSISTANT_ID: ${OPENAI_ASSISTANT_ID:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
     ports:
       - "8001:8001"

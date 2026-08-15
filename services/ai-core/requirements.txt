@@ -8,7 +8,8 @@ uvicorn[standard]==0.32.1
 pydantic==2.10.3
 pydantic-settings==2.7.0
 
-# OpenAI Assistants API (Feature 06 conversation agent)
+# OpenAI Responses API (Feature 06 conversation agent; migrated off the
+# Assistants beta in Feature 27 — it sunsets 2026-08-26)
 openai==2.44.0
 
 # PII scrubbing (wired in 07_PII_SCRUBBER; needs a spaCy model at that point)

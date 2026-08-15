@@ -1,4 +1,5 @@
-# Session handoff — WhatsApp menu flow + ETA + duplicate confirmation (F26), 2026-08-15
+# Session handoff — WhatsApp menu + ETA + duplicate confirmation (F26)
+#                   and the OpenAI Responses API migration (F27), 2026-08-15
 
 > Previous handoff (Feature 25, configurable landing page) is DONE and pushed.
 > `main` is in sync with `origin/main` as of the start of this session.
@@ -59,7 +60,7 @@ Assumptions I stated where the user did not specify:
 |---|---|---|---|
 | db-writer | 23 | **52** | `mvn -o test -Dquarkus.http.test-port=8099` |
 | api-gateway | 115 | **154** | `mvn -o test` |
-| ai-core | 314 | **401** | `./.venv/Scripts/python.exe -m pytest -q` |
+| ai-core | 314 | **410** | `./.venv/Scripts/python.exe -m pytest -q` |
 | dashboard | — | tsc + `next build` clean | `npx tsc --noEmit && npx next build` |
 
 `export JAVA_HOME="/c/Program Files/Java/jdk-21.0.10"` first — the machine's is
@@ -80,8 +81,10 @@ the consumer's in-flight blocking read (hence a warm-up turn); and an
 interrupted run once left `whatsappMenu.enabled = false` on the tenant, so the
 config restore is now an `atexit` hook.
 
-**Remaining:** Stage 8 (Assistants → Responses API migration — analyse, report,
-implement, re-run everything).
+**Plus 6/6 live OpenAI checks** for the Feature 27 migration (below).
+
+**Remaining:** nothing in the working tree. The one open decision is whether to
+merge `feature-26-whatsapp-menu` into `main` — see "Deploying this" at the end.
 
 | Stage | What | State |
 |---|---|---|
@@ -89,10 +92,42 @@ implement, re-run everything).
 | 2 | api-gateway — ETA passthrough, `/tenant/whatsapp-menu` | **DONE, 144/144 green** (was 115, +29) |
 | 3 | ai-core — menu state machine, single-ticket status, citizen note | **DONE** |
 | 4 | ai-core — duplicate confirm-before-create | **DONE** — ai-core **387/387 green** (was 314, +73) |
-| 5 | ai-core — assistant prompt refresh (+ `scripts/update_assistant.py`) | TODO |
-| 6 | dashboard — ETA in transition dialog + detail, menu admin panel | TODO |
-| 7 | docs (README + `docs/*.md`), full re-run, **push** | TODO |
-| 8 | **Assistants API → Responses API migration** (user asked mid-session; Assistants is deprecated) — analyse, post findings, then implement | TODO |
+| 5 | ai-core — assistant prompt refresh | **DONE** |
+| 6 | dashboard — ETA in transition dialog + detail, menu admin panel | **DONE** |
+| 7 | docs (README + `docs/*.md`), full re-run, **push** | **DONE** (pushed to `feature-26-whatsapp-menu`) |
+| 8 | **Assistants API → Responses API migration (F27)** | **DONE** |
+
+## Feature 27 — Responses API migration (URGENT: Assistants sunsets 2026-08-26)
+
+Eleven days before the deadline at time of writing. `/v1/assistants`,
+`/v1/threads` and `/v1/threads/runs` all stop answering on that date, which
+would have taken the whole live AI path down.
+
+- `app/conversation/openai_gateway.py` — rewritten as `OpenAIResponsesGateway`
+  (old name kept as an alias). Threads → **Conversations**; polling +
+  `requires_action` → read `function_call` items from `response.output`, send
+  `function_call_output` back, repeat; reply from `response.output_text`.
+- **The prompt came home.** Instructions now ship with every request from
+  `tools.py` instead of living on a remote Assistant object, so editing the
+  prompt no longer needs a push script. `scripts/create_assistant.py` and
+  `scripts/update_assistant.py` are **deleted**. The official guide's
+  dashboard-managed "Prompts" were deliberately NOT used — that would put the
+  prompt back outside git.
+- `tools.py` gained `responses_tools()` (nested → flat shape). `strict` is
+  deliberately off; these schemas are mostly-optional by design.
+- **Valkey prefix changed** `openai:thread:` → `openai:conv:` and had to — an
+  old thread id handed to `conversation=` fails every turn until its TTL runs out.
+- `is_available()` now needs only `OPENAI_API_KEY`. A deployment with a key but
+  no assistant id used to fall back to rule-based and will now use the model.
+- `OPENAI_ASSISTANT_ID` is deprecated-but-accepted everywhere (config, `.env`
+  examples, compose, `render.yaml`) so existing envs still load.
+- A test fails the build if anything under `app/` reaches for the retired
+  client attributes again.
+
+**Verified live: 6/6** via `scripts/integration/feature27_responses_smoke.py`
+against the real OpenAI API, including the full `function_call` →
+`function_call_output` round trip (`check_complaint_status` and
+`confirm_identity` both fired).
 
 ### Stage 3 — the menu (ai-core)
 - `app/conversation/menu_content.py` (NEW) — Python mirror of the Java defaults.
@@ -236,3 +271,30 @@ owner class.
       migration → dedup confirmation turn → prompt refresh
 - [ ] Tests (unit + integration), then docs (`README.md` + `docs/*.md` — MANDATORY
       for this repo), then push only on green integration tests
+
+## Deploying this
+
+**Deploy order matters.** db-writer carries migration **V14**, and api-gateway
+starts returning `422 ETA_REQUIRED` paths that only make sense once the columns
+exist:
+
+1. **db-writer first** (applies V14, backfills `first_transition_at`).
+2. api-gateway (ETA passthrough, `/tenant/whatsapp-menu`, `/tickets/{id}/eta`).
+3. ai-core (the menu, the duplicate gate, the Responses API migration).
+4. dashboard (the ETA picker and the WhatsApp Menu admin tab).
+
+Deploying api-gateway or the dashboard **before** db-writer means an agent
+clicking a transition gets a 500 from a missing column rather than a clean 422.
+
+**No new environment variables are required.** `OPENAI_ASSISTANT_ID` can be
+deleted from every environment whenever convenient — nothing reads it.
+
+**In-flight WhatsApp conversations reset once**, on the ai-core deploy: the
+Valkey key prefix for the OpenAI conversation changed (`openai:thread:` →
+`openai:conv:`), so the first message after deploy starts a fresh model context.
+The existing `original_complaint` carry-forward already covers this.
+
+**Branch, not main.** This work sits on `feature-26-whatsapp-menu`, pushed. It
+was deliberately not merged to `main`: this repo auto-deploys all four services
+from `main` with no ordering control, and the V14 migration needs db-writer to
+land first. Merge when someone can watch the deploy order.

@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     default_llm_provider: str = "anthropic"
     anthropic_api_key: str = ""
     openai_api_key: str = ""
+    # DEPRECATED (Feature 27): there is no Assistant object any more — the
+    # conversation runs on the Responses API and its instructions/tools are sent
+    # with every request from app/conversation/tools.py. Kept only so an
+    # existing .env carrying OPENAI_ASSISTANT_ID still loads; nothing reads it.
     openai_assistant_id: str = ""
     openai_model: str = "gpt-4o-mini"
 

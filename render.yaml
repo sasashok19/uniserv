@@ -193,8 +193,6 @@ services:
         value: openai
       - key: OPENAI_API_KEY
         sync: false
-      - key: OPENAI_ASSISTANT_ID
-        sync: false
       - key: OPENAI_MODEL
         value: gpt-4o-mini
 

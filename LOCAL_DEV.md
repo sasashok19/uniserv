@@ -79,7 +79,7 @@ cp apps/dashboard/.env.local.example          apps/dashboard/.env.local
 ```
 
 Then, for the AI conversation feature to use a real LLM instead of the
-Phase-1 rule-based fallback, set `OPENAI_API_KEY` and `OPENAI_ASSISTANT_ID`
+Phase-1 rule-based fallback, set `OPENAI_API_KEY`
 either in `services/ai-core/.env.local` or in `services/ai-core/.env` (both
 are loaded, `.env` first, `.env.local` as an overlay — see
 `services/ai-core/app/config.py`). Leaving them blank is fine; ai-core falls

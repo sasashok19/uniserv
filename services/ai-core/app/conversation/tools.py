@@ -1,9 +1,18 @@
-"""Function-tool schemas exposed to the OpenAI Assistant (Feature 06).
+"""Function-tool schemas and the assistant prompt (Feature 06).
 
-These are registered on the Assistant object itself (see
-``scripts/create_assistant.py``) so the tool contract lives in git rather than
-a dashboard. The conversation agent only needs to know how to *execute* a
-tool call by name — see ``ConversationAgent._execute_tool``.
+The tool contract and the instructions both live in git rather than in a
+dashboard or a remote object. Since the Responses API migration (Feature 27)
+they are sent on every request — see ``openai_gateway.OpenAIResponsesGateway``
+— so editing this file is all it takes for the change to be live. The
+conversation agent only needs to know how to *execute* a tool call by name; see
+``ConversationAgent._execute_tool``.
+
+The schemas below are written in the Chat-Completions/Assistants nested shape
+(``{"type": "function", "function": {...}}``). The Responses API wants them
+flat, so :func:`responses_tools` converts. They are kept nested rather than
+rewritten because the nested form is what every other OpenAI surface still
+takes, and one small converter is cheaper to hold in your head than four
+re-indented schemas.
 """
 
 CONFIRM_IDENTITY_TOOL = {
@@ -143,6 +152,31 @@ RESOLVE_DUPLICATE_TOOL = {
 ASSISTANT_TOOLS = [
     CONFIRM_IDENTITY_TOOL, SUBMIT_COMPLAINT_TOOL, CHECK_COMPLAINT_STATUS_TOOL, RESOLVE_DUPLICATE_TOOL,
 ]
+
+
+def responses_tools() -> list[dict]:
+    """:data:`ASSISTANT_TOOLS` in the flat shape the Responses API expects.
+
+    Assistants/Chat Completions:  {"type": "function", "function": {"name": ..., "parameters": ...}}
+    Responses:                    {"type": "function", "name": ..., "parameters": ...}
+
+    ``strict`` is deliberately NOT set. Strict mode requires every property to
+    be listed in ``required`` and ``additionalProperties: false`` throughout,
+    and these schemas are built the other way round on purpose — most fields are
+    optional because the model is meant to send only what the citizen has
+    actually given it. Turning strict on would force it to invent values for the
+    rest, which is precisely the failure this intake flow is designed to avoid.
+    """
+    flat = []
+    for tool in ASSISTANT_TOOLS:
+        fn = tool["function"]
+        flat.append({
+            "type": "function",
+            "name": fn["name"],
+            "description": fn.get("description", ""),
+            "parameters": fn.get("parameters", {}),
+        })
+    return flat
 
 ASSISTANT_NAME = "UniServe Complaint Intake Agent"
 

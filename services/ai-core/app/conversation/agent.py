@@ -1,9 +1,11 @@
 """Conversation agent orchestration (Feature 06): identity gate + info gathering.
 
 Two execution paths:
-- ``_process_via_assistant``: OpenAI Assistants API (threads/runs + tool calls)
-  when ``OPENAI_API_KEY``/``OPENAI_ASSISTANT_ID`` are configured. Falls back to
-  the rule-based path on any failure (graceful degradation).
+- ``_process_via_assistant``: the OpenAI **Responses API** (conversations +
+  tool calls) when ``OPENAI_API_KEY`` is configured. Falls back to the
+  rule-based path on any failure (graceful degradation). This ran on the
+  Assistants API until Feature 27 — see ``openai_gateway`` for why it moved and
+  what changed.
 - ``_process_rule_based``: the Phase-1 dev fallback used when no LLM is
   configured (see ``/api/v1/internal/test-llm-health``).
 """

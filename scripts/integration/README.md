@@ -26,6 +26,12 @@ python scripts/integration/meta_stub.py &        # listens on 9099
 cd services/ai-core && ./.venv/Scripts/python.exe ../../scripts/integration/feature26_whatsapp_menu.py
 ```
 
+```bash
+# The Responses API migration (Feature 27) - needs a real OPENAI_API_KEY and Valkey.
+# Makes a handful of real API calls; costs a few thousand tokens.
+cd services/ai-core && ./.venv/Scripts/python.exe ../../scripts/integration/feature27_responses_smoke.py
+```
+
 Each script prints one PASS/FAIL line per check and exits non-zero if any fail.
 
 ## Why the Meta stub
@@ -55,6 +61,17 @@ every outbound send and the replies are invisible.
 - The scripts **write to the dev database** (tickets, tenant config). Tenant
   config is saved and restored; the tickets they create are left behind.
 
-## Results at the time of writing (Feature 26)
+## Why a live smoke test for the Responses API
 
-`feature26_eta.py` 13/13, `feature26_whatsapp_menu.py` 33/33.
+`feature27_responses_smoke.py` exists because a mocked test cannot catch a
+wrong parameter name, a tool schema OpenAI rejects, or a conversation id passed
+in the wrong field. The Assistants API it replaced stops answering on
+2026-08-26, so "the unit tests pass" was not a good enough answer. It forces a
+status enquiry specifically, because that is the one case the instructions tell
+the model to answer by calling a tool immediately — the cheapest reliable way to
+exercise `function_call` -> `function_call_output` against the real API.
+
+## Results at the time of writing
+
+`feature26_eta.py` 13/13, `feature26_whatsapp_menu.py` 33/33,
+`feature27_responses_smoke.py` 6/6.

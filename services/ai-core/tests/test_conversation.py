@@ -18,7 +18,8 @@ from app.conversation.agent import (
     _effective_max_followups,
 )
 from app.conversation.intake_fields import DEFAULT_INTAKE_FIELDS, catalog_for_tenant
-from app.conversation.openai_gateway import OpenAIAssistantGateway
+from app.conversation.openai_gateway import MAX_TOOL_ROUNDS, OpenAIResponsesGateway
+from app.conversation.tools import ASSISTANT_INSTRUCTIONS
 
 
 def _run(coro):
@@ -38,7 +39,7 @@ def _req(**overrides) -> TestEventRequest:
 
 
 # ---------------------------------------------------------------------------
-# Rule-based fallback (no OPENAI_ASSISTANT_ID configured)
+# Rule-based fallback (no OPENAI_API_KEY configured)
 #
 # Every test below mocks `get_tenant_config` — an unmocked real
 # `DbWriterClient` call would hit the network. Returning `{}` means "use the
@@ -54,7 +55,7 @@ def test_identity_request_message_does_not_promote_anonymous():
 
 def test_rule_based_identity_gate_triggers_for_unverified_email():
     agent = ConversationAgent("t1")
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
@@ -75,7 +76,7 @@ def test_rule_based_name_alone_is_sufficient_no_mobile_needed():
     method, so Name is the only field that actually blocks the gate."""
     agent = ConversationAgent("t1")
     req = _req(rawText="Name: Jane Doe")
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
@@ -99,7 +100,7 @@ def test_rule_based_known_identity_skips_intake_entirely():
     agent = ConversationAgent("t1")
     req = _req(rawText="My meter is faulty again this week")
     known = {"master_id": "m-7", "name": "Jane Doe", "phone": "9876543210"}
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
@@ -119,7 +120,7 @@ def test_rule_based_invalid_mobile_and_pincode_are_flagged_but_name_present_is_n
     agent = ConversationAgent("t1")
     prior_state = {"identity_status": "pending", "questions_asked": 0, "original_raw_text": "My meter is faulty"}
     req = _req(rawText="Service ID: SC123, Mobile: 98765, Name: Jane, Pin code: 6002")
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=prior_state)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
@@ -140,7 +141,7 @@ def test_rule_based_second_ask_lists_only_what_is_still_missing():
     agent = ConversationAgent("t1")
     prior_state = {"identity_status": "pending", "questions_asked": 0, "original_raw_text": "My meter is faulty"}
     req = _req(rawText="My mobile is 9876543210 and pin code is 600028")  # no name yet
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=prior_state)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
@@ -160,7 +161,7 @@ def test_rule_based_full_intake_reply_unblocks_gate_and_recalls_original_complai
     agent = ConversationAgent("t1")
     # Turn 1: original complaint, unverified email -> pending, original text saved.
     req1 = _req(rawText="My meter is faulty and showing wrong readings for the past week")
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
@@ -173,7 +174,7 @@ def test_rule_based_full_intake_reply_unblocks_gate_and_recalls_original_complai
 
     # Turn 2: the intake form reply, no mention of the original complaint.
     req2 = _req(rawText="Service/Customer ID: SC98765\nMobile Number: 9876543210\nName: Jane Doe\nArea Pin Code: 600028")
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=saved_state)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
@@ -205,7 +206,7 @@ def test_rule_based_email_reply_anonymous_with_service_id_unblocks_identity_gate
     be supplied to route the complaint."""
     agent = ConversationAgent("t1")
     req = _req(rawText="anonymous - I don't want to share details, my meter is faulty. Service ID: SC555")
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
@@ -224,7 +225,7 @@ def test_rule_based_email_reply_anonymous_without_service_id_still_asks():
     anonymous does not bypass a field explicitly flagged to survive it."""
     agent = ConversationAgent("t1")
     req = _req(rawText="anonymous - I don't want to share details, my meter is faulty")
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
@@ -247,7 +248,7 @@ def test_rule_based_whatsapp_known_citizen_clear_complaint_is_ready():
         rawText="My electricity bill for March is double the usual amount",
     )
     known = {"master_id": "m-1", "name": "Ravi Kumar", "email": "ravi@example.com", "phone": "+919876543210"}
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=known)), \
@@ -277,7 +278,7 @@ def test_rule_based_whatsapp_new_citizen_is_asked_for_email():
         channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
         rawText="My electricity bill for March is double the usual amount",
     )
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
@@ -302,7 +303,7 @@ def test_rule_based_vague_complaint_asks_one_followup():
         rawText="Something is wrong",
     )
     known = {"master_id": "m-5", "name": "Ravi Kumar", "email": "ravi@example.com", "phone": "+919876543210"}
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=known)), \
@@ -330,7 +331,7 @@ def test_rule_based_whatsapp_email_provided_feeds_resolver_as_confirmed_email():
         channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
         rawText="Name: Ravi Kumar\nEmail: ravi@example.com\nMy electricity bill is wrong",
     )
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
@@ -376,7 +377,7 @@ def test_rule_based_tenant_override_zero_suppresses_followup_for_vague_complaint
     )
     known = {"master_id": "m-5", "name": "Ravi Kumar", "email": "ravi@example.com", "phone": "+919876543210"}
     tenant_config = {"generalSettings": {"maxFollowupQuestions": 0}}
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=known)), \
@@ -406,67 +407,282 @@ def test_render_additional_instructions_uses_threaded_max_followups():
 
 
 # ---------------------------------------------------------------------------
-# OpenAI Assistants path (mocked gateway / tool handlers)
+# OpenAI Responses path (mocked gateway / tool handlers)
+#
+# Migrated from the Assistants API in Feature 27 — OpenAI sunsets
+# /v1/assistants, /v1/threads and /v1/threads/runs on 26 August 2026.
 # ---------------------------------------------------------------------------
 
-def test_openai_gateway_unavailable_without_assistant_id():
+def test_openai_gateway_unavailable_without_a_key():
+    with patch("app.conversation.openai_gateway.settings") as settings:
+        settings.openai_api_key = ""
+        assert OpenAIResponsesGateway().is_available() is False
+
+
+def test_openai_gateway_available_with_a_key_alone():
+    """No assistant id is required any more — there is no Assistant object."""
     with patch("app.conversation.openai_gateway.settings") as settings:
         settings.openai_api_key = "sk-test"
         settings.openai_assistant_id = ""
-        assert OpenAIAssistantGateway().is_available() is False
+        assert OpenAIResponsesGateway().is_available() is True
 
 
-def test_openai_gateway_available_with_key_and_assistant():
-    with patch("app.conversation.openai_gateway.settings") as settings:
-        settings.openai_api_key = "sk-test"
-        settings.openai_assistant_id = "asst_123"
-        assert OpenAIAssistantGateway().is_available() is True
-
-
-def test_openai_gateway_run_turn_drives_tool_call_loop_to_completion():
-    """Exercises the requires_action -> submit_tool_outputs -> completed state machine."""
-    gateway = OpenAIAssistantGateway()
-
-    fake_thread = SimpleNamespace(id="thread_abc")
-    tool_call = SimpleNamespace(id="call_1", function=SimpleNamespace(name="submit_complaint", arguments="{}"))
-    run_requires_action = SimpleNamespace(
-        status="requires_action",
-        id="run_1",
-        required_action=SimpleNamespace(submit_tool_outputs=SimpleNamespace(tool_calls=[tool_call])),
-    )
-    run_completed = SimpleNamespace(status="completed", id="run_1")
-    final_message = SimpleNamespace(data=[SimpleNamespace(
-        content=[SimpleNamespace(type="text", text=SimpleNamespace(value="Thanks, logged your complaint."))]
-    )])
-
-    fake_client = SimpleNamespace(
-        beta=SimpleNamespace(threads=SimpleNamespace(
-            create=AsyncMock(return_value=fake_thread),
-            messages=SimpleNamespace(create=AsyncMock(), list=AsyncMock(return_value=final_message)),
-            runs=SimpleNamespace(
-                create_and_poll=AsyncMock(return_value=run_requires_action),
-                submit_tool_outputs_and_poll=AsyncMock(return_value=run_completed),
-            ),
-        ))
+def _fake_responses_client(*rounds):
+    """A client whose responses.create returns each round in turn."""
+    return SimpleNamespace(
+        conversations=SimpleNamespace(create=AsyncMock(return_value=SimpleNamespace(id="conv_abc"))),
+        responses=SimpleNamespace(create=AsyncMock(side_effect=list(rounds))),
     )
 
+
+def _function_call(name, arguments="{}", call_id="call_1"):
+    return SimpleNamespace(type="function_call", call_id=call_id, name=name, arguments=arguments)
+
+
+def _reply(text):
+    return SimpleNamespace(status="completed", output=[], output_text=text)
+
+
+def _gateway_settings(settings):
+    settings.conversation_state_ttl_hours = 2
+    settings.openai_model = "gpt-4o-mini"
+    settings.openai_api_key = "sk-test"
+
+
+def test_openai_gateway_run_turn_drives_the_tool_call_loop_to_a_reply():
+    """function_call in output -> execute -> function_call_output back -> reply."""
+    gateway = OpenAIResponsesGateway()
+    fake_client = _fake_responses_client(
+        SimpleNamespace(status="completed", output=[_function_call("submit_complaint")],
+                        output_text=""),
+        _reply("Thanks, logged your complaint."),
+    )
     valkey = AsyncMock()
     valkey.get.return_value = None
-
     execute_tool = AsyncMock(return_value={"complaintReady": True})
 
-    with patch.object(OpenAIAssistantGateway, "client", new=fake_client), \
+    with patch.object(OpenAIResponsesGateway, "client", new=fake_client), \
          patch("app.conversation.openai_gateway.get_valkey", return_value=valkey), \
          patch("app.conversation.openai_gateway.settings") as settings:
-        settings.openai_assistant_id = "asst_123"
-        settings.conversation_state_ttl_hours = 2
+        _gateway_settings(settings)
         reply = _run(gateway.run_turn("t1", "thread-key", "hello", execute_tool))
 
     assert reply == "Thanks, logged your complaint."
     execute_tool.assert_awaited_once_with("submit_complaint", {})
-    fake_client.beta.threads.runs.submit_tool_outputs_and_poll.assert_awaited_once()
-    _, kwargs = fake_client.beta.threads.runs.submit_tool_outputs_and_poll.await_args
-    assert kwargs["tool_outputs"] == [{"tool_call_id": "call_1", "output": json.dumps({"complaintReady": True})}]
+
+    first, second = fake_client.responses.create.await_args_list
+    # Round 1 carries the citizen's message; round 2 carries only the result,
+    # because the conversation already holds everything else.
+    assert first.kwargs["input"] == [{"role": "user", "content": "hello"}]
+    assert second.kwargs["input"] == [{
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": json.dumps({"complaintReady": True}),
+    }]
+
+
+def test_the_prompt_and_tools_are_sent_on_every_request():
+    """The whole point of the migration: instructions come from git, not from a
+    remote Assistant object somebody has to remember to re-push."""
+    gateway = OpenAIResponsesGateway()
+    fake_client = _fake_responses_client(_reply("hello"))
+    valkey = AsyncMock()
+    valkey.get.return_value = "conv_existing"
+
+    with patch.object(OpenAIResponsesGateway, "client", new=fake_client), \
+         patch("app.conversation.openai_gateway.get_valkey", return_value=valkey), \
+         patch("app.conversation.openai_gateway.settings") as settings:
+        _gateway_settings(settings)
+        _run(gateway.run_turn("t1", "thread-key", "hi", AsyncMock(),
+                              additional_instructions="company=TNEB"))
+
+    kwargs = fake_client.responses.create.await_args.kwargs
+    assert ASSISTANT_INSTRUCTIONS in kwargs["instructions"]
+    assert "company=TNEB" in kwargs["instructions"]
+    assert kwargs["conversation"] == "conv_existing"
+    names = [t["name"] for t in kwargs["tools"]]
+    assert {"confirm_identity", "submit_complaint", "check_complaint_status",
+            "resolve_duplicate"} <= set(names)
+    # Flat shape, not the Assistants/Chat-Completions nested one.
+    assert all("function" not in t for t in kwargs["tools"])
+
+
+def test_a_conversation_is_created_once_and_reused():
+    gateway = OpenAIResponsesGateway()
+    fake_client = _fake_responses_client(_reply("hi"))
+    valkey = AsyncMock()
+    valkey.get.return_value = None
+
+    with patch.object(OpenAIResponsesGateway, "client", new=fake_client), \
+         patch("app.conversation.openai_gateway.get_valkey", return_value=valkey), \
+         patch("app.conversation.openai_gateway.settings") as settings:
+        _gateway_settings(settings)
+        _run(gateway.run_turn("t1", "thread-key", "hi", AsyncMock()))
+
+    fake_client.conversations.create.assert_awaited_once()
+    key, value = valkey.set.await_args.args
+    # NOT the old `openai:thread:` prefix — a stale Assistants thread id handed
+    # to `conversation=` would fail on every turn until its TTL expired.
+    assert key == "openai:conv:t1:thread-key"
+    assert value == "conv_abc"
+    assert valkey.set.await_args.kwargs["ex"] == 2 * 3600
+
+
+def test_a_vanished_conversation_starts_a_fresh_one_instead_of_losing_the_message():
+    gateway = OpenAIResponsesGateway()
+
+    class NotFound(Exception):
+        status_code = 404
+
+    fake_client = SimpleNamespace(
+        conversations=SimpleNamespace(create=AsyncMock(return_value=SimpleNamespace(id="conv_new"))),
+        responses=SimpleNamespace(create=AsyncMock(side_effect=[NotFound("no such conversation"),
+                                                                _reply("still here")])),
+    )
+    valkey = AsyncMock()
+    # The stored id resolves once, then the code deletes it and looks again.
+    valkey.get.side_effect = ["conv_expired", None]
+
+    with patch.object(OpenAIResponsesGateway, "client", new=fake_client), \
+         patch("app.conversation.openai_gateway.get_valkey", return_value=valkey), \
+         patch("app.conversation.openai_gateway.settings") as settings:
+        _gateway_settings(settings)
+        reply = _run(gateway.run_turn("t1", "thread-key", "hi", AsyncMock()))
+
+    assert reply == "still here"
+    valkey.delete.assert_awaited_once()
+    assert fake_client.responses.create.await_args.kwargs["conversation"] == "conv_new"
+
+
+def test_an_unrelated_error_is_not_retried_as_a_missing_conversation():
+    gateway = OpenAIResponsesGateway()
+
+    class RateLimited(Exception):
+        status_code = 429
+
+    fake_client = SimpleNamespace(
+        conversations=SimpleNamespace(create=AsyncMock()),
+        responses=SimpleNamespace(create=AsyncMock(side_effect=RateLimited("slow down"))),
+    )
+    valkey = AsyncMock()
+    valkey.get.return_value = "conv_1"
+
+    with patch.object(OpenAIResponsesGateway, "client", new=fake_client), \
+         patch("app.conversation.openai_gateway.get_valkey", return_value=valkey), \
+         patch("app.conversation.openai_gateway.settings") as settings:
+        _gateway_settings(settings)
+        raised = False
+        try:
+            _run(gateway.run_turn("t1", "thread-key", "hi", AsyncMock()))
+        except RateLimited:
+            raised = True
+
+    assert raised, "a 429 must propagate, not be retried as a missing conversation"
+    assert fake_client.responses.create.await_count == 1
+
+
+def test_a_failing_tool_is_reported_to_the_model_rather_than_crashing_the_turn():
+    gateway = OpenAIResponsesGateway()
+    fake_client = _fake_responses_client(
+        SimpleNamespace(status="completed", output=[_function_call("submit_complaint")],
+                        output_text=""),
+        _reply("Sorry, something went wrong."),
+    )
+    valkey = AsyncMock()
+    valkey.get.return_value = "conv_1"
+
+    with patch.object(OpenAIResponsesGateway, "client", new=fake_client), \
+         patch("app.conversation.openai_gateway.get_valkey", return_value=valkey), \
+         patch("app.conversation.openai_gateway.settings") as settings:
+        _gateway_settings(settings)
+        reply = _run(gateway.run_turn("t1", "thread-key", "hi",
+                                      AsyncMock(side_effect=RuntimeError("db down"))))
+
+    assert reply == "Sorry, something went wrong."
+    sent = fake_client.responses.create.await_args.kwargs["input"][0]
+    assert "db down" in sent["output"]
+
+
+def test_malformed_tool_arguments_become_an_empty_dict():
+    gateway = OpenAIResponsesGateway()
+    fake_client = _fake_responses_client(
+        SimpleNamespace(status="completed",
+                        output=[_function_call("submit_complaint", arguments="{not json")],
+                        output_text=""),
+        _reply("ok"),
+    )
+    valkey = AsyncMock()
+    valkey.get.return_value = "conv_1"
+    execute_tool = AsyncMock(return_value={})
+
+    with patch.object(OpenAIResponsesGateway, "client", new=fake_client), \
+         patch("app.conversation.openai_gateway.get_valkey", return_value=valkey), \
+         patch("app.conversation.openai_gateway.settings") as settings:
+        _gateway_settings(settings)
+        _run(gateway.run_turn("t1", "thread-key", "hi", execute_tool))
+
+    execute_tool.assert_awaited_once_with("submit_complaint", {})
+
+
+def test_a_tool_loop_that_never_settles_is_bounded():
+    """Unlike an Assistants run, this loop is ours to bound."""
+    gateway = OpenAIResponsesGateway()
+    forever = SimpleNamespace(status="completed", output=[_function_call("submit_complaint")],
+                              output_text="")
+    fake_client = SimpleNamespace(
+        conversations=SimpleNamespace(create=AsyncMock()),
+        responses=SimpleNamespace(create=AsyncMock(return_value=forever)),
+    )
+    valkey = AsyncMock()
+    valkey.get.return_value = "conv_1"
+
+    with patch.object(OpenAIResponsesGateway, "client", new=fake_client), \
+         patch("app.conversation.openai_gateway.get_valkey", return_value=valkey), \
+         patch("app.conversation.openai_gateway.settings") as settings:
+        _gateway_settings(settings)
+        settled = True
+        try:
+            _run(gateway.run_turn("t1", "thread-key", "hi", AsyncMock(return_value={})))
+        except RuntimeError as exc:
+            settled = "did not settle" not in str(exc)
+
+    assert not settled, "an endless tool loop must be bounded, not run forever"
+    assert fake_client.responses.create.await_count == MAX_TOOL_ROUNDS
+
+
+def test_an_incomplete_response_is_an_error_not_an_empty_reply():
+    gateway = OpenAIResponsesGateway()
+    fake_client = _fake_responses_client(
+        SimpleNamespace(status="incomplete", output=[], output_text=""))
+    valkey = AsyncMock()
+    valkey.get.return_value = "conv_1"
+
+    with patch.object(OpenAIResponsesGateway, "client", new=fake_client), \
+         patch("app.conversation.openai_gateway.get_valkey", return_value=valkey), \
+         patch("app.conversation.openai_gateway.settings") as settings:
+        _gateway_settings(settings)
+        message = ""
+        try:
+            _run(gateway.run_turn("t1", "thread-key", "hi", AsyncMock()))
+        except RuntimeError as exc:
+            message = str(exc)
+
+    assert "status=incomplete" in message
+
+
+def test_nothing_still_calls_the_sunset_assistants_endpoints():
+    """OpenAI removes /v1/assistants, /v1/threads and /v1/threads/runs on
+    26 August 2026. A stray `client.beta.threads` anywhere in ai-core would go
+    from working to a hard failure on that date with no warning."""
+    import pathlib
+    app_dir = pathlib.Path(__file__).resolve().parents[1] / "app"
+    offenders = []
+    for path in app_dir.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for needle in ("beta.threads", "beta.assistants"):
+            if needle in text:
+                offenders.append(f"{path.name}: {needle}")
+    assert not offenders, offenders
 
 
 def test_tool_confirm_identity_calls_resolver_and_updates_state():
@@ -833,7 +1049,7 @@ def test_assistant_path_whatsapp_bare_message_does_not_reach_confirmed_or_compla
             "submit_complaint", {"complaint_summary": "Meter not working", "category_hint": "technical"})
         return "Could you share your name and email so we can register your complaint?"
 
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=True), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=True), \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
          patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
@@ -880,7 +1096,7 @@ def test_assistant_path_whatsapp_with_name_and_email_reaches_confirmed_and_compl
             "submit_complaint", {"complaint_summary": "Meter not working", "category_hint": "technical"})
         return "Thanks, we've logged your complaint."
 
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=True), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=True), \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
          patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
@@ -930,7 +1146,7 @@ def test_assistant_path_refuses_submit_complaint_when_model_flags_incoherent():
         )
         return "Just to confirm — did you mean a pit/manhole that hasn't been closed?"
 
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=True), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=True), \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value={
              "master_id": "m-1", "name": "Ashok", "email": "ashok@example.com",
@@ -974,7 +1190,7 @@ def test_assistant_path_submits_complaint_when_model_confirms_coherent():
         )
         return "Thanks, we've logged your complaint."
 
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=True), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=True), \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value={
              "master_id": "m-1", "name": "Ashok", "email": "ashok@example.com",
@@ -1011,7 +1227,7 @@ def test_assistant_path_submit_complaint_gate_defaults_to_coherent_when_field_om
         assert "error" not in result
         return "Thanks, we've logged your complaint."
 
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=True), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=True), \
          patch.object(agent, "_load_state", new=AsyncMock(return_value={
              "identity_status": "confirmed", "master_id": "m-1", "extracted_fields": {},
              "questions_asked": 0, "complaint_ready": False,
@@ -1070,7 +1286,7 @@ def test_rule_based_status_inquiry_bypasses_identity_gate_and_never_files_a_comp
         ticketId="tkt-status-1", rawText="What's the status of my complaint?",
         channelIdentity=ChannelIdentityIn(type="email", value="citizen@example.com", verified=False),
     )
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent._db, "find_by_email", new=AsyncMock(return_value={"master_id": "m-1"})), \
          patch.object(agent._db, "list_tickets", new=AsyncMock(return_value=[
@@ -1102,7 +1318,7 @@ def test_rule_based_status_inquiry_works_for_whatsapp_identically():
         channelIdentity=ChannelIdentityIn(type="phone", value="+919876543210", verified=True),
         rawText="Any update on my last complaint?",
     )
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent._db, "find_by_phone", new=AsyncMock(return_value=None)), \
          patch.object(agent._db, "get_ticket", new=AsyncMock(return_value={})), \
@@ -1121,7 +1337,7 @@ def test_rule_based_genuine_new_complaint_is_not_mistaken_for_status_inquiry():
     near 'complaint'/'ticket', so the identity gate runs as normal)."""
     agent = ConversationAgent("t1")
     req = _req(rawText="My meter is not working and it's been broken for days")
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
@@ -1178,7 +1394,7 @@ def test_assistant_path_check_complaint_status_tool_end_to_end():
         result = await execute_tool("check_complaint_status", {})
         return result["summary"]
 
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=True), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=True), \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
          patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
@@ -1239,7 +1455,7 @@ def test_persist_inbound_swallows_db_errors():
 def test_rule_based_identity_gate_persists_inbound_and_ai_reply():
     agent = ConversationAgent("t1")
     req = _req(ticketId="tkt-1", rawText="My meter is broken, please help")
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
@@ -1276,7 +1492,7 @@ def test_rule_based_vague_followup_on_open_ticket_persists_inbound_and_ai_reply(
         rawText="Still broken",
     )
     known = {"master_id": "m-5", "name": "Ravi Kumar", "email": "ravi@example.com", "phone": "+919876543210"}
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=known)), \
@@ -1309,7 +1525,7 @@ def test_rule_based_complaint_ready_does_not_double_persist_inbound():
     agent = ConversationAgent("t1")
     req = _req(ticketId="tkt-3", rawText="My meter is faulty again this week")
     known = {"master_id": "m-7", "name": "Jane Doe", "phone": "9876543210"}
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=False), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=False), \
          patch.object(agent, "_publisher") as publisher, \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value={})), \
@@ -1334,7 +1550,7 @@ def test_assistant_path_persists_inbound_and_ai_reply_when_no_tool_called():
     async def fake_run_turn(tenant_id, state_key, user_message, execute_tool, additional_instructions):
         return "Sorry to hear that — an agent will follow up shortly."
 
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=True), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=True), \
          patch.object(agent, "_load_state", new=AsyncMock(return_value={
              "identity_status": "confirmed", "master_id": "m-1", "extracted_fields": {"complaint_summary": "x"},
              "questions_asked": 0, "complaint_ready": True,
@@ -1375,7 +1591,7 @@ def test_assistant_path_skips_inbound_persist_when_submit_complaint_called():
     # never blocks submit_complaint here; this test is about persistence,
     # not the intake gate (covered separately above).
     tenant_config = {"intakeFields": {"email": []}}
-    with patch.object(OpenAIAssistantGateway, "is_available", return_value=True), \
+    with patch.object(OpenAIResponsesGateway, "is_available", return_value=True), \
          patch.object(agent, "_load_state", new=AsyncMock(return_value=None)), \
          patch.object(agent, "_find_known_identity", new=AsyncMock(return_value=None)), \
          patch.object(agent._db, "get_tenant_config", new=AsyncMock(return_value=tenant_config)), \
