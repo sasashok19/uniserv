@@ -872,6 +872,17 @@ keypresses.
 it the model knew the message belonged to a ticket but not that it was an
 answer, and asked the citizen to describe their problem again.
 
+**An explicitly-new complaint always ends in a ticket.**
+`explicit_new_complaint` both suppresses rung 2 and satisfies rung 4's
+`is_new_complaint` condition. Without the second half, a clarification that is
+not itself a complaint description ("No it is for a different area") was
+suppressed out of rung 2, declined by rung 4, and parked by rung 5 with no
+reply at all.
+
+**A dead end offers the menu.** When rung 5 escalates with no ask, the WhatsApp
+dispatcher sends the main menu and resets the session. The escalation rule (no
+ask loop) is preserved; the dead air is not.
+
 **Pleasantries are not parked.** `looks_like_pleasantry` short-circuits rung 5
 for a whole-message greeting or thank-you. They are answered; they leave no
 queue item. Deliberately deterministic and narrow — a false positive here

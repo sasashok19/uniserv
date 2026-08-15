@@ -1863,13 +1863,28 @@ typed were all bypassed past the menu and filed onto TKT-00014 — they could no
 get out. The option match now runs **first** in both places, so a menu key is
 handled by the menu no matter what is outstanding.
 
-**Choosing "New ticket" suppresses routing rung 2.** Having pressed it, the
-citizen has stated this is not a reply to anything, so `ensure_ticket_stub` is
-called with `explicit_new_complaint=True` and will not resolve the message onto
-an existing ticket via the answers-our-question rung. Rungs 0/1 (an explicit
-swipe-reply or a typed `TKT-XXXXX`) still win — those are the citizen being
-explicit in the other direction — and the duplicate check at rung 4 still runs,
-which is what asks "is this the same power cut?" before creating.
+**Choosing "New ticket" suppresses routing rung 2 — and guarantees a ticket.**
+Having pressed it, the citizen has stated this is not a reply to anything, so
+`ensure_ticket_stub` is called with `explicit_new_complaint=True` and will not
+resolve the message onto an existing ticket via the answers-our-question rung.
+Rungs 0/1 (an explicit swipe-reply or a typed `TKT-XXXXX`) still win — those are
+the citizen being explicit in the other direction — and the duplicate check at
+rung 4 still runs, which is what asks "is this the same power cut?" before
+creating.
+
+The flag also *counts as* a new complaint at rung 4. Suppressing rung 2 alone
+left a hole: a citizen who replied "No it is for a different area" was not
+making a complaint *description*, so `is_new_complaint` was false, rung 2 was
+suppressed, and the message fell to rung 5 — parked in the unrouted queue with
+no reply, because the escalation rule had already fired. Having told us it is
+new, they get a ticket.
+
+**A routing dead end offers the menu rather than silence.** Rung 5 sends no
+reply on a second unroutable message, so a citizen answering "I don't have it"
+is not trapped in an ask loop. That is right in isolation and wrong as an
+ending. On WhatsApp with the menu enabled, a dead end now re-sends the main menu
+and resets the session to `MENU`: the message is in the lead's queue either way,
+and what was missing was a way forward.
 
 **The assistant is told what it is answering.** Routing rung 2 already knew a
 message was an answer and to which ticket, but the assistant was only handed the

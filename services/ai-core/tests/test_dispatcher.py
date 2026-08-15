@@ -264,3 +264,41 @@ def test_a_delivery_failure_is_never_caused_by_the_hint(fake_valkey):
             "messageText": "Which street?"}}))
 
     assert deliver.await_args.args[0]["messageText"] == "Which street?"
+
+
+def test_a_routing_dead_end_offers_the_menu_instead_of_silence(fake_valkey):
+    """Rung 5 deliberately sends nothing on a second unroutable message, so a
+    citizen is not trapped in an ask loop. Right in isolation, wrong as an
+    ending — live, someone said "No it is for a different area" and simply never
+    heard back. Their words are safely in the lead's queue; what was missing was
+    a way forward."""
+    with patch("app.events.dispatcher.ensure_ticket_stub", new=AsyncMock(
+            return_value={"unrouted": True, "escalated": True, "ask": None,
+                          "reason": "not attributable"})), \
+         patch("app.events.dispatcher.ConversationAgent") as agent_cls, \
+         patch("app.events.dispatcher.deliver_reply", new=AsyncMock()) as deliver, \
+         patch("app.identity.db_client.DbWriterClient.get_tenant_config",
+               new=AsyncMock(return_value={})):
+        thread_key = "whatsapp:+919000000009"
+        agent_cls._thread_key.return_value = thread_key
+        fake_valkey.store[f"wamenu:t1:{thread_key}"] = json.dumps({"state": "intake"})
+        _run(_handle_channel_message("t1", _event(
+            "whatsapp", "No it is for a different area",
+            identity_value="+919000000009", identity_type="phone")))
+
+    sent = deliver.await_args.args[0]
+    assert sent["buttons"], "the citizen gets the menu, not silence"
+    # ...and the session is put back somewhere their next tap will work.
+    assert json.loads(fake_valkey.store[f"wamenu:t1:{thread_key}"])["state"] == "menu"
+
+
+def test_a_dead_end_on_email_stays_silent(fake_valkey):
+    """Email has no menu to fall back to, and the escalation rule stands."""
+    with patch("app.events.dispatcher.ensure_ticket_stub", new=AsyncMock(
+            return_value={"unrouted": True, "escalated": True, "ask": None})), \
+         patch("app.events.dispatcher.ConversationAgent"), \
+         patch("app.events.dispatcher.assess_coherence", new=AsyncMock(return_value=None)), \
+         patch("app.events.dispatcher.deliver_reply", new=AsyncMock()) as deliver:
+        _run(_handle_channel_message("t1", _event("email", "you are correct")))
+
+    deliver.assert_not_awaited()

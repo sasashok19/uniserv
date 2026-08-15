@@ -134,9 +134,16 @@ class UnroutedMessageServiceTest {
         List<Map<String, Object>> pendingOnly = unrouted.list(TENANT, UnroutedMessage.PENDING, 1, 50);
         assertTrue(pendingOnly.stream().allMatch(m -> UnroutedMessage.PENDING.equals(m.get("status"))));
 
-        List<Map<String, Object>> both = unrouted.list(TENANT, "pending,escalated", 1, 50);
+        int pageSize = 50;
+        List<Map<String, Object>> both = unrouted.list(TENANT, "pending,escalated", 1, pageSize);
         assertTrue(both.size() >= 2);
-        assertEquals(both.size(), unrouted.count(TENANT, "pending,escalated"));
+        // `count` is the FULL total; `list` is one page of it. Comparing them
+        // directly only held while this @QuarkusTest's persistent uniserve.db
+        // happened to hold fewer than a page of rows — it accumulates on every
+        // run, so the assertion aged into a failure. The contract worth
+        // asserting is that the page is the count, capped at the page size.
+        long total = unrouted.count(TENANT, "pending,escalated");
+        assertEquals(Math.min(total, pageSize), both.size());
     }
 
     @Test

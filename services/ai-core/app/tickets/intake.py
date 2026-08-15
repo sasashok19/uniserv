@@ -630,7 +630,19 @@ async def ensure_ticket_stub(
         return await _resolved(db, intake_stub, trace_id, "intake-answer")
 
     # --- Rung 4: a new complaint ------------------------------------------
-    if intent["is_new_complaint"]:
+    #
+    # `explicit_new_complaint` counts here as well as suppressing rung 2. The
+    # citizen pressed "register a new ticket", so this conversation MUST end in
+    # a ticket — falling through to rung 5 would park their words in a queue and
+    # tell them nothing, which is exactly what happened live: they said "No it
+    # is for a different area", `is_new_complaint` was False (a clarification is
+    # not itself a complaint description), rung 2 was suppressed, and the reply
+    # was silence. Having told us it is new, they get a ticket; the duplicate
+    # check below still runs and still asks which area first.
+    if intent["is_new_complaint"] or explicit_new_complaint:
+        if not intent["is_new_complaint"]:
+            logger.info("not read as a new complaint, but the citizen chose a NEW ticket "
+                        "traceId=%s — creating rather than parking", trace_id)
         open_tickets = [d["ticket"] for d in dialogues
                         if (d["ticket"].get("status") or "") not in TERMINAL_STATUSES]
         if open_tickets:

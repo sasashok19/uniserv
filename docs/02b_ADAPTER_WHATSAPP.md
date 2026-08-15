@@ -296,10 +296,16 @@ HTTP/1.1 200 OK
     keypresses, which is how a citizen ended up unable to open a new ticket at
     all (live: "3", then a "New ticket" tap, then their complaint, all filed onto
     TKT-00014).
-  - **Option 2 suppresses routing rung 2.** Pressing "register a new ticket" is
-    a statement that this is not a reply, so `ensure_ticket_stub` is called with
-    `explicit_new_complaint=True`. Rungs 0/1 and the rung-4 duplicate check are
-    unaffected.
+  - **Option 2 suppresses routing rung 2 AND guarantees a ticket.** Pressing
+    "register a new ticket" is a statement that this is not a reply, so
+    `ensure_ticket_stub` is called with `explicit_new_complaint=True`. Rungs 0/1
+    and the rung-4 duplicate check are unaffected. The flag also counts as a new
+    complaint at rung 4 — suppressing rung 2 on its own dropped a clarification
+    ("No it is for a different area") into the unrouted queue with no reply.
+  - **A dead end offers the menu instead of silence.** When rung 5 escalates and
+    sends no ask, the dispatcher re-sends the main menu and resets the session
+    to `MENU`. The citizen's words are already stored for a lead; what was
+    missing was a way forward.
   - `nothing is awaiting this citizen's reply ... rejected=[...]` is logged with
     a per-ticket reason (`citizen-spoke-last`, `outside-reply-window`,
     `intake-question`), alongside a `whatsapp menu inbound ... state=... option=...`

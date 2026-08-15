@@ -797,3 +797,72 @@ def test_a_substantive_unroutable_message_is_still_parked():
 
     assert stub.get("parked") is not False
     db.create_unrouted_message.assert_awaited_once()
+
+
+# --- Feature 28: "register a new ticket" must END in a ticket --------------
+
+def test_choosing_a_new_ticket_creates_one_even_when_the_message_is_only_a_clarification():
+    """The live dead end.
+
+    Citizen picks "New ticket", describes water logging, is told they already
+    have TKT-00027 open, and replies "No it is for a different area". That
+    clarification is not itself a complaint description, so `is_new_complaint`
+    is False; rung 2 is suppressed because they chose a new ticket; and the
+    message fell to rung 5, was parked, and — having already been asked once —
+    got NO reply at all.
+    """
+    db = _db(tickets=[_ticket("t-27", "TKT-00027")],
+             messages={"t-27": [_msg("inbound", "Water logging in my area"),
+                                _msg("outbound", "You have an open complaint...")]},
+             ask_count=1)
+
+    with patch("app.tickets.intake.assess_inbound",
+               AsyncMock(return_value=_intent(index=0, is_new_complaint=False,
+                                              reason="clarifies it is not the previous one"))), \
+         patch("app.tickets.intake.match_open_ticket",
+               AsyncMock(return_value={"index": None, "verdict": "different",
+                                       "reason": "different area", "question": None})):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+91900", "whatsapp", raw_text="No it is for a different area",
+            channel_identity_type="phone", channel_identity_value="+91900",
+            trace_id="tr-dead", explicit_new_complaint=True))
+
+    assert stub["id"] == "new-1", "they said it was new; they must get a ticket"
+    db.create_unrouted_message.assert_not_awaited()
+
+
+def test_the_duplicate_check_still_runs_for_an_explicitly_new_complaint():
+    """Creating is not the same as skipping the safeguard: if it still looks
+    like the open one, the citizen is asked which area before anything exists."""
+    db = _db(tickets=[_ticket("t-27", "TKT-00027")],
+             messages={"t-27": [_msg("inbound", "Water logging in Madambakkam")]})
+
+    with patch("app.tickets.intake.assess_inbound",
+               AsyncMock(return_value=_intent(is_new_complaint=False))), \
+         patch("app.tickets.intake.match_open_ticket",
+               AsyncMock(return_value={"index": 0, "verdict": "unclear",
+                                       "reason": "no area given",
+                                       "question": "Which area is this in?"})):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+91900", "whatsapp", raw_text="Water logging again",
+            channel_identity_type="phone", channel_identity_value="+91900",
+            trace_id="tr-dup", explicit_new_complaint=True))
+
+    assert "id" not in stub
+    assert stub["awaitingDuplicateConfirmation"] is True
+    assert "Which area is this in?" in stub["ask"]
+
+
+def test_without_the_explicit_choice_a_clarification_is_still_parked():
+    """The change must not turn every unroutable message into a ticket."""
+    db = _db(tickets=[_ticket("t-27", "TKT-00027")],
+             messages={"t-27": [_msg("inbound", "Water logging")]})
+
+    with patch("app.tickets.intake.assess_inbound",
+               AsyncMock(return_value=_intent(is_new_complaint=False))):
+        stub = _run(ensure_ticket_stub(
+            db, "t1", "whatsapp:+91900", "whatsapp", raw_text="you are correct about that",
+            channel_identity_type="phone", channel_identity_value="+91900", trace_id="tr-np"))
+
+    assert "id" not in stub
+    db.create_unrouted_message.assert_awaited_once()

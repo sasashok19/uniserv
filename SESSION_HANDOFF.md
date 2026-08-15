@@ -378,7 +378,38 @@ rejection reason is logged as `last-outbound-was-ai` / `-system`.
 The two "Hi" rows already in the queue are historical — discard them in
 Administration -> Unrouted. Nothing here rewrites existing data.
 
-Counts after F28: db-writer **52**, api-gateway **171**, ai-core **440**,
+### F28 follow-up 5: "New ticket" could still dead-end in silence
+
+Reported: citizen picks New ticket, describes water logging, is told they
+already have TKT-00027, replies "No it is for a different area" -> nothing.
+
+The log named it exactly: `assess_inbound` -> `newComplaint=False`; rung 2
+matched but was suppressed by `explicit_new_complaint` (follow-up 2's fix);
+rung 4 declined because a clarification is not a complaint DESCRIPTION; rung 5
+parked it and, having already asked once, escalated with no reply.
+
+Two fixes:
+1. `explicit_new_complaint` now also SATISFIES rung 4. If they told us it is
+   new, the ladder must end in a ticket. The rung-4 duplicate check still runs
+   first, so an ambiguous one still asks which area before creating.
+2. **A WhatsApp dead end offers the menu instead of silence.** When rung 5
+   escalates with no ask, the dispatcher re-sends the main menu and resets the
+   session to `MENU`. The no-ask-loop rule is preserved; the dead air is not.
+   Email is unchanged (no menu to fall back to).
+
+Also fixed another pre-existing `@QuarkusTest` pollution bug, same family as the
+`theAskCountLookupIsWhatStopsTheClarifyLoop` one:
+`theQueueListsOnlyTheStatusesAskedFor` compared a 50-row PAGE against the full
+`count()`, which only held while the persistent `uniserve.db` had under a page
+of rows. It had accumulated 51. Now asserts `min(total, pageSize)`, and two
+consecutive runs were verified green.
+
+**All 26 earlier F24/F26/F27/F28 guard tests were re-run by name and pass** —
+the agent-follow-up routing, the live-session case, chosen-option-wins, the
+AI-reply trap, the first-word alias, the duplicate ask/confirm/deny/escalate
+chain, intake answers, and the Responses API migration.
+
+Counts after F28: db-writer **52**, api-gateway **171**, ai-core **445**,
 dashboard tsc + build clean.
 
 ## Deploying this

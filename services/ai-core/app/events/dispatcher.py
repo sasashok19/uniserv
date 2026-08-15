@@ -159,6 +159,16 @@ async def _handle_channel_message(tenant_id: str, event: dict) -> None:
             logger.info("pleasantry answered without parking traceId=%s channel=%s",
                         trace_id, req.channel)
             return
+        if not stub.get("ask") and req.channel == menu.CHANNEL:
+            # Feature 28: never leave a citizen with nothing.
+            #
+            # Rung 5 deliberately sends no reply on a second unroutable message,
+            # so a citizen answering "I don't have it" is not trapped in an ask
+            # loop. That is right in isolation and wrong as an ending: live, a
+            # citizen said "No it is for a different area" and simply never
+            # heard back. The message is safely in the lead's queue either way —
+            # what is missing is a way forward, and the menu IS the way forward.
+            await _offer_menu_after_dead_end(db, tenant_id, thread_key, req, trace_id)
         logger.info(
             "message parked as unrouted traceId=%s channel=%s escalated=%s asked=%s reason=%s",
             trace_id, req.channel, stub.get("escalated"), bool(stub.get("ask")), stub.get("reason"),
@@ -196,6 +206,36 @@ async def _handle_channel_message(tenant_id: str, event: dict) -> None:
         "processed channel.message.received traceId=%s threadId=%s result=%s",
         trace_id, ConversationAgent._thread_key(req), result,
     )
+
+
+async def _offer_menu_after_dead_end(
+    db: DbWriterClient, tenant_id: str, thread_key: str, req: TestEventRequest,
+    trace_id: str | None,
+) -> None:
+    """Send the main menu when routing has nothing else to say (Feature 28).
+
+    Best-effort throughout: the citizen's message is already stored for a lead,
+    so a failure here costs them a way forward, not their words.
+    """
+    try:
+        tenant_config = await db.get_tenant_config(tenant_id, trace_id=trace_id)
+        content = menu.menu_content.resolve(tenant_config)
+        if not content.get("enabled", True):
+            return
+        message = menu.main_menu_message(content, greet=False)
+        await menu.save_session(
+            tenant_id, thread_key, {"state": menu.STATE_MENU},
+            int(content.get("sessionTtlHours", menu.menu_content.DEFAULT_SESSION_TTL_HOURS)))
+        await deliver_reply({
+            "channel": req.channel,
+            "channelIdentityValue": req.channelIdentity.value,
+            "messageText": message.text,
+            "buttons": message.buttons,
+            "footer": message.footer,
+        }, trace_id=trace_id)
+        logger.info("offered the main menu after a routing dead end traceId=%s", trace_id)
+    except Exception:  # noqa: BLE001 - see the docstring
+        logger.exception("could not offer the menu after a dead end traceId=%s", trace_id)
 
 
 async def _append_menu_hint(tenant_id: str, payload: dict, trace_id: str | None) -> dict:
