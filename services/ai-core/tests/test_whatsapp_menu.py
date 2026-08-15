@@ -385,9 +385,53 @@ def test_a_button_reply_title_selects_its_option(fake_valkey):
     number — see WhatsAppParser. Without this the buttons would be dead."""
     fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"] = json.dumps({"state": "menu"})
 
-    out = _handle(_db(), "Register a new ticket")
+    out = _handle(_db(), "New ticket")
 
     assert "register a new ticket" in out.replies[0].text.lower()
+
+
+def test_a_complaint_that_merely_starts_with_an_alias_is_not_a_menu_key(fake_valkey):
+    """`_match_option` used to try the first word too, so "new water logging
+    problem in my street" was read as option 2 and the complaint was lost."""
+    fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"] = json.dumps({"state": "menu"})
+
+    out = _handle(_db(), "New water logging problem in my street")
+
+    assert "didn't catch that" in out.replies[0].text
+    session = json.loads(fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"])
+    assert session["carryOver"] == "New water logging problem in my street"
+
+
+def test_a_chosen_option_is_never_read_as_an_answer_to_an_agent(fake_valkey):
+    """The live failure: an agent had an unanswered "Is this resolved?" open, so
+    the awaiting-reply check said yes to EVERYTHING — the citizen's "3", then
+    their "New ticket" tap, then the complaint they typed all bypassed the menu
+    and were filed onto the old ticket. They could not get out."""
+    db = _awaiting_db(_outbound(content="Is this resolved?"))
+
+    # At the menu, an option is acted on and the awaiting check is not consulted.
+    for typed, expected in [("3", "Thanks for reaching out"),
+                            ("New ticket", "register a new ticket"),
+                            ("Ticket status", "Ticket ID")]:
+        fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"] = json.dumps({"state": "menu"})
+        db.get_messages.reset_mock()
+
+        out = _handle(db, typed)
+
+        assert out.stop is True, f"{typed!r} must be handled by the menu"
+        assert expected.lower() in out.replies[0].text.lower(), typed
+        db.get_messages.assert_not_awaited()
+
+    # And with no session at all an option still reaches the MENU, never the
+    # ticket — this is the branch that was swallowing "3" into TKT-00014.
+    for typed in ("3", "New ticket", "Ticket status"):
+        await_clear = fake_valkey.store.pop(f"wamenu:{TENANT}:{THREAD}", None)
+        db.get_messages.reset_mock()
+
+        out = _handle(db, typed)
+
+        assert out.stop is True, f"{typed!r} must never reach the routing ladder"
+        db.get_messages.assert_not_awaited()
 
 
 # --- configuration ---------------------------------------------------------

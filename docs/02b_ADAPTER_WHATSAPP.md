@@ -285,6 +285,16 @@ HTTP/1.1 200 OK
     earlier still has a session for up to 12h and their answer matches no
     option. A chosen option still wins over it, and a match clears the session
     so the agent's conversation is not interrupted again next turn.
+  - **A chosen option is never treated as an answer.** The option match runs
+    first in both places. Without that ordering an outstanding agent question
+    made every message from that citizen bypass the menu — including their menu
+    keypresses, which is how a citizen ended up unable to open a new ticket at
+    all (live: "3", then a "New ticket" tap, then their complaint, all filed onto
+    TKT-00014).
+  - **Option 2 suppresses routing rung 2.** Pressing "register a new ticket" is
+    a statement that this is not a reply, so `ensure_ticket_stub` is called with
+    `explicit_new_complaint=True`. Rungs 0/1 and the rung-4 duplicate check are
+    unaffected.
   - `nothing is awaiting this citizen's reply ... rejected=[...]` is logged with
     a per-ticket reason (`citizen-spoke-last`, `outside-reply-window`,
     `intake-question`), alongside a `whatsapp menu inbound ... state=... option=...`

@@ -111,11 +111,13 @@ async def _handle_channel_message(tenant_id: str, event: dict) -> None:
     # by itself — no ticket is created, so this runs BEFORE ensure_ticket_stub.
     # Only option 2's intake falls through to the AI pipeline below, and it
     # arrives with any carried-over first message already merged in.
+    explicit_new_complaint = False
     if req.channel == menu.CHANNEL:
         outcome = await _run_menu(db, tenant_id, thread_key, req, trace_id)
         if outcome.stop:
             return
         req.rawText = outcome.text or req.rawText
+        explicit_new_complaint = outcome.explicit_new_complaint
 
     # Feature 12/15: a ticket exists from the very first message, not only
     # once identity is confirmed — see app/tickets/intake.py. A subject-line
@@ -124,7 +126,8 @@ async def _handle_channel_message(tenant_id: str, event: dict) -> None:
         db, tenant_id, thread_key, req.channel,
         subject=req.subject, raw_text=req.rawText,
         channel_identity_type=req.channelIdentity.type, channel_identity_value=req.channelIdentity.value,
-        origin_message_id=req.messageId, in_reply_to=req.inReplyTo, trace_id=trace_id)
+        origin_message_id=req.messageId, in_reply_to=req.inReplyTo, trace_id=trace_id,
+        explicit_new_complaint=explicit_new_complaint)
     # Feature 24: routing may decline to attribute this message to any ticket
     # AND decline to invent one — a bare "yes" that answers nothing we asked and
     # describes no problem. The message is already stored for a lead to file

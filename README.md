@@ -1844,6 +1844,28 @@ option matching and before the mis-key fallback:
 Mid-flow states (`AWAIT_TICKET_ID`, `AWAIT_NOTE`, `INTAKE`) are untouched: there
 the citizen's text is that flow's input, and `#` is the way out.
 
+**A chosen option is never an answer.** Live failure worth stating in full,
+because it made the menu unusable: an agent had an unanswered "Is this
+resolved?" on TKT-00014, so `awaiting_our_reply` said yes to *everything* from
+that citizen. Their "3", then their tap on "New ticket", then the complaint they
+typed were all bypassed past the menu and filed onto TKT-00014 — they could not
+get out. The option match now runs **first** in both places, so a menu key is
+handled by the menu no matter what is outstanding.
+
+**Choosing "New ticket" suppresses routing rung 2.** Having pressed it, the
+citizen has stated this is not a reply to anything, so `ensure_ticket_stub` is
+called with `explicit_new_complaint=True` and will not resolve the message onto
+an existing ticket via the answers-our-question rung. Rungs 0/1 (an explicit
+swipe-reply or a typed `TKT-XXXXX`) still win — those are the citizen being
+explicit in the other direction — and the duplicate check at rung 4 still runs,
+which is what asks "is this the same power cut?" before creating.
+
+**A menu key is the whole message.** `_match_option` used to also try the first
+word, to catch a button title. Button titles are matched against the tenant's
+configured labels now, and the first-word rule actively misfired: "new water
+logging problem in my street" starts with "new", so a real complaint was read as
+option 2.
+
 ### Tappable buttons instead of "Press 1" (Feature 28)
 
 The menu is sent as a Meta **interactive reply-buttons** message: three tappable

@@ -33,11 +33,28 @@ type Ticket = {
   assigned_to: string | null;
   assigned_to_name: string | null;
   identity_status: string;
+  /** Feature 26: the completion date promised to the citizen. Null until the
+   * first transition sets one; `first_transition_at` distinguishes "never
+   * picked up" from "picked up and the ETA was later cleared". */
+  eta_at: string | null;
+  first_transition_at: string | null;
   created_at: string | null;
   citizen_name: string | null;
   citizen_email: string | null;
   citizen_phone: string | null;
 };
+
+/** An ETA in the past on a ticket nobody has finished. Compared as the plain
+ * `yyyy-MM-dd` prefix both sides, so no timezone can shift the boundary by a
+ * day — these columns are UTC and the agent's browser is not. */
+function isOverdue(t: Ticket): boolean {
+  if (!t.eta_at || t.status === "closed" || t.status === "resolved" || t.status === "cancelled") {
+    return false;
+  }
+  const now = new Date();
+  const today = new Date(now.getTime() - now.getTimezoneOffset() * 60_000).toISOString().slice(0, 10);
+  return t.eta_at.slice(0, 10) < today;
+}
 
 function readCookie(name: string): string {
   const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
@@ -108,6 +125,10 @@ const QUEUE_COLUMNS: { label: string; sortKey: string | null }[] = [
   // complaint text together — the cheapest duplicate spotter there is.
   { label: "Chief complaint", sortKey: "chiefComplaint" },
   { label: "Status", sortKey: "status" },
+  // Feature 26/28: beside Status, because "in progress" and "by when" are read
+  // together. Sortable ("etaAt" is whitelisted in TicketService.SORT_COLUMNS),
+  // which is how a lead finds what is overdue or unpromised.
+  { label: "ETA", sortKey: "etaAt" },
   { label: "Priority", sortKey: "priorityLabel" },
   { label: "Category", sortKey: "category" },
   { label: "Channel", sortKey: "channel" },
@@ -499,6 +520,22 @@ function TicketQueue({ role }: { role: string }) {
                       <span className={BADGE_BASE} style={statusBadgeStyle(t.status)}>
                         {t.status.replace("_", " ")}
                       </span>
+                    </td>
+                    {/* Amber when a ticket that has been worked on still has no
+                        promise against it, and when the promise has passed —
+                        both are things a lead should be able to spot by
+                        scanning rather than by opening every ticket. */}
+                    <td className="whitespace-nowrap p-2">
+                      {t.eta_at ? (
+                        <span className={isOverdue(t) ? "font-medium text-amber-700" : undefined}
+                              title={isOverdue(t) ? "ETA has passed and the ticket is not closed" : undefined}>
+                          {t.eta_at.slice(0, 10)}
+                        </span>
+                      ) : t.first_transition_at ? (
+                        <span className="text-slate-400">—</span>
+                      ) : (
+                        <span className="text-amber-700" title="No ETA set yet">not set</span>
+                      )}
                     </td>
                     <td className="p-2">
                       {t.priority_label ? (

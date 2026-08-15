@@ -755,6 +755,23 @@ otherwise.
 - The date input's `min` is today in the browser's timezone; the server
   independently rejects past dates.
 
+### The queue's ETA column
+
+Next to Status, because "in progress" and "by when" are read together. Sortable
+(`etaAt` is whitelisted in `TicketService.SORT_COLUMNS`), which is how a lead
+finds what is overdue or unpromised without opening tickets one at a time.
+
+Three states, and the amber ones are the point:
+- a date, plain, when the promise is still ahead;
+- the same date in **amber** when it has passed and the ticket is not
+  resolved/closed/cancelled;
+- **"not set" in amber** when the ticket has never been transitioned, versus a
+  grey em dash when it was picked up and the ETA was later cleared —
+  `first_transition_at` is what tells those two apart.
+
+Overdue is compared on the `yyyy-MM-dd` prefix of both sides, so no timezone can
+move the boundary by a day: the column is UTC and the agent's browser is not.
+
 ## Administration - WhatsApp Menu (Feature 26)
 
 A seventh admin sub-tab (`WhatsAppMenuPanel.tsx`) editing every string a citizen

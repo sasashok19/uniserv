@@ -320,7 +320,32 @@ Note on the gateway log: three consecutive `WhatsApp webhook processed,
 published=0` right after an outbound send are Meta's sent/delivered/read status
 callbacks, which carry no `messages` array. Normal, not a dropped message.
 
-Counts after F28: db-writer **52**, api-gateway **171**, ai-core **430**,
+### F28 follow-up 2: the awaiting check swallowed menu keypresses
+
+Reported as "I selected New ticket and it filed my water-logging complaint onto
+TKT-00014". Three compounding bugs, one root:
+
+1. **A chosen option was tested as an answer.** In the no-session branch
+   `awaiting_our_reply` ran BEFORE the option match. An agent had an unanswered
+   "Is this resolved?" on TKT-00014, so it returned True for everything from
+   that citizen — their "3", their "New ticket" tap, and then the complaint they
+   typed all bypassed the menu into the routing ladder. They could not escape.
+   (`_at_menu` already had the order right; the no-session branch did not.)
+2. **`_match_option` matched the FIRST WORD.** "new water logging problem..."
+   starts with "new" -> option 2. The first-word rule existed for button titles,
+   which are matched against the configured labels now, so it is gone: a menu key
+   is the whole message or it is not a menu key.
+3. **Rung 2 hijacked an explicitly-new complaint.** Even reaching intake
+   properly, `assess_inbound` matched the outstanding "Is this resolved?" and
+   filed the new complaint on the old ticket. `MenuOutcome.explicit_new_complaint`
+   now flows to `ensure_ticket_stub(explicit_new_complaint=True)`, which skips
+   rung 2 only. Rungs 0/1 and the rung-4 duplicate check are untouched.
+
+Also: ETA column added to the ticket queue (sortable, amber when overdue or
+never set — `first_transition_at` distinguishes "never picked up" from
+"cleared").
+
+Counts after F28: db-writer **52**, api-gateway **171**, ai-core **432**,
 dashboard tsc + build clean.
 
 ## Deploying this

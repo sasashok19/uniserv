@@ -438,7 +438,7 @@ async def ensure_ticket_stub(
     subject: Optional[str] = None, raw_text: Optional[str] = None,
     channel_identity_type: Optional[str] = None, channel_identity_value: Optional[str] = None,
     origin_message_id: Optional[str] = None, in_reply_to: Optional[str] = None,
-    trace_id: Optional[str] = None,
+    trace_id: Optional[str] = None, explicit_new_complaint: bool = False,
 ) -> dict:
     """Find the ticket this message belongs to, create a stub, or decline to do
     either (Feature 24).
@@ -572,11 +572,21 @@ async def ensure_ticket_stub(
             db, tenant_id, thread_key, channel, dialogues, clean_text, raw_text,
             channel_identity_value, origin_message_id, in_reply_to, window_cutoff, trace_id)
 
-    if intent["index"] is not None:
+    if intent["index"] is not None and not explicit_new_complaint:
         answered = questions[intent["index"]]["ticket"]
         logger.info("ticket resolved as an answer to our own question traceId=%s ticketId=%s status=%s "
                     "reason=%s", trace_id, answered["id"], answered.get("status"), intent["reason"])
         return await _resolved(db, answered, trace_id, "answer-to-our-question")
+    if intent["index"] is not None:
+        # The citizen pressed "register a new ticket" and then described it, so
+        # they have already told us this is not a reply. Rung 2 guesses; they
+        # stated. An outstanding agent question on an older ticket must not
+        # swallow a brand-new complaint (live failure: a water-logging report
+        # filed onto a voltage-fluctuation ticket that had an open
+        # "Is this resolved?" against it).
+        logger.info("rung 2 matched ticketId=%s but the citizen explicitly chose a NEW ticket "
+                    "traceId=%s — ignoring the match",
+                    questions[intent["index"]]["ticket"]["id"], trace_id)
 
     # --- Rung 3: an intake answer, to a stub that actually asked one -------
     intake_stub = _in_intake_stub(dialogues, clean_text, window_cutoff)

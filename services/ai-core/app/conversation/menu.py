@@ -111,6 +111,10 @@ class MenuOutcome:
     replies: list[MenuMessage] = field(default_factory=list)
     stop: bool = True
     text: Optional[str] = None
+    #: The citizen pressed "register a new ticket" and is now describing it.
+    #: Routing must not quietly file that onto an existing ticket — see
+    #: ``ensure_ticket_stub(explicit_new_complaint=...)``.
+    explicit_new_complaint: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -329,8 +333,15 @@ async def handle_inbound(
         # Checked here rather than by weakening strict mode: the menu still owns
         # every message that starts a conversation, and this owns the ones that
         # continue one we started.
-        if await awaiting_our_reply(db, tenant_id, identity_value, in_reply_to,
-                                    tenant_config, trace_id):
+        #
+        # A CHOSEN OPTION IS NEVER AN ANSWER. Live failure: an agent had an
+        # unanswered "Is this resolved?" on TKT-00014, so this check said yes to
+        # everything — the citizen's "3", then their button tap on "New ticket",
+        # then the complaint details they typed all bypassed the menu and were
+        # filed onto TKT-00014. They could not get out. `_at_menu` had the order
+        # right; this branch did not.
+        if _match_option(text, content) is None and await awaiting_our_reply(
+                db, tenant_id, identity_value, in_reply_to, tenant_config, trace_id):
             logger.info("inbound answers a question we asked traceId=%s — skipping the menu",
                         trace_id)
             return MenuOutcome(replies=[], stop=False, text=raw_text)
@@ -480,10 +491,12 @@ def _match_option(text: str, content: Optional[dict] = None) -> Optional[str]:
             if label and normalised == label[:BUTTON_TITLE_MAX]:
                 return option
 
-    if normalised in _OPTION_ALIASES:
-        return _OPTION_ALIASES[normalised]
-    first = normalised.split()[0].strip(".,)") if normalised.split() else ""
-    return _OPTION_ALIASES.get(first)
+    # Whole-message match only. This used to also try the first word, to catch a
+    # button title — but button titles are matched against the configured labels
+    # above now, and the first-word rule actively misfired: "new water logging
+    # problem in my street" starts with "new", so a real complaint was read as
+    # "option 2". A menu key is the entire message or it is not a menu key.
+    return _OPTION_ALIASES.get(normalised)
 
 
 async def _at_menu(
@@ -710,7 +723,11 @@ async def _in_intake(
     if carry_over:
         await save_session(tenant_id, thread_key, session, ttl)
     merged = f"{carry_over}\n{text}" if carry_over and text else (carry_over or text)
-    return MenuOutcome(replies=[], stop=False, text=merged)
+    # They chose "register a new ticket" to get here, which is a statement that
+    # this is NOT a reply to anything. Live failure: an agent had an outstanding
+    # "Is this resolved?" on TKT-00014, and the citizen's brand-new water-logging
+    # complaint was read as the answer to it and filed there.
+    return MenuOutcome(replies=[], stop=False, text=merged, explicit_new_complaint=True)
 
 
 # ---------------------------------------------------------------------------
