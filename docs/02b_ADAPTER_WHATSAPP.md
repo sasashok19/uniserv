@@ -285,6 +285,11 @@ HTTP/1.1 200 OK
     earlier still has a session for up to 12h and their answer matches no
     option. A chosen option still wins over it, and a match clears the session
     so the agent's conversation is not interrupted again next turn.
+  - **Only a human agent's message counts as "awaiting".** Accepting any
+    outbound trapped citizens behind the assistant's own replies — every later
+    message bypassed the menu into the routing ladder, which parked it as
+    unrouted and then went silent. `author_type` must be `agent`; `ai` and
+    `system` are not questions we are waiting on.
   - **A chosen option is never treated as an answer.** The option match runs
     first in both places. Without that ordering an outstanding agent question
     made every message from that citizen bypass the menu — including their menu

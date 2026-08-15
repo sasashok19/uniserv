@@ -429,6 +429,19 @@ async def awaiting_our_reply(
         if last.get("direction") != "outbound":
             rejected.append(f"{number}:citizen-spoke-last")
             continue
+        # It must be a HUMAN who spoke last, not us.
+        #
+        # This originally accepted any outbound message, which trapped citizens:
+        # the citizen answers the agent, the assistant replies, and now the
+        # assistant's own reply is the last outbound — so every later message
+        # was still "an answer", bypassed the menu, and fell through the routing
+        # ladder to "we couldn't tell which complaint this is about", then to
+        # silence once the ask had been escalated. Only `#` got them out.
+        # An agent asking a question is a state we are waiting on; the
+        # assistant having said something is not.
+        if last.get("author_type") != "agent":
+            rejected.append(f"{number}:last-outbound-was-{last.get('author_type') or 'unknown'}")
+            continue
         if (last.get("created_at") or "") < cutoff:
             rejected.append(f"{number}:outside-reply-window")
             continue

@@ -508,9 +508,9 @@ def _awaiting_db(last_message, ticket_id="t-1"):
     return db
 
 
-def _outbound(created_at="2999-01-01 00:00:00", **extra):
+def _outbound(created_at="2999-01-01 00:00:00", author_type="agent", **extra):
     msg = {"direction": "outbound", "content": "Which street is this on?",
-           "created_at": created_at}
+           "author_type": author_type, "created_at": created_at}
     msg.update(extra)
     return msg
 
@@ -712,3 +712,45 @@ def test_a_mis_key_with_nothing_awaiting_still_re_shows_the_menu(fake_valkey):
 
     assert out.stop is True
     assert "didn't catch that" in out.replies[0].text
+
+
+def test_our_own_ai_reply_does_not_keep_the_citizen_trapped(fake_valkey):
+    """The reported trap.
+
+    The citizen answers an agent, the assistant replies — and because that
+    reply is also an outbound message, every LATER message was still counted as
+    "an answer". So "Hi" bypassed the menu, fell through the routing ladder to
+    "we couldn't tell which complaint this is about", and the second "Hi" got
+    silence (the ask had already escalated). Only `#` got them out.
+
+    An agent asking a question is a state we are waiting on. Us having spoken
+    is not.
+    """
+    db = _awaiting_db(_outbound(author_type="ai",
+                                content="Thank you for your response!"))
+
+    out = _handle(db, "Hi")
+
+    assert out.stop is True, "the menu must take this, not the routing ladder"
+    assert _is_main_menu(out.replies[0])
+
+
+def test_a_system_notification_does_not_count_as_awaiting_either(fake_valkey):
+    """Status-update notifications are outbound but ask nothing."""
+    db = _awaiting_db(_outbound(author_type="system",
+                                content="Your ticket has been resolved."))
+
+    out = _handle(db, "ok thanks")
+
+    assert out.stop is True
+    assert _is_main_menu(out.replies[0])
+
+
+def test_an_agents_question_still_counts(fake_valkey):
+    """The case the whole check exists for must keep working."""
+    db = _awaiting_db(_outbound(author_type="agent", content="Is this resolved?"))
+
+    out = _handle(db, "Yes it is")
+
+    assert out.stop is False
+    assert out.text == "Yes it is"

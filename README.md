@@ -1810,8 +1810,19 @@ waiting on them, cheapest signal first:
 
 1. **They swipe-replied to a message we sent** — Meta gives us its wamid as
    `context.id`, and if it matches a message we recorded this is unambiguous.
-2. **The newest message on one of their tickets is an outbound from us**, inside
-   the reply window. That is what an unanswered agent follow-up looks like.
+2. **The newest message on one of their tickets is an outbound from a human
+   AGENT**, inside the reply window. That is what an unanswered agent follow-up
+   looks like.
+
+   The author check is load-bearing, not a detail. It originally accepted any
+   outbound message, which trapped people: the citizen answers the agent, the
+   assistant replies, and now the assistant's *own* reply is the last outbound —
+   so every later message still counted as "an answer", bypassed the menu, fell
+   through the routing ladder to "we couldn't tell which complaint this is
+   about", and then to silence once that ask had escalated. Only `#` got them
+   out. An agent asking a question is a state we are waiting on; us having
+   spoken is not. System notifications (`author_type: "system"`) are excluded for
+   the same reason — they ask nothing.
 
 Either one skips the menu and hands the message to the routing ladder, which
 already knows how to land it on the right ticket. A genuine first contact owns no

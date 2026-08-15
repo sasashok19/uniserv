@@ -345,7 +345,24 @@ Also: ETA column added to the ticket queue (sortable, amber when overdue or
 never set — `first_transition_at` distinguishes "never picked up" from
 "cleared").
 
-Counts after F28: db-writer **52**, api-gateway **171**, ai-core **432**,
+### F28 follow-up 3: our own AI reply kept the citizen "awaiting" forever
+
+Reported: agent message -> citizen replies (works, AI answers) -> "Hi" gets
+"we couldn't tell which complaint this is about" -> second "Hi" gets NOTHING ->
+"#" finally returns the menu.
+
+`awaiting_our_reply` accepted ANY outbound message as "we are waiting on them".
+The assistant's reply to the citizen is outbound, so from that moment every
+message from that number bypassed the menu into the routing ladder: rung 2 said
+"not an answer", rung 4 said "not a complaint", rung 5 parked it and asked which
+complaint — and the second time, escalated with no reply at all. `#` was the only
+way out because it is handled above everything.
+
+Now `author_type` must be **`agent`**. `ai` and `system` are excluded: an agent
+asking a question is a state we are waiting on, us having spoken is not. The
+rejection reason is logged as `last-outbound-was-ai` / `-system`.
+
+Counts after F28: db-writer **52**, api-gateway **171**, ai-core **435**,
 dashboard tsc + build clean.
 
 ## Deploying this
