@@ -54,23 +54,67 @@ def _handle(db, text, tenant_config=None, thread=THREAD):
         tenant_config=tenant_config if tenant_config is not None else {}))
 
 
+def _is_main_menu(message):
+    """The menu is the menu whether it arrives as buttons or as "Press 1"."""
+    if message.buttons:
+        return len(message.buttons) == 3
+    return all(x in message.text for x in ("Press 1", "Press 2", "Press 3"))
+
+
+def _button_titles(message):
+    return [b["title"] for b in (message.buttons or [])]
+
+
 # --- first contact ---------------------------------------------------------
 
 def test_the_ai_speaks_first_with_the_company_name_and_the_three_options(fake_valkey):
     out = _handle(_db(), "hi", {"landingPage": {"brandName": "TNEB"}})
 
     assert out.stop is True
-    text = out.replies[0]
-    assert "Welcome to TNEB" in text
-    assert "Press 1" in text and "Press 2" in text and "Press 3" in text
-    assert "#" in text
+    message = out.replies[0]
+    assert "Welcome to TNEB" in message.text
+    # Feature 28: the three options are tappable buttons, not "press 1" text.
+    assert _button_titles(message) == ["Ticket status", "New ticket", "End chat"]
+    assert [b["id"] for b in message.buttons] == ["menu_1", "menu_2", "menu_3"]
+    # The # escape moves to the footer, where WhatsApp renders it under the buttons.
+    assert "#" in (message.footer or "")
     assert json.loads(fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"])["state"] == "menu"
+
+
+def test_the_options_fall_back_to_numbered_text_when_buttons_are_off(fake_valkey):
+    """A tenant can opt out, and then the body must carry the options itself."""
+    out = _handle(_db(), "hi", {"whatsappMenu": {"useInteractiveButtons": False}})
+
+    message = out.replies[0]
+    assert message.buttons is None
+    assert all(x in message.text for x in ("Press 1", "Press 2", "Press 3"))
+    assert "#" in message.text
+
+
+def test_button_titles_stay_within_metas_twenty_character_cap(fake_valkey):
+    """Meta rejects the whole send if a title is too long, so the citizen would
+    get nothing at all — clamped on the way out as well as on save."""
+    out = _handle(_db(), "hi", {"whatsappMenu": {
+        "option1Label": "Check the status of an existing ticket please"}})
+
+    assert all(len(t) <= menu.BUTTON_TITLE_MAX for t in _button_titles(out.replies[0]))
+
+
+def test_a_tapped_button_is_matched_by_its_configured_label(fake_valkey):
+    """Meta delivers a tap as the button's TITLE, and titles are tenant-
+    configurable — so matching cannot rely on a fixed English word list."""
+    config = {"whatsappMenu": {"option2Label": "Pukaar darj karein"}}
+    fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"] = json.dumps({"state": "menu"})
+
+    out = _handle(_db(), "Pukaar darj karein", config)
+
+    assert "register a new ticket" in out.replies[0].text.lower()
 
 
 def test_the_company_name_is_configurable_independently_of_the_brand(fake_valkey):
     out = _handle(_db(), "hi", {"landingPage": {"brandName": "TNEB"},
                                 "whatsappMenu": {"companyName": "TNEB Customer Care"}})
-    assert "Welcome to TNEB Customer Care" in out.replies[0]
+    assert "Welcome to TNEB Customer Care" in out.replies[0].text
 
 
 def test_a_first_message_that_is_a_complaint_is_kept_not_discarded(fake_valkey):
@@ -94,16 +138,16 @@ def test_option_three_says_goodbye_and_ends_the_session(fake_valkey):
 
     out = _handle(_db(), "3")
 
-    assert out.replies == ["Thanks for reaching out. Have a great time"]
+    assert [m.text for m in out.replies] == ["Thanks for reaching out. Have a great time"]
     assert f"wamenu:{TENANT}:{THREAD}" not in fake_valkey.store
     # No "press # for the menu" here: the conversation is over, and offering a
     # way back into a menu we just closed contradicts the goodbye.
-    assert "#" not in out.replies[0]
+    assert "#" not in out.replies[0].text
 
 
 def test_a_message_after_the_chat_ended_re_opens_the_main_menu(fake_valkey):
     out = _handle(_db(), "hello again")
-    assert "Press 1" in out.replies[0]
+    assert _is_main_menu(out.replies[0])
 
 
 # --- option 1: status, ETA, last updated -----------------------------------
@@ -113,7 +157,7 @@ def test_option_one_asks_for_the_ticket_id(fake_valkey):
 
     out = _handle(_db(), "1")
 
-    assert "Ticket ID" in out.replies[0]
+    assert "Ticket ID" in out.replies[0].text
     assert json.loads(fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"])["state"] == "await_ticket_id"
 
 
@@ -123,7 +167,7 @@ def test_a_ticket_id_returns_that_one_ticket_with_status_eta_and_last_updated(fa
 
     out = _handle(db, "TKT-00042")
 
-    text = out.replies[0]
+    text = out.replies[0].text
     assert "TKT-00042" in text
     assert "Work in progress" in text
     assert "18 Aug 2026" in text      # the ETA
@@ -137,7 +181,7 @@ def test_only_that_one_ticket_is_reported_not_the_citizens_whole_list(fake_valke
 
     out = _handle(db, "TKT-00042")
 
-    assert "TKT-00043" not in out.replies[0]
+    assert "TKT-00043" not in out.replies[0].text
     # The lookup is BY NUMBER, not "list everything this identity owns".
     assert db.list_tickets.await_args.kwargs["ticketNumber"] == "TKT-00042"
 
@@ -161,8 +205,8 @@ def test_a_ticket_belonging_to_someone_else_is_reported_as_not_found(fake_valkey
 
     out = _handle(db, "TKT-00042")
 
-    assert "couldn't find" in out.replies[0]
-    assert "TKT-00042" not in out.replies[0].replace("TKT-00042)", "")
+    assert "couldn't find" in out.replies[0].text
+    assert "TKT-00042" not in out.replies[0].text.replace("TKT-00042)", "")
     assert json.loads(fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"])["state"] == "await_ticket_id"
 
 
@@ -172,7 +216,7 @@ def test_an_unknown_ticket_id_re_asks_rather_than_dropping_the_citizen(fake_valk
 
     out = _handle(db, "TKT-99999")
 
-    assert "couldn't find" in out.replies[0]
+    assert "couldn't find" in out.replies[0].text
     assert json.loads(fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"])["state"] == "await_ticket_id"
 
 
@@ -182,7 +226,7 @@ def test_a_ticket_with_no_eta_says_so_rather_than_showing_a_blank(fake_valkey):
 
     out = _handle(db, "TKT-00042")
 
-    assert "not set yet" in out.replies[0]
+    assert "not set yet" in out.replies[0].text
 
 
 def test_a_status_enquiry_never_creates_a_ticket(fake_valkey):
@@ -203,7 +247,7 @@ def test_the_details_message_invites_a_note(fake_valkey):
 
     out = _handle(db, "TKT-00042")
 
-    assert "add" in out.replies[0].lower()
+    assert "add" in out.replies[0].text.lower()
     assert json.loads(fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"])["state"] == "await_note"
 
 
@@ -220,9 +264,9 @@ def test_a_note_lands_on_the_ticket_and_ends_the_conversation(fake_valkey):
     # Findable as a citizen-initiated addition, not just another inbound line.
     assert db.add_event.await_args.args[1]["eventType"] == "ticket.citizen_note"
 
-    assert "TKT-00042" in out.replies[0]
-    assert "team will revert" in out.replies[0]
-    assert "main menu will open again" in out.replies[1]
+    assert "TKT-00042" in out.replies[0].text
+    assert "team will revert" in out.replies[0].text
+    assert "main menu will open again" in out.replies[1].text
     assert f"wamenu:{TENANT}:{THREAD}" not in fake_valkey.store
 
 
@@ -236,7 +280,7 @@ def test_a_note_that_could_not_be_saved_is_never_acknowledged(fake_valkey):
 
     out = _handle(db, "still broken")
 
-    assert "team will revert" not in out.replies[0]
+    assert "team will revert" not in out.replies[0].text
     assert f"wamenu:{TENANT}:{THREAD}" in fake_valkey.store, "the citizen may retry"
 
 
@@ -247,9 +291,9 @@ def test_option_two_lists_the_details_needed_and_hands_off_to_intake(fake_valkey
 
     out = _handle(_db(), "2")
 
-    assert "register a new ticket" in out.replies[0].lower()
+    assert "register a new ticket" in out.replies[0].text.lower()
     # The tenant's configured intake form, not a hardcoded list.
-    assert "1." in out.replies[0]
+    assert "1." in out.replies[0].text
     assert json.loads(fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"])["state"] == "intake"
 
 
@@ -258,7 +302,7 @@ def test_option_two_does_not_ask_for_the_phone_number_whatsapp_already_gave_us(f
 
     out = _handle(_db(), "2")
 
-    assert "Mobile" not in out.replies[0], "asking for a number we already have looks careless"
+    assert "Mobile" not in out.replies[0].text, "asking for a number we already have looks careless"
 
 
 def test_intake_messages_pass_through_to_the_ai_pipeline(fake_valkey):
@@ -289,9 +333,9 @@ def test_registration_closes_the_conversation_with_the_ticket_details(fake_valke
 
     replies = _run(menu.finish_registration(db, TENANT, THREAD, "t-1", "TKT-00042", {}))
 
-    assert "TKT-00042" in replies[0]
-    assert "registered" in replies[0].lower()
-    assert "main menu will open again" in replies[1]
+    assert "TKT-00042" in replies[0].text
+    assert "registered" in replies[0].text.lower()
+    assert "main menu will open again" in replies[1].text
     assert f"wamenu:{TENANT}:{THREAD}" not in fake_valkey.store
 
 
@@ -308,7 +352,7 @@ def test_hash_returns_to_the_main_menu_from_every_state(fake_valkey):
 
         out = _handle(_db(), "#")
 
-        assert "Press 1" in out.replies[0], f"# must work from {state}"
+        assert _is_main_menu(out.replies[0]), f"# must work from {state}"
         assert json.loads(fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"])["state"] == "menu"
 
 
@@ -317,7 +361,7 @@ def test_hash_mid_conversation_does_not_greet_again(fake_valkey):
 
     out = _handle(_db(), "#")
 
-    assert "Welcome" not in out.replies[0]
+    assert "Welcome" not in out.replies[0].text
 
 
 def test_an_unrecognised_menu_key_re_shows_the_options(fake_valkey):
@@ -325,15 +369,15 @@ def test_an_unrecognised_menu_key_re_shows_the_options(fake_valkey):
 
     out = _handle(_db(), "9")
 
-    assert "didn't catch that" in out.replies[0]
-    assert "Press 1" in out.replies[0]
+    assert "didn't catch that" in out.replies[0].text
+    assert _is_main_menu(out.replies[0]), "the options must come back with the apology"
 
 
 def test_option_keys_tolerate_how_people_actually_type(fake_valkey):
     for typed in ("1", "1.", "1)", " 1 ", "one", "Status"):
         fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"] = json.dumps({"state": "menu"})
         out = _handle(_db(), typed)
-        assert "Ticket ID" in out.replies[0], f"{typed!r} should select option 1"
+        assert "Ticket ID" in out.replies[0].text, f"{typed!r} should select option 1"
 
 
 def test_a_button_reply_title_selects_its_option(fake_valkey):
@@ -343,7 +387,7 @@ def test_a_button_reply_title_selects_its_option(fake_valkey):
 
     out = _handle(_db(), "Register a new ticket")
 
-    assert "register a new ticket" in out.replies[0].lower()
+    assert "register a new ticket" in out.replies[0].text.lower()
 
 
 # --- configuration ---------------------------------------------------------
@@ -360,7 +404,7 @@ def test_tenant_copy_overrides_the_defaults(fake_valkey):
     out = _handle(_db(), "hi", {"whatsappMenu": {
         "welcome": "Vanakkam! {company} here.", "companyName": "TNEB"}})
 
-    assert "Vanakkam! TNEB here." in out.replies[0]
+    assert "Vanakkam! TNEB here." in out.replies[0].text
 
 
 def test_a_blank_configured_string_falls_back_to_the_default(fake_valkey):
@@ -368,7 +412,7 @@ def test_a_blank_configured_string_falls_back_to_the_default(fake_valkey):
     the citizen an empty WhatsApp message."""
     out = _handle(_db(), "hi", {"whatsappMenu": {"welcome": "   "}})
 
-    assert "Welcome to" in out.replies[0]
+    assert "Welcome to" in out.replies[0].text
 
 
 def test_a_template_with_a_stray_brace_does_not_break_the_reply(fake_valkey):
@@ -376,7 +420,7 @@ def test_a_template_with_a_stray_brace_does_not_break_the_reply(fake_valkey):
     receiving no reply at all — which is what str.format would do here."""
     out = _handle(_db(), "hi", {"whatsappMenu": {"welcome": "Hello from {company} {oops"}})
 
-    assert "Hello from UniServe {oops" in out.replies[0]
+    assert "Hello from UniServe {oops" in out.replies[0].text
 
 
 def test_the_session_ttl_is_applied_and_capped(fake_valkey):
@@ -393,7 +437,7 @@ def test_an_unknown_stored_state_restarts_rather_than_guessing(fake_valkey):
 
     out = _handle(_db(), "hello")
 
-    assert "Press 1" in out.replies[0]
+    assert _is_main_menu(out.replies[0])
 
 
 def test_a_valkey_outage_degrades_to_the_welcome_menu_not_a_wrong_flow(fake_valkey):
@@ -402,4 +446,167 @@ def test_a_valkey_outage_degrades_to_the_welcome_menu_not_a_wrong_flow(fake_valk
     with patch.object(type(fake_valkey), "get", AsyncMock(side_effect=RuntimeError("down"))):
         out = _handle(_db(), "TKT-00042")
 
-    assert "Press 1" in out.replies[0]
+    assert _is_main_menu(out.replies[0])
+
+
+# --- Feature 28: a citizen ANSWERING us is not a citizen INITIATING a chat ---
+#
+# The reported bug: an agent sends a follow-up from the ticket screen, the
+# citizen replies on WhatsApp, and the reply got the welcome menu instead of
+# landing on the ticket — so the agent never saw the answer.
+
+def _awaiting_db(last_message, ticket_id="t-1"):
+    db = _db()
+    db.list_tickets = AsyncMock(return_value=[{"id": ticket_id, "ticket_number": "TKT-00042"}])
+    db.find_by_phone = AsyncMock(return_value={"master_id": "master-1"})
+    db.get_messages = AsyncMock(return_value=[last_message] if last_message else [])
+    db.find_message_by_channel_id = AsyncMock(return_value=None)
+    return db
+
+
+def _outbound(created_at="2999-01-01 00:00:00", **extra):
+    msg = {"direction": "outbound", "content": "Which street is this on?",
+           "created_at": created_at}
+    msg.update(extra)
+    return msg
+
+
+def test_a_reply_to_an_agents_follow_up_skips_the_menu(fake_valkey):
+    db = _awaiting_db(_outbound())
+
+    out = _run(menu.handle_inbound(db, TENANT, THREAD, "It's on 2nd Street",
+                                   identity_value=PHONE, tenant_config={}))
+
+    assert out.stop is False, "the answer must reach the routing ladder, not the menu"
+    assert out.replies == []
+    assert out.text == "It's on 2nd Street"
+    assert f"wamenu:{TENANT}:{THREAD}" not in fake_valkey.store
+
+
+def test_a_swipe_reply_to_one_of_our_messages_skips_the_menu(fake_valkey):
+    """The exact, interpretation-free signal: Meta hands us the wamid of the
+    message they replied to."""
+    db = _awaiting_db(None)
+    db.find_message_by_channel_id = AsyncMock(return_value={"id": "m-9", "ticket_id": "t-1"})
+
+    out = _run(menu.handle_inbound(db, TENANT, THREAD, "Yes it is", identity_value=PHONE,
+                                   tenant_config={}, in_reply_to="wamid.OURS"))
+
+    assert out.stop is False
+    assert out.text == "Yes it is"
+
+
+def test_a_genuine_first_contact_still_gets_the_menu(fake_valkey):
+    """The citizen owns no tickets, so nothing is awaiting their reply."""
+    db = _awaiting_db(None)
+    db.list_tickets = AsyncMock(return_value=[])
+
+    out = _handle(db, "hi")
+
+    assert out.stop is True
+    assert _is_main_menu(out.replies[0])
+    # And it cost one indexed query, with no message fetches.
+    db.get_messages.assert_not_awaited()
+
+
+def test_a_ticket_where_the_citizen_spoke_last_does_not_suppress_the_menu(fake_valkey):
+    """We are not waiting on them — they are waiting on us. A new message from
+    them is a new conversation, and the menu is how it starts."""
+    db = _awaiting_db({"direction": "inbound", "content": "any update?",
+                       "created_at": "2999-01-01 00:00:00"})
+
+    out = _handle(db, "hello")
+
+    assert out.stop is True
+    assert _is_main_menu(out.replies[0])
+
+
+def test_a_stale_outbound_message_does_not_suppress_the_menu(fake_valkey):
+    """Outside the reply window the exchange is over; a message weeks later is
+    a fresh conversation."""
+    db = _awaiting_db(_outbound(created_at="2000-01-01 00:00:00"))
+
+    out = _handle(db, "hello")
+
+    assert out.stop is True
+    assert _is_main_menu(out.replies[0])
+
+
+def test_an_unanswered_intake_question_does_not_suppress_the_menu(fake_valkey):
+    """An intake request belongs to option 2's own flow, which carries its own
+    session. Reaching here means that session is gone, so the form is over."""
+    db = _awaiting_db(_outbound(is_intake_request=1))
+
+    out = _handle(db, "Nithya")
+
+    assert out.stop is True
+    assert _is_main_menu(out.replies[0])
+
+
+def test_an_active_menu_session_still_wins_over_the_awaiting_check(fake_valkey):
+    """Mid-flow the session is authoritative — a citizen who pressed 1 and is
+    typing a ticket number must not be diverted because a ticket also happens
+    to be awaiting them."""
+    fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"] = json.dumps({"state": "await_ticket_id"})
+    db = _awaiting_db(_outbound())
+    db.get_ticket = AsyncMock(return_value=_ticket())
+    db.list_tickets = AsyncMock(return_value=[_ticket()])
+
+    out = _handle(db, "TKT-00042")
+
+    assert out.stop is True
+    assert "TKT-00042" in out.replies[0].text
+
+
+def test_the_hash_escape_still_wins_over_the_awaiting_check(fake_valkey):
+    db = _awaiting_db(_outbound())
+
+    out = _handle(db, "#")
+
+    assert out.stop is True
+    assert _is_main_menu(out.replies[0])
+
+
+def test_a_lookup_failure_falls_back_to_the_menu_rather_than_erroring(fake_valkey):
+    db = _awaiting_db(_outbound())
+    db.list_tickets = AsyncMock(side_effect=RuntimeError("db down"))
+
+    out = _handle(db, "hello")
+
+    assert out.stop is True
+    assert _is_main_menu(out.replies[0])
+
+
+# --- the chief complaint in the reply --------------------------------------
+
+def test_the_reply_names_what_the_complaint_was_about(fake_valkey):
+    """A status alone means nothing to a citizen holding three open tickets."""
+    fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"] = json.dumps({"state": "await_ticket_id"})
+    db = _db(ticket=_ticket(chief_complaint="Power cut in Madambakkam since yesterday"),
+             identity={"master_id": "master-1"})
+
+    out = _handle(db, "TKT-00042")
+
+    assert "Power cut in Madambakkam since yesterday" in out.replies[0].text
+
+
+def test_a_ticket_with_no_chief_complaint_says_so_rather_than_a_bare_label(fake_valkey):
+    """A stub still mid-intake, or a ticket predating Feature 23, has none —
+    and "Complaint:" with nothing after it reads as a bug."""
+    fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"] = json.dumps({"state": "await_ticket_id"})
+    db = _db(ticket=_ticket(chief_complaint=None), identity={"master_id": "master-1"})
+
+    out = _handle(db, "TKT-00042")
+
+    assert "not summarised yet" in out.replies[0].text
+    assert "Complaint:\n" not in out.replies[0].text
+
+
+def test_the_registration_confirmation_also_names_the_complaint(fake_valkey):
+    fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"] = json.dumps({"state": "intake"})
+    db = _db(ticket=_ticket(status="open", eta_at=None,
+                            chief_complaint="No water supply in Velachery"))
+
+    replies = _run(menu.finish_registration(db, TENANT, THREAD, "t-1", "TKT-00042", {}))
+
+    assert "No water supply in Velachery" in replies[0].text

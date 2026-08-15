@@ -278,6 +278,64 @@ class WhatsAppMenuResourceTest {
         verify(db, never()).updateTenantConfig(anyString(), anyString());
     }
 
+    // --- Feature 28: interactive reply buttons --------------------------
+
+    @Test
+    void theThreeOptionsHaveShortDefaultButtonLabels() {
+        tenantConfig(null);
+
+        Map<String, Object> content = content(resource.get());
+
+        assertEquals(Boolean.TRUE, content.get("useInteractiveButtons"));
+        for (String key : new String[]{"option1Label", "option2Label", "option3Label"}) {
+            String label = String.valueOf(content.get(key));
+            assertFalse(label.isBlank(), key + " must have a default");
+            assertTrue(label.length() <= WhatsAppMenuContent.MAX_BUTTON_LABEL,
+                    key + " must fit WhatsApp's button cap");
+        }
+    }
+
+    @Test
+    void anOverlongButtonLabelIsRejectedRatherThanBreakingEverySend() {
+        // Meta refuses the whole message if a title is too long, so the citizen
+        // would get no menu at all. The admin is the only one who can pick a
+        // shorter wording that still reads well.
+        tenantConfig("{}");
+        Map<String, Object> body = validBody();
+        body.put("option1Label", "Check the status of an existing ticket");
+
+        Response response = resource.update(body);
+
+        assertEquals(422, response.getStatus());
+        assertTrue(String.valueOf(response.getEntity()).contains("20"));
+        verify(db, never()).updateTenantConfig(anyString(), anyString());
+    }
+
+    @Test
+    void anOverlongLabelThatBypassedTheGatewayIsClampedOnRead() {
+        tenantConfig("{\"whatsappMenu\":{\"option1Label\":\"Check the status of an existing ticket\"}}");
+
+        String label = String.valueOf(content(resource.get()).get("option1Label"));
+
+        assertEquals(WhatsAppMenuContent.MAX_BUTTON_LABEL, label.length());
+    }
+
+    @Test
+    void interactiveButtonsCanBeSwitchedOffPerTenant() {
+        tenantConfig("{\"whatsappMenu\":{\"useInteractiveButtons\":false}}");
+
+        assertEquals(Boolean.FALSE, content(resource.get()).get("useInteractiveButtons"));
+    }
+
+    @Test
+    void theTicketDetailsTemplateOffersTheChiefComplaint() {
+        // A status alone means nothing to a citizen holding three open tickets.
+        tenantConfig(null);
+
+        assertTrue(String.valueOf(content(resource.get()).get("ticketDetails")).contains("{complaint}"));
+        assertTrue(String.valueOf(content(resource.get()).get("ticketCreated")).contains("{complaint}"));
+    }
+
     @Test
     void theMenuPathIsBehindTheAuthFilter() {
         // Omitting it would leave CurrentUser unpopulated and the admin check

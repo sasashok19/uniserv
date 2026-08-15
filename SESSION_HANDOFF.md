@@ -272,6 +272,33 @@ owner class.
 - [ ] Tests (unit + integration), then docs (`README.md` + `docs/*.md` — MANDATORY
       for this repo), then push only on green integration tests
 
+## Feature 28 — three fixes reported from live use
+
+1. **A citizen answering an agent's follow-up got the welcome menu**, so the
+   answer never reached the ticket. The agent's reply is sent by the GATEWAY, so
+   ai-core never saw it and no menu session existed. `menu.awaiting_our_reply`
+   now checks for a swipe-reply to one of our messages, or a recent unanswered
+   outbound on one of their tickets, and hands those to the routing ladder
+   instead of greeting them. This is the strict-menu consequence flagged above,
+   now closed for the case that actually mattered.
+2. **The menu is tappable buttons**, not "Press 1". Meta interactive
+   reply-buttons: 3 max, 20-char titles, and it rejects the WHOLE send if a cap
+   is exceeded — so caps are truncated in `buildPayload`, rejected on the admin
+   screen, and clamped on read. A tap arrives as the button TITLE, so
+   `_match_option` matches the tenant's configured labels. A failed interactive
+   send retries as plain text. `useInteractiveButtons: false` opts out.
+3. **The reply now names the chief complaint** (`{complaint}` in
+   `ticketDetails`/`ticketCreated`/`duplicateMerged`), because a status alone
+   means nothing to someone holding three open tickets.
+
+New config keys: `menuIntro`, `option1Label`/`option2Label`/`option3Label`,
+`complaintUnknown`, `useInteractiveButtons`. All mirrored in Java + Python and
+covered by the drift guard — whose own key regex was `[A-Za-z]+` and could not
+match `option1Label`; now `[A-Za-z][A-Za-z0-9]*`.
+
+Counts after F28: db-writer **52**, api-gateway **171**, ai-core **426**,
+dashboard tsc + build clean.
+
 ## Deploying this
 
 **Deploy order matters.** db-writer carries migration **V14**, and api-gateway

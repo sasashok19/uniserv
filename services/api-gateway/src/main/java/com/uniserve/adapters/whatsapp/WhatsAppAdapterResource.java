@@ -23,9 +23,17 @@ public class WhatsAppAdapterResource {
     @Inject
     WhatsAppAdapter whatsAppAdapter;
 
-    /** {@code contextMessageId} — the citizen's inbound wamid (Feature 15 parity), when
-     * known, so this reply renders as a quoted reply-to instead of a fresh message. */
-    public record SendRequest(String to, String body, String contextMessageId) {
+    /**
+     * {@code contextMessageId} — the citizen's inbound wamid (Feature 15 parity), when
+     * known, so this reply renders as a quoted reply-to instead of a fresh message.
+     *
+     * <p>{@code buttons} and {@code footer} (Feature 28) turn the send into an
+     * interactive reply-buttons message: up to 3 entries of
+     * {@code {"id": ..., "title": ...}}. Both optional — omitting them sends
+     * plain text exactly as before, so every existing caller is unaffected.
+     */
+    public record SendRequest(String to, String body, String contextMessageId,
+                              java.util.List<Map<String, String>> buttons, String footer) {
     }
 
     @POST
@@ -41,7 +49,9 @@ public class WhatsAppAdapterResource {
         com.uniserve.adapters.SendResult result = whatsAppAdapter.sendReply(
                 request.to(),
                 request.body() == null ? "" : request.body(),
-                request.contextMessageId());
+                request.contextMessageId(),
+                request.buttons(),
+                request.footer());
         // Feature 24: the wamid goes back to the caller (ai-core) so it can
         // stamp it onto the ticket_message row it already persisted — that is
         // what makes the citizen's reply to THIS message routable.

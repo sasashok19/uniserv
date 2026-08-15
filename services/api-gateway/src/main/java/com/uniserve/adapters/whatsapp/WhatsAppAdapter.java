@@ -12,6 +12,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -64,6 +66,26 @@ public class WhatsAppAdapter {
      * convention as {@code EmailAdapter}).
      */
     public SendResult sendReply(String toPhone, String body, String contextMessageId) {
+        return sendReply(toPhone, body, contextMessageId, null, null);
+    }
+
+    /**
+     * As above, but rendered as an <b>interactive reply-buttons</b> message when
+     * {@code buttons} is non-empty (Feature 28) — tappable options instead of
+     * "press 1", which is what a citizen on a phone expects.
+     *
+     * <p>Interactive messages are ordinary free-form messages as far as Meta's
+     * 24-hour window is concerned: they are not templates, so the same window
+     * rule above applies unchanged.
+     *
+     * @param buttons up to 3 entries of {@code {"id": ..., "title": ...}};
+     *                more are dropped and over-long titles truncated rather than
+     *                rejected, because Meta refuses the whole send otherwise and
+     *                a clipped word beats no message
+     * @param footer  the small grey line under the buttons, or null
+     */
+    public SendResult sendReply(String toPhone, String body, String contextMessageId,
+                                List<Map<String, String>> buttons, String footer) {
         if (accessToken.isEmpty() || accessToken.get().isBlank()) {
             throw new IllegalStateException("WHATSAPP_ACCESS_TOKEN is not set");
         }
@@ -71,7 +93,7 @@ public class WhatsAppAdapter {
             throw new IllegalStateException("WHATSAPP_PHONE_NUMBER_ID is not set");
         }
 
-        Map<String, Object> payload = buildPayload(toPhone, body, contextMessageId);
+        Map<String, Object> payload = buildPayload(toPhone, body, contextMessageId, buttons, footer);
         URI uri = URI.create(graphApiBaseUrl + "/" + apiVersion + "/" + phoneNumberId.get() + "/messages");
 
         try {
@@ -119,15 +141,69 @@ public class WhatsAppAdapter {
 
     /** Pure payload construction (unit-tested without CDI/network). */
     static Map<String, Object> buildPayload(String toPhone, String body, String contextMessageId) {
+        return buildPayload(toPhone, body, contextMessageId, null, null);
+    }
+
+    /** Meta's interactive reply-button limits. Exceeding any of them fails the
+     * whole send, so they are enforced by truncation here rather than trusted. */
+    static final int MAX_BUTTONS = 3;
+    static final int MAX_BUTTON_TITLE = 20;
+    static final int MAX_BODY = 1024;
+    static final int MAX_FOOTER = 60;
+
+    static Map<String, Object> buildPayload(String toPhone, String body, String contextMessageId,
+                                            List<Map<String, String>> buttons, String footer) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("messaging_product", "whatsapp");
         payload.put("to", stripLeadingPlus(toPhone));
-        payload.put("type", "text");
-        payload.put("text", Map.of("body", body));
+
+        if (buttons == null || buttons.isEmpty()) {
+            payload.put("type", "text");
+            payload.put("text", Map.of("body", body == null ? "" : body));
+        } else {
+            List<Map<String, Object>> replies = new ArrayList<>();
+            for (Map<String, String> button : buttons.subList(0, Math.min(buttons.size(), MAX_BUTTONS))) {
+                String title = trim(button.get("title"), MAX_BUTTON_TITLE);
+                if (title.isEmpty()) {
+                    continue;   // an unlabelled button is worse than one fewer
+                }
+                replies.add(Map.of("type", "reply", "reply",
+                        Map.of("id", button.getOrDefault("id", title), "title", title)));
+            }
+            if (replies.isEmpty()) {
+                // Nothing renderable — fall back to text rather than send a
+                // button message with no buttons, which Meta rejects.
+                payload.put("type", "text");
+                payload.put("text", Map.of("body", body == null ? "" : body));
+                return withContext(payload, contextMessageId);
+            }
+            Map<String, Object> interactive = new LinkedHashMap<>();
+            interactive.put("type", "button");
+            interactive.put("body", Map.of("text", trim(body, MAX_BODY)));
+            String cleanFooter = trim(footer, MAX_FOOTER);
+            if (!cleanFooter.isEmpty()) {
+                interactive.put("footer", Map.of("text", cleanFooter));
+            }
+            interactive.put("action", Map.of("buttons", replies));
+            payload.put("type", "interactive");
+            payload.put("interactive", interactive);
+        }
+        return withContext(payload, contextMessageId);
+    }
+
+    private static Map<String, Object> withContext(Map<String, Object> payload, String contextMessageId) {
         if (contextMessageId != null && !contextMessageId.isBlank()) {
             payload.put("context", Map.of("message_id", contextMessageId));
         }
         return payload;
+    }
+
+    private static String trim(String value, int max) {
+        if (value == null) {
+            return "";
+        }
+        String trimmed = value.trim();
+        return trimmed.length() > max ? trimmed.substring(0, max) : trimmed;
     }
 
     /** Graph API expects the destination in E.164 digits without a leading '+'. */

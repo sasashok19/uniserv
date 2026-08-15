@@ -22,7 +22,7 @@ _JAVA = (Path(__file__).resolve().parents[2]
          / "api-gateway/src/main/java/com/uniserve/auth/WhatsAppMenuContent.java")
 
 # TEXT_DEFAULTS.put("key", "value" + "continued");
-_PUT_RE = re.compile(r'TEXT_DEFAULTS\.put\(\s*"([A-Za-z]+)"\s*,\s*(.*?)\);', re.DOTALL)
+_PUT_RE = re.compile(r'TEXT_DEFAULTS\.put\(\s*"([A-Za-z][A-Za-z0-9]*)"\s*,\s*(.*?)\);', re.DOTALL)
 _STRING_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
 

@@ -112,15 +112,34 @@ async def send_email(
 async def send_whatsapp(
     to_phone: str, body: str, trace_id: Optional[str] = None,
     context_message_id: Optional[str] = None,
+    buttons: Optional[list[dict]] = None, footer: Optional[str] = None,
 ) -> dict:
-    """Deliver a WhatsApp text message via api-gateway's `WhatsAppAdapter.sendReply`
+    """Deliver a WhatsApp message via api-gateway's `WhatsAppAdapter.sendReply`
     (reused through its `/send` endpoint rather than talking to Meta's Graph API
     directly from this service).
 
     `context_message_id` — the citizen's inbound wamid (Feature 15 parity with
     email's `in_reply_to`), when known — makes the reply render as a quoted
     reply-to in WhatsApp instead of a fresh, disconnected message.
+
+    `buttons` (Feature 28) renders the message as Meta interactive reply
+    buttons: up to 3 `{"id", "title"}` entries, with `footer` as the small grey
+    line beneath them. **A failed interactive send is retried as plain text** —
+    the body already spells out the same options, so a citizen must never be
+    left with nothing because Meta disliked a button.
     """
+    result = await _post_whatsapp(to_phone, body, trace_id, context_message_id, buttons, footer)
+    if buttons and not result.get("delivered"):
+        logger.warning("interactive whatsapp send failed traceId=%s to=%s — retrying as plain text",
+                       trace_id, to_phone)
+        return await _post_whatsapp(to_phone, body, trace_id, context_message_id, None, None)
+    return result
+
+
+async def _post_whatsapp(
+    to_phone: str, body: str, trace_id: Optional[str],
+    context_message_id: Optional[str], buttons: Optional[list[dict]], footer: Optional[str],
+) -> dict:
     url = f"{settings.api_gateway_url.rstrip('/')}/api/v1/internal/adapters/whatsapp/send"
     headers = {"Content-Type": "application/json"}
     if trace_id:
@@ -130,6 +149,7 @@ async def send_whatsapp(
         async with httpx.AsyncClient(timeout=settings.whatsapp_send_timeout_seconds) as client:
             resp = await client.post(url, headers=headers, json={
                 "to": to_phone, "body": body, "contextMessageId": context_message_id,
+                "buttons": buttons, "footer": footer,
             })
         resp.raise_for_status()
         body_json = resp.json()
@@ -168,7 +188,9 @@ async def deliver_reply(payload: dict, trace_id: Optional[str] = None) -> dict:
         # No subject/DO_NOT_REMOVE_NOTE: WhatsApp doesn't have a subject line
         # and dedup/threading there is by phone identity, not a preserved
         # ticket-number tag (see docs/09... subject-line threading is email-only).
-        return await send_whatsapp(to_address, message_text, trace_id, context_message_id=origin_message_id)
+        return await send_whatsapp(
+            to_address, message_text, trace_id, context_message_id=origin_message_id,
+            buttons=payload.get("buttons"), footer=payload.get("footer"))
 
     logger.info(
         "ai.reply.send recorded but not delivered: traceId=%s channel=%s "

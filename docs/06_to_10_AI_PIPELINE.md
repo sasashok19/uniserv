@@ -830,6 +830,26 @@ correctly but uselessly, that they differ.
   trapped in a loop that never files their complaint, and an unavailable model
   is a network condition rather than a decision about this message.
 
+### Feature 28 follow-ups
+
+**Answering us is not starting a chat.** `menu.awaiting_our_reply` runs before
+the welcome on any message with no session: a swipe-reply matching one of our
+sent messages, or a recent non-intake outbound as the newest message on one of
+the citizen's tickets, means we are waiting on them — so the message goes to the
+routing ladder instead of the menu. Conservative by design: a false positive
+lands in the ladder (where it would have gone before the menu existed), a false
+negative loses a citizen's answer.
+
+**Tappable buttons.** `menu.MenuMessage` carries optional `buttons`/`footer`,
+which the dispatcher passes to `sender.send_whatsapp` and on to the gateway's
+interactive payload. Taps come back as the button TITLE, so `_match_option`
+compares against the tenant's configured labels rather than a fixed word list.
+A failed interactive send is retried as plain text.
+
+**The chief complaint is read back.** `format_ticket_details` fills
+`{complaint}` from `tickets.chief_complaint`, falling back to
+`complaintUnknown` for a stub still mid-intake.
+
 ### Prompt changes
 
 `ASSISTANT_INSTRUCTIONS` (`app/conversation/tools.py`) gained: the tenant's own

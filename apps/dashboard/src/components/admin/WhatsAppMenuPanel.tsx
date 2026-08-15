@@ -42,7 +42,32 @@ const GROUPS: { title: string; blurb: string; fields: Field[] }[] = [
         help: "Sent when a conversation starts.",
         placeholders: ["{company}"],
       },
-      { key: "menuPrompt", label: "Menu options", help: "Must still offer 1, 2 and 3.", rows: 5 },
+      {
+        key: "menuIntro",
+        label: "Prompt above the buttons",
+        help: "Shown with the tappable buttons. Only used when buttons are on.",
+      },
+      {
+        key: "option1Label",
+        label: "Button 1 — existing ticket",
+        help: "Max 20 characters (WhatsApp's limit).",
+      },
+      {
+        key: "option2Label",
+        label: "Button 2 — new ticket",
+        help: "Max 20 characters.",
+      },
+      {
+        key: "option3Label",
+        label: "Button 3 — end chat",
+        help: "Max 20 characters.",
+      },
+      {
+        key: "menuPrompt",
+        label: "Menu options (text fallback)",
+        help: "Used when buttons are switched off, and if WhatsApp rejects an interactive send. Must still offer 1, 2 and 3.",
+        rows: 5,
+      },
       {
         key: "menuHint",
         label: "Return-to-menu hint",
@@ -67,9 +92,14 @@ const GROUPS: { title: string; blurb: string; fields: Field[] }[] = [
         label: "Ticket details",
         help: "Must include {ticket}.",
         rows: 4,
-        placeholders: ["{ticket}", "{status}", "{eta}", "{updated}"],
+        placeholders: ["{ticket}", "{complaint}", "{status}", "{eta}", "{updated}"],
       },
       { key: "etaUnknown", label: "ETA not set yet", help: "Substituted for {eta} when no ETA has been set." },
+      {
+        key: "complaintUnknown",
+        label: "Complaint not summarised yet",
+        help: "Substituted for {complaint} on a ticket with no chief complaint yet.",
+      },
       { key: "inviteNote", label: "Invite a note", help: "", rows: 3 },
       {
         key: "noteAdded",
@@ -90,7 +120,7 @@ const GROUPS: { title: string; blurb: string; fields: Field[] }[] = [
         label: "Ticket registered",
         help: "Must include {ticket}.",
         rows: 4,
-        placeholders: ["{ticket}", "{status}", "{eta}", "{updated}"],
+        placeholders: ["{ticket}", "{complaint}", "{status}", "{eta}", "{updated}"],
       },
     ],
   },
@@ -111,7 +141,7 @@ const GROUPS: { title: string; blurb: string; fields: Field[] }[] = [
         label: "Added to the existing ticket",
         help: "",
         rows: 3,
-        placeholders: ["{ticket}", "{status}", "{eta}"],
+        placeholders: ["{ticket}", "{complaint}", "{status}", "{eta}"],
       },
     ],
   },
@@ -130,6 +160,7 @@ const ALL_KEYS = GROUPS.flatMap((g) => g.fields.map((f) => f.key));
 export default function WhatsAppMenuPanel() {
   const [values, setValues] = useState<Record<string, string>>({});
   const [enabled, setEnabled] = useState(true);
+  const [useButtons, setUseButtons] = useState(true);
   const [ttl, setTtl] = useState("12");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -148,6 +179,7 @@ export default function WhatsAppMenuPanel() {
     }
     setValues(next);
     setEnabled(content.enabled !== false);
+    setUseButtons(content.useInteractiveButtons !== false);
     setTtl(typeof content.sessionTtlHours === "number" ? String(content.sessionTtlHours) : "12");
   }
 
@@ -168,7 +200,12 @@ export default function WhatsAppMenuPanel() {
     const resp = await fetch("/api/tenant/whatsapp-menu", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...values, enabled, sessionTtlHours: Number(ttl) || undefined }),
+      body: JSON.stringify({
+        ...values,
+        enabled,
+        useInteractiveButtons: useButtons,
+        sessionTtlHours: Number(ttl) || undefined,
+      }),
     });
     const data = await resp.json().catch(() => ({}));
     setSaving(false);
@@ -220,6 +257,23 @@ export default function WhatsAppMenuPanel() {
         <p className="mt-1 text-xs text-slate-600">
           When off, WhatsApp messages go straight to the AI assistant with no welcome and no
           numbered options — the behaviour before this feature.
+        </p>
+
+        <label className="mt-4 flex items-center gap-2 text-sm font-medium text-slate-700">
+          <input
+            type="checkbox"
+            checked={useButtons}
+            onChange={(e) => {
+              clearMessages();
+              setUseButtons(e.target.checked);
+            }}
+          />
+          Show the options as tappable buttons
+        </label>
+        <p className="mt-1 text-xs text-slate-600">
+          Sends the menu as a WhatsApp interactive message — three buttons instead of
+          &quot;press 1&quot;. Switch off to send the numbered text above instead. WhatsApp allows
+          at most 3 buttons and 20 characters per label, which is why the options are fixed at three.
         </p>
 
         <label htmlFor="sessionTtlHours" className="mt-4 block text-sm font-medium text-slate-700">

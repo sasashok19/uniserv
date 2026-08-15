@@ -34,18 +34,32 @@ is made to retype a complaint they already sent.
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from app.conversation import menu_content
 from app.conversation.intake_fields import catalog_for_tenant, fields_for_channel, render_field_form
+from app.dedup.service import ADDRESSABLE_STATUSES
 from app.events.client import get_valkey
 from app.identity.db_client import DbWriterClient
-from app.tickets.intake import extract_ticket_number
+from app.tickets.intake import _reply_window_days, extract_ticket_number
 
 logger = logging.getLogger("ai-core")
 
 CHANNEL = "whatsapp"
+
+# How many of the citizen's most recent tickets to inspect when deciding whether
+# we are waiting on an answer. Bounded because this runs on every message that
+# arrives without a session; a citizen with more than a couple of live tickets
+# is rare, and the newest is overwhelmingly the one in play.
+_AWAITING_REPLY_CANDIDATES = 3
+
+# Meta's interactive reply-button limits. Enforced here as well as in the
+# gateway's validation: a payload Meta rejects means the citizen gets nothing.
+BUTTON_TITLE_MAX = 20
+BODY_MAX = 1024
+FOOTER_MAX = 60
+BUTTON_ID_PREFIX = "menu_"
 
 STATE_MENU = "menu"
 STATE_AWAIT_TICKET_ID = "await_ticket_id"
@@ -66,6 +80,25 @@ _OPTION_ALIASES: dict[str, str] = {
 
 
 @dataclass
+class MenuMessage:
+    """One outgoing WhatsApp message.
+
+    ``buttons`` turns it into a Meta *interactive reply-buttons* message —
+    tappable options instead of "press 1" — and ``footer`` is the small grey
+    line beneath them. Both are ignored by the plain-text path, so a tenant with
+    interactive mode off, or a channel that cannot render buttons, still gets a
+    complete message from the same object.
+    """
+
+    text: str
+    buttons: Optional[list[dict]] = None
+    footer: Optional[str] = None
+
+    def __str__(self) -> str:  # keeps existing text assertions and logs readable
+        return self.text
+
+
+@dataclass
 class MenuOutcome:
     """What the dispatcher should do with this message.
 
@@ -75,7 +108,7 @@ class MenuOutcome:
     place of the raw text (carry-over merged in).
     """
 
-    replies: list[str] = field(default_factory=list)
+    replies: list[MenuMessage] = field(default_factory=list)
     stop: bool = True
     text: Optional[str] = None
 
@@ -166,18 +199,27 @@ def _status_label(status: Optional[str]) -> str:
 
 
 def format_ticket_details(content: dict, ticket: dict, key: str = "ticketDetails") -> str:
-    """The one-ticket summary: number, status, ETA, last updated. Composed from
-    the row, never paraphrased — see the module docstring."""
+    """The one-ticket summary: number, chief complaint, status, ETA, last
+    updated. Composed from the row, never paraphrased — see the module docstring.
+
+    The chief complaint (Feature 23) is what the citizen actually reported, in
+    one line. Without it a status reply is "TKT-00042 is in progress", which
+    means nothing to someone holding three open tickets.
+    """
+    complaint = (ticket.get("chief_complaint") or ticket.get("chiefComplaint") or "").strip()
     return menu_content.render(
         content, key,
         ticket=ticket.get("ticket_number") or ticket.get("ticketNumber") or "",
+        # Falls back rather than rendering a bare "Complaint:" label: a stub
+        # still mid-intake, or a ticket predating Feature 23, has none yet.
+        complaint=complaint or content.get("complaintUnknown", "not summarised yet"),
         status=_status_label(ticket.get("status")),
         eta=_format_timestamp(ticket.get("eta_at")) or content.get("etaUnknown", "not set yet"),
         updated=_format_timestamp(ticket.get("updated_at")) or "just now",
     )
 
 
-def _with_hint(content: dict, text: str) -> str:
+def _with_hint(content: dict, text: str) -> MenuMessage:
     """Append the "press # for the main menu" line.
 
     The requirement is that every message carries it. Skipped only when the text
@@ -186,20 +228,58 @@ def _with_hint(content: dict, text: str) -> str:
     """
     hint = menu_content.render(content, "menuHint")
     if not hint or hint in text:
-        return text
-    return f"{text}\n\n{hint}"
+        return MenuMessage(text)
+    return MenuMessage(f"{text}\n\n{hint}")
 
 
-def main_menu_text(content: dict, greet: bool) -> str:
+def menu_buttons(content: dict) -> Optional[list[dict]]:
+    """The three options as Meta interactive reply buttons, or None for text.
+
+    Meta caps a reply-button set at 3 and each title at 20 characters, which is
+    exactly why the menu has three options and why the labels are a separate,
+    short config field rather than being derived from ``menuPrompt``. Titles are
+    truncated rather than rejected here: a label an admin made too long should
+    cost a clipped word, not a citizen receiving nothing.
+    """
+    if not content.get("useInteractiveButtons", True):
+        return None
+    buttons = []
+    for option in ("1", "2", "3"):
+        title = menu_content.render(content, f"option{option}Label").strip()
+        if not title:
+            return None   # a blank label would render an unlabelled button
+        buttons.append({"id": f"{BUTTON_ID_PREFIX}{option}", "title": title[:BUTTON_TITLE_MAX]})
+    return buttons
+
+
+def main_menu_message(content: dict, greet: bool) -> MenuMessage:
     """The welcome + options block. ``greet`` is False for a ``#`` return —
-    a citizen already mid-conversation does not need welcoming again."""
-    prompt = menu_content.render(content, "menuPrompt")
+    a citizen already mid-conversation does not need welcoming again.
+
+    With interactive buttons the numbered prompt is dropped (the options ARE the
+    buttons, and "Press 1" next to a button labelled "Ticket status" is noise)
+    and the hint moves into the footer. Without them, everything stays in the
+    body exactly as before.
+    """
+    buttons = menu_buttons(content)
     hint = menu_content.render(content, "menuHint")
     parts = [menu_content.render(content, "welcome")] if greet else []
-    parts.append(prompt)
+
+    if buttons:
+        parts.append(menu_content.render(content, "menuIntro"))
+        body = "\n\n".join(p for p in parts if p)
+        # Meta caps the footer at 60 characters and silently rejects longer;
+        # a hint that does not fit is better dropped into the body.
+        if hint and len(hint) <= FOOTER_MAX:
+            return MenuMessage(body[:BODY_MAX], buttons=buttons, footer=hint)
+        if hint:
+            body = f"{body}\n\n{hint}"
+        return MenuMessage(body[:BODY_MAX], buttons=buttons)
+
+    parts.append(menu_content.render(content, "menuPrompt"))
     if hint:
         parts.append(hint)
-    return "\n\n".join(p for p in parts if p)
+    return MenuMessage("\n\n".join(p for p in parts if p))
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +289,7 @@ def main_menu_text(content: dict, greet: bool) -> str:
 async def handle_inbound(
     db: DbWriterClient, tenant_id: str, thread_key: str, raw_text: Optional[str],
     identity_value: Optional[str], tenant_config: Optional[dict], trace_id: Optional[str] = None,
+    in_reply_to: Optional[str] = None,
 ) -> MenuOutcome:
     """Route one inbound WhatsApp message through the menu.
 
@@ -228,9 +309,25 @@ async def handle_inbound(
     # `#` outranks every state, including "no session at all".
     if text == RETURN_TO_MENU:
         await save_session(tenant_id, thread_key, {"state": STATE_MENU}, ttl)
-        return MenuOutcome(replies=[main_menu_text(content, greet=not session)])
+        return MenuOutcome(replies=[main_menu_message(content, greet=not session)])
 
     if not session:
+        # Feature 28: a citizen ANSWERING us is not a citizen INITIATING a chat.
+        #
+        # An agent replies from the ticket screen ("which street is this?"), the
+        # citizen replies on WhatsApp, and with no session that answer used to
+        # get the welcome menu — so it never reached the ticket and the agent
+        # never saw it. The agent's reply goes out through the gateway, which
+        # ai-core never sees, so there is no session for it to have created.
+        #
+        # Checked here rather than by weakening strict mode: the menu still owns
+        # every message that starts a conversation, and this owns the ones that
+        # continue one we started.
+        if await awaiting_our_reply(db, tenant_id, identity_value, in_reply_to,
+                                    tenant_config, trace_id):
+            logger.info("inbound answers a question we asked traceId=%s — skipping the menu",
+                        trace_id)
+            return MenuOutcome(replies=[], stop=False, text=raw_text)
         return await _first_contact(tenant_id, thread_key, content, text, ttl)
 
     state = session.get("state")
@@ -251,6 +348,80 @@ async def handle_inbound(
     return await _first_contact(tenant_id, thread_key, content, text, ttl)
 
 
+async def awaiting_our_reply(
+    db: DbWriterClient, tenant_id: str, identity_value: Optional[str],
+    in_reply_to: Optional[str], tenant_config: Optional[dict], trace_id: Optional[str],
+) -> bool:
+    """Are we waiting on an answer from this citizen right now? (Feature 28)
+
+    Two signals, cheapest first:
+
+    1. **They swipe-replied to a message we sent.** Meta hands us its wamid as
+       ``context.id``; if it matches a message we recorded, this is
+       unambiguously a continuation. Exact, one lookup, no interpretation — the
+       same signal routing rung 0 uses.
+    2. **The last thing said on one of their tickets was said by us**, inside
+       the reply window. That is what an unanswered agent follow-up looks like.
+
+    Deliberately conservative. A false positive sends a genuine new complaint
+    into the routing ladder, which is where it would have gone before the menu
+    existed and which knows how to start a new ticket anyway. A false negative
+    loses a citizen's answer, which is the bug this exists to fix.
+
+    A true first contact owns no tickets, so the common case costs one indexed
+    query and no message fetches at all.
+    """
+    if in_reply_to:
+        try:
+            if await db.find_message_by_channel_id(tenant_id, in_reply_to, trace_id=trace_id):
+                return True
+        except Exception:  # noqa: BLE001 - fall through to the slower signal
+            logger.warning("reply-to lookup failed traceId=%s", trace_id)
+
+    if not identity_value:
+        return False
+    try:
+        identity = await db.find_by_phone(tenant_id, identity_value, trace_id=trace_id)
+        master_id = (identity or {}).get("master_id")
+        if not master_id:
+            return False
+        tickets = await db.list_tickets(
+            tenant_id, identityId=master_id, status=ADDRESSABLE_STATUSES,
+            sortBy="createdAt", sortDir="desc", pageSize=_AWAITING_REPLY_CANDIDATES,
+            trace_id=trace_id)
+    except Exception:  # noqa: BLE001 - never block the menu on a lookup problem
+        logger.warning("awaiting-reply lookup failed traceId=%s", trace_id)
+        return False
+
+    cutoff = _reply_window_cutoff(tenant_config)
+    for ticket in tickets[:_AWAITING_REPLY_CANDIDATES]:
+        try:
+            messages = await db.get_messages(ticket["id"], trace_id=trace_id)
+        except Exception:  # noqa: BLE001 - one ticket failing must not decide the answer
+            continue
+        if not messages:
+            continue
+        last = messages[-1]
+        if last.get("direction") != "outbound":
+            continue
+        if (last.get("created_at") or "") < cutoff:
+            continue
+        # An intake request belongs to the menu's own option-2 flow, which has
+        # its own session. If we are here there is no session, so that exchange
+        # is over and this is not an answer to it.
+        if last.get("is_intake_request"):
+            continue
+        logger.info("ticket %s is awaiting the citizen's reply traceId=%s",
+                    ticket.get("ticket_number"), trace_id)
+        return True
+    return False
+
+
+def _reply_window_cutoff(tenant_config: Optional[dict]) -> str:
+    days = _reply_window_days(tenant_config)
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+
+
 async def _first_contact(
     tenant_id: str, thread_key: str, content: dict, text: str, ttl: int,
 ) -> MenuOutcome:
@@ -261,20 +432,39 @@ async def _first_contact(
     complaint, and prepending it to the intake would corrupt it.
     """
     session: dict[str, Any] = {"state": STATE_MENU}
-    if text and _match_option(text) is None:
+    if text and _match_option(text, content) is None:
         session["carryOver"] = text
     await save_session(tenant_id, thread_key, session, ttl)
-    return MenuOutcome(replies=[main_menu_text(content, greet=True)])
+    return MenuOutcome(replies=[main_menu_message(content, greet=True)])
 
 
-def _match_option(text: str) -> Optional[str]:
-    """"1", "1.", "one", or a button title -> "1". None when it is not a menu key."""
+def _match_option(text: str, content: Optional[dict] = None) -> Optional[str]:
+    """"1", "1.", "one", or a tapped button -> "1". None when it is not a menu key.
+
+    Button taps are matched against the tenant's own configured LABELS, not a
+    fixed word list: Meta delivers an interactive reply as the button's title
+    (see `WhatsAppParser`), and a tenant that renames option 2 to "Pukaar darj
+    karein" must still have the tap land on option 2. The numeric aliases stay
+    for citizens who type instead of tapping.
+    """
     if not text:
         return None
     normalised = text.strip().lower()
+
+    if content:
+        for option in ("1", "2", "3"):
+            label = str(content.get(f"option{option}Label") or "").strip().lower()
+            if label and normalised == label:
+                return option
+        # Titles are truncated to 20 chars on the way out, so a longer
+        # configured label comes back clipped; match the clipped form too.
+        for option in ("1", "2", "3"):
+            label = str(content.get(f"option{option}Label") or "").strip().lower()
+            if label and normalised == label[:BUTTON_TITLE_MAX]:
+                return option
+
     if normalised in _OPTION_ALIASES:
         return _OPTION_ALIASES[normalised]
-    # A button reply arrives as the button's full title ("Register a new ticket").
     first = normalised.split()[0].strip(".,)") if normalised.split() else ""
     return _OPTION_ALIASES.get(first)
 
@@ -283,7 +473,7 @@ async def _at_menu(
     db: DbWriterClient, tenant_id: str, thread_key: str, content: dict, session: dict,
     text: str, ttl: int, tenant_config: Optional[dict], trace_id: Optional[str],
 ) -> MenuOutcome:
-    option = _match_option(text)
+    option = _match_option(text, content)
 
     if option == "1":
         session["state"] = STATE_AWAIT_TICKET_ID
@@ -299,7 +489,7 @@ async def _at_menu(
         # No hint appended: the conversation is over, and offering a way back
         # into a menu we have just closed contradicts the goodbye.
         await clear_session(tenant_id, thread_key)
-        return MenuOutcome(replies=[menu_content.render(content, "farewell")])
+        return MenuOutcome(replies=[MenuMessage(menu_content.render(content, "farewell"))])
 
     # Anything else at the menu is a mis-key. Re-show the options rather than
     # guessing, and keep whatever they typed in case it was a complaint they
@@ -307,8 +497,10 @@ async def _at_menu(
     if text and not session.get("carryOver"):
         session["carryOver"] = text
         await save_session(tenant_id, thread_key, session, ttl)
-    return MenuOutcome(replies=[
-        menu_content.render(content, "unknownOption") + "\n\n" + main_menu_text(content, greet=False)])
+    menu = main_menu_message(content, greet=False)
+    return MenuOutcome(replies=[MenuMessage(
+        menu_content.render(content, "unknownOption") + "\n\n" + menu.text,
+        buttons=menu.buttons, footer=menu.footer)])
 
 
 def _register_intro(content: dict, tenant_config: Optional[dict]) -> str:
@@ -434,8 +626,8 @@ async def _await_note(
 
     await clear_session(tenant_id, thread_key)
     return MenuOutcome(replies=[
-        menu_content.render(content, "noteAdded", ticket=ticket_number or ""),
-        menu_content.render(content, "conversationEnd"),
+        MenuMessage(menu_content.render(content, "noteAdded", ticket=ticket_number or "")),
+        MenuMessage(menu_content.render(content, "conversationEnd")),
     ])
 
 
@@ -492,7 +684,7 @@ async def _in_intake(
 async def finish_registration(
     db: DbWriterClient, tenant_id: str, thread_key: str, ticket_id: Optional[str],
     ticket_number: Optional[str], tenant_config: Optional[dict], trace_id: Optional[str] = None,
-) -> Optional[list[str]]:
+) -> Optional[list[MenuMessage]]:
     """The messages that close out option 2, once the ticket actually exists.
 
     Returns None when the menu is disabled or this thread was not in the menu's
@@ -515,6 +707,6 @@ async def finish_registration(
 
     await clear_session(tenant_id, thread_key)
     return [
-        format_ticket_details(content, ticket, key="ticketCreated"),
-        menu_content.render(content, "conversationEnd"),
+        MenuMessage(format_ticket_details(content, ticket, key="ticketCreated")),
+        MenuMessage(menu_content.render(content, "conversationEnd")),
     ]

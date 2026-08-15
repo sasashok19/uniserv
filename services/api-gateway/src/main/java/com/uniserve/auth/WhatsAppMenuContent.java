@@ -49,6 +49,15 @@ final class WhatsAppMenuContent {
     static final int MAX_SESSION_TTL_HOURS = 24;
     static final int DEFAULT_SESSION_TTL_HOURS = 12;
 
+    /** Meta caps an interactive reply-button title at 20 characters, and rejects
+     * the whole send if one is longer — so the citizen would receive nothing at
+     * all. Enforced on write here and clamped again on read/send in ai-core. */
+    static final int MAX_BUTTON_LABEL = 20;
+
+    /** The three option labels, which become the reply buttons. */
+    private static final List<String> BUTTON_LABELS =
+            List.of("option1Label", "option2Label", "option3Label");
+
     /** Text fields: key -> default. Order here is the order the admin panel shows them. */
     private static final Map<String, String> TEXT_DEFAULTS = new LinkedHashMap<>();
 
@@ -60,6 +69,10 @@ final class WhatsAppMenuContent {
                         + "Press 1 to know the status, ETA and last update for an existing ticket.\n"
                         + "Press 2 to register a new ticket.\n"
                         + "Press 3 to end this chat.");
+        TEXT_DEFAULTS.put("menuIntro", "Please choose an option:");
+        TEXT_DEFAULTS.put("option1Label", "Ticket status");
+        TEXT_DEFAULTS.put("option2Label", "New ticket");
+        TEXT_DEFAULTS.put("option3Label", "End chat");
         TEXT_DEFAULTS.put("menuHint", "You can press # at any time to return to the main menu.");
         TEXT_DEFAULTS.put("unknownOption",
                 "Sorry, I didn't catch that. Please reply with 1, 2 or 3.");
@@ -69,7 +82,8 @@ final class WhatsAppMenuContent {
                 "I couldn't find a ticket with that ID against this number. "
                         + "Please check the Ticket ID and send it again.");
         TEXT_DEFAULTS.put("ticketDetails",
-                "Ticket {ticket}\nStatus: {status}\nETA: {eta}\nLast updated: {updated}");
+                "Ticket {ticket}\nComplaint: {complaint}\nStatus: {status}\nETA: {eta}"
+                        + "\nLast updated: {updated}");
         TEXT_DEFAULTS.put("inviteNote",
                 "If you have any questions, or would like to add anything to this ticket, "
                         + "you can type your message here and I'll add it to the ticket.");
@@ -78,18 +92,21 @@ final class WhatsAppMenuContent {
         TEXT_DEFAULTS.put("registerIntro",
                 "Sure, let's register a new ticket. Please reply with the following details:");
         TEXT_DEFAULTS.put("ticketCreated",
-                "Your ticket has been registered.\nTicket {ticket}\nStatus: {status}\nETA: {eta}");
+                "Your ticket has been registered.\nTicket {ticket}\nComplaint: {complaint}"
+                        + "\nStatus: {status}\nETA: {eta}");
         TEXT_DEFAULTS.put("conversationEnd",
                 "We're ending this conversation here. Send us any message whenever you need us "
                         + "and the main menu will open again.");
         TEXT_DEFAULTS.put("farewell", "Thanks for reaching out. Have a great time");
         TEXT_DEFAULTS.put("etaUnknown", "not set yet");
+        TEXT_DEFAULTS.put("complaintUnknown", "not summarised yet");
         TEXT_DEFAULTS.put("duplicateAsk",
                 "Before I raise a new ticket — we already have ticket {ticket} open for "
                         + "\"{existing}\". {question}");
         TEXT_DEFAULTS.put("duplicateMerged",
                 "Thanks for confirming. I've added your message to the existing ticket {ticket} "
-                        + "rather than raising a duplicate.\nStatus: {status}\nETA: {eta}");
+                        + "rather than raising a duplicate.\nComplaint: {complaint}"
+                        + "\nStatus: {status}\nETA: {eta}");
     }
 
     /** Fields long enough to need the body cap rather than the short one. */
@@ -106,6 +123,7 @@ final class WhatsAppMenuContent {
     static Map<String, Object> defaults() {
         Map<String, Object> out = new LinkedHashMap<>(TEXT_DEFAULTS);
         out.put("enabled", Boolean.TRUE);
+        out.put("useInteractiveButtons", Boolean.TRUE);
         out.put("sessionTtlHours", DEFAULT_SESSION_TTL_HOURS);
         return out;
     }
@@ -138,11 +156,20 @@ final class WhatsAppMenuContent {
             out.put("companyName", brandName(config));
         }
 
-        Object enabled = stored.get("enabled");
-        if (enabled instanceof Boolean b) {
-            out.put("enabled", b);
-        } else if (enabled != null) {
-            out.put("enabled", Boolean.parseBoolean(String.valueOf(enabled)));
+        for (String flag : List.of("enabled", "useInteractiveButtons")) {
+            Object value = stored.get(flag);
+            if (value instanceof Boolean b) {
+                out.put(flag, b);
+            } else if (value != null) {
+                out.put(flag, Boolean.parseBoolean(String.valueOf(value)));
+            }
+        }
+        // Clamped on read too: a label that reached the blob without passing
+        // normalise() would make every interactive send fail outright.
+        for (String key : BUTTON_LABELS) {
+            String label = str(out.get(key));
+            out.put(key, label.length() > MAX_BUTTON_LABEL
+                    ? label.substring(0, MAX_BUTTON_LABEL) : label);
         }
 
         // Re-clamped on READ, not just on write: TenantConfigResource replaces
@@ -200,9 +227,24 @@ final class WhatsAppMenuContent {
             }
         }
 
-        Object enabled = body.get("enabled");
-        out.put("enabled", enabled == null || Boolean.parseBoolean(String.valueOf(enabled))
-                || Boolean.TRUE.equals(enabled));
+        // A button label longer than Meta's cap fails the whole send, so this is
+        // rejected on the admin screen rather than silently clipped — the admin
+        // is the only one who can choose a shorter wording that still reads well.
+        for (String key : BUTTON_LABELS) {
+            String label = str(out.get(key));
+            if (label.length() > MAX_BUTTON_LABEL) {
+                throw new InvalidContentException(
+                        "'" + key + "' must be at most " + MAX_BUTTON_LABEL + " characters — "
+                                + "WhatsApp rejects a longer button label, and the citizen would "
+                                + "then receive no menu at all");
+            }
+        }
+
+        for (String flag : List.of("enabled", "useInteractiveButtons")) {
+            Object value = body.get(flag);
+            out.put(flag, value == null || Boolean.parseBoolean(String.valueOf(value))
+                    || Boolean.TRUE.equals(value));
+        }
 
         Object ttl = body.get("sessionTtlHours");
         if (ttl != null && !str(ttl).isEmpty()) {

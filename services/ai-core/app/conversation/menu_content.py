@@ -19,6 +19,9 @@ from typing import Any, Optional
 MAX_SESSION_TTL_HOURS = 24
 DEFAULT_SESSION_TTL_HOURS = 12
 
+# Meta caps an interactive reply-button title at 20 characters.
+MAX_BUTTON_LABEL = 20
+
 TEXT_DEFAULTS: dict[str, str] = {
     "companyName": "",
     "welcome": "Welcome to {company}!",
@@ -28,6 +31,10 @@ TEXT_DEFAULTS: dict[str, str] = {
         "Press 2 to register a new ticket.\n"
         "Press 3 to end this chat."
     ),
+    "menuIntro": "Please choose an option:",
+    "option1Label": "Ticket status",
+    "option2Label": "New ticket",
+    "option3Label": "End chat",
     "menuHint": "You can press # at any time to return to the main menu.",
     "unknownOption": "Sorry, I didn't catch that. Please reply with 1, 2 or 3.",
     "askTicketId": "Please share your Ticket ID (for example TKT-00042).",
@@ -35,7 +42,10 @@ TEXT_DEFAULTS: dict[str, str] = {
         "I couldn't find a ticket with that ID against this number. "
         "Please check the Ticket ID and send it again."
     ),
-    "ticketDetails": "Ticket {ticket}\nStatus: {status}\nETA: {eta}\nLast updated: {updated}",
+    "ticketDetails": (
+        "Ticket {ticket}\nComplaint: {complaint}\nStatus: {status}\nETA: {eta}"
+        "\nLast updated: {updated}"
+    ),
     "inviteNote": (
         "If you have any questions, or would like to add anything to this ticket, "
         "you can type your message here and I'll add it to the ticket."
@@ -47,7 +57,8 @@ TEXT_DEFAULTS: dict[str, str] = {
         "Sure, let's register a new ticket. Please reply with the following details:"
     ),
     "ticketCreated": (
-        "Your ticket has been registered.\nTicket {ticket}\nStatus: {status}\nETA: {eta}"
+        "Your ticket has been registered.\nTicket {ticket}\nComplaint: {complaint}"
+        "\nStatus: {status}\nETA: {eta}"
     ),
     "conversationEnd": (
         "We're ending this conversation here. Send us any message whenever you need us "
@@ -55,13 +66,14 @@ TEXT_DEFAULTS: dict[str, str] = {
     ),
     "farewell": "Thanks for reaching out. Have a great time",
     "etaUnknown": "not set yet",
+    "complaintUnknown": "not summarised yet",
     "duplicateAsk": (
         'Before I raise a new ticket — we already have ticket {ticket} open for '
         '"{existing}". {question}'
     ),
     "duplicateMerged": (
         "Thanks for confirming. I've added your message to the existing ticket {ticket} "
-        "rather than raising a duplicate.\nStatus: {status}\nETA: {eta}"
+        "rather than raising a duplicate.\nComplaint: {complaint}\nStatus: {status}\nETA: {eta}"
     ),
 }
 
@@ -70,6 +82,7 @@ def defaults() -> dict[str, Any]:
     """A complete, sendable menu — what a tenant that configures nothing gets."""
     out: dict[str, Any] = dict(TEXT_DEFAULTS)
     out["enabled"] = True
+    out["useInteractiveButtons"] = True
     out["sessionTtlHours"] = DEFAULT_SESSION_TTL_HOURS
     return out
 
@@ -124,9 +137,17 @@ def resolve(tenant_config: Optional[dict]) -> dict[str, Any]:
     if not _str(out.get("companyName")):
         out["companyName"] = _brand_name(tenant_config)
 
-    enabled = stored.get("enabled")
-    if enabled is not None:
-        out["enabled"] = enabled if isinstance(enabled, bool) else str(enabled).lower() == "true"
+    for flag in ("enabled", "useInteractiveButtons"):
+        value = stored.get(flag)
+        if value is not None:
+            out[flag] = value if isinstance(value, bool) else str(value).lower() == "true"
+
+    # Clamped on READ as well as write, for the same reason the TTL is: a label
+    # longer than Meta's cap makes the whole interactive send fail, and the
+    # citizen would receive nothing at all rather than a clipped word.
+    for option in ("1", "2", "3"):
+        key = f"option{option}Label"
+        out[key] = str(out.get(key) or "")[:MAX_BUTTON_LABEL]
 
     # Clamped on READ as well as write: TenantConfigResource replaces the whole
     # config_json blob, so a whatsappMenu object can reach the database without

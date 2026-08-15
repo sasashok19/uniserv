@@ -257,6 +257,29 @@ HTTP/1.1 200 OK
     `test_menu_content.py` (11, including a guard that parses
     `WhatsAppMenuContent.java` and fails if the Java and Python default copy
     ever drift), plus the menu cases in `test_dispatcher.py`.
+- **Interactive reply buttons (Feature 28).** `WhatsAppAdapter.sendReply` gained
+  a `buttons`/`footer` overload that emits Meta's `type: "interactive"` /
+  `interactive.type: "button"` payload, and
+  `POST /api/v1/internal/adapters/whatsapp/send` accepts `buttons` (up to 3
+  `{id, title}`) and `footer`. Omitting both sends plain text exactly as before,
+  so every pre-existing caller is unchanged.
+  - Meta's caps are enforced by **truncation** in `buildPayload` (3 buttons,
+    20-char title, 1024-char body, 60-char footer) because exceeding any of them
+    makes Meta reject the entire message — the citizen would receive nothing.
+  - A button set that comes out empty falls back to a text payload; Meta rejects
+    a button message with no buttons.
+  - Interactive messages are **not templates**, so the 24-hour customer-service
+    window above applies to them unchanged.
+  - The menu now uses this, which finally makes the parser's long-standing
+    `button_reply` branch reachable. A tap arrives as the button's **title**, so
+    ai-core matches taps against the tenant's configured labels.
+  - `WhatsAppInteractiveTest` covers the payload shape and every cap.
+- **Answering us is not starting a chat (Feature 28).** A citizen replying to an
+  agent's follow-up used to get the welcome menu, losing their answer: the
+  agent's message goes out through the gateway, so ai-core never saw it and no
+  menu session existed. `menu.awaiting_our_reply` now checks for a swipe-reply to
+  one of our messages, or a recent unanswered outbound on one of their tickets,
+  and hands those straight to the routing ladder.
 - **Ask before creating a duplicate (Feature 26).** An ambiguous repeat
   complaint now asks the citizen a distinguishing question and creates nothing
   until they answer (`app/dedup/confirmation.py`, state at

@@ -1779,6 +1779,10 @@ Admin → **WhatsApp Menu** (`WhatsAppMenuPanel.tsx`), stored as
 | `inviteNote`, `noteAdded`, `registerIntro` | | |
 | `duplicateAsk`, `duplicateMerged` | | `{existing}`, `{question}` |
 | `conversationEnd`, `farewell`, `etaUnknown` | | |
+| `menuIntro` | `Please choose an option:` | Shown with the buttons (interactive mode only) |
+| `option1Label` / `option2Label` / `option3Label` | `Ticket status` / `New ticket` / `End chat` | The button titles. **Max 20 chars** — Meta's cap; rejected on save if longer |
+| `complaintUnknown` | `not summarised yet` | Fills `{complaint}` when the ticket has no chief complaint |
+| `useInteractiveButtons` | `true` | `false` sends the numbered `menuPrompt` text instead |
 | `enabled` | `true` | `false` restores the pre-menu behaviour |
 | `sessionTtlHours` | `12` | 1-24. Capped at 24 because Meta only permits a free-form reply within 24h of the citizen's last message, so a longer session could never be answered. Clamped on read as well as write. |
 
@@ -1792,6 +1796,91 @@ rather than a citizen receiving no reply at all.
 db-writer and must apply the same defaults). `tests/test_menu_content.py`
 **parses the Java file and fails on any drift** — key set, every default string,
 and the TTL bounds.
+
+### Answering us is not starting a chat (Feature 28)
+
+The reported bug: an agent sends a follow-up from the ticket screen, the citizen
+replies on WhatsApp, and the reply came back as the welcome menu — so the answer
+never reached the ticket and the agent never saw it. The agent's reply goes out
+through the **gateway**, which ai-core never sees, so no menu session existed for
+the citizen's answer to belong to.
+
+Fixed without weakening strict mode. Before greeting anyone, `awaiting_our_reply`
+asks whether we are waiting on them, cheapest signal first:
+
+1. **They swipe-replied to a message we sent** — Meta gives us its wamid as
+   `context.id`, and if it matches a message we recorded this is unambiguous.
+2. **The newest message on one of their tickets is an outbound from us**, inside
+   the reply window. That is what an unanswered agent follow-up looks like.
+
+Either one skips the menu and hands the message to the routing ladder, which
+already knows how to land it on the right ticket. A genuine first contact owns no
+tickets, so that case costs one indexed query and no message fetches.
+
+Deliberately conservative: a false positive sends a new complaint into the
+routing ladder, which is where it went before the menu existed and which knows
+how to start a ticket anyway. A false negative loses a citizen's answer.
+
+Three things it deliberately does **not** treat as "awaiting":
+the citizen spoke last (we owe *them* a reply, so a new message is a new
+conversation); the outbound is older than the reply window; the outbound was an
+intake request (that belongs to option 2's own session, and reaching this code
+means the session is gone).
+
+An active menu session still wins — a citizen mid-way through "press 1" must not
+be diverted because a ticket also happens to be awaiting them.
+
+### Tappable buttons instead of "Press 1" (Feature 28)
+
+The menu is sent as a Meta **interactive reply-buttons** message: three tappable
+buttons under the welcome, with the `#` hint as the footer.
+
+```
+Welcome to TNEB!
+
+Please choose an option:
+[ Ticket status ] [ New ticket ] [ End chat ]
+You can press # at any time to return to the main menu.
+```
+
+`WhatsAppParser` has read `button_reply`/`list_reply` since Feature 02b — the
+inbound half was always ready. What was missing was ever *sending* a message with
+buttons on it, so that branch was unreachable in practice.
+
+**Meta's limits are hard**: at most **3 buttons**, **20 characters** per title,
+1024 for the body, 60 for the footer — and it rejects the *whole send* if any is
+exceeded, so the citizen would get nothing at all. Titles and bodies are
+therefore truncated in `WhatsAppAdapter.buildPayload` rather than trusted, over-
+long labels are rejected on the admin screen (where someone can pick better
+wording), and clamped again on read. Three options is not a coincidence: it is
+Meta's cap.
+
+**A tap arrives as the button's TITLE**, not its id, so `_match_option` compares
+against the tenant's own configured labels — a tenant that renames option 2 to
+"Pukaar darj karein" must still have the tap land on option 2. The numeric
+aliases stay for citizens who type.
+
+**Failure falls back to text.** If the interactive send fails, `send_whatsapp`
+retries the same body as plain text. The body still spells out the options
+(`menuPrompt`), so nobody is left with nothing because Meta disliked a button.
+`useInteractiveButtons: false` opts out per tenant.
+
+### The chief complaint is read back (Feature 28)
+
+`ticketDetails`, `ticketCreated` and `duplicateMerged` all carry `{complaint}`,
+filled from `tickets.chief_complaint` (Feature 23):
+
+```
+Ticket TKT-00042
+Complaint: Power cut in Madambakkam since yesterday evening
+Status: Work in progress
+ETA: 18 Aug 2026
+Last updated: 15 Aug 2026
+```
+
+A status alone means nothing to a citizen holding three open tickets. A ticket
+with no chief complaint yet — a stub still mid-intake, or one predating Feature
+23 — shows `complaintUnknown` rather than a bare "Complaint:" label.
 
 ---
 

@@ -134,10 +134,11 @@ def test_a_whatsapp_first_contact_gets_the_welcome_menu_and_creates_no_ticket(fa
 
     ensure_stub.assert_not_called()
     agent_cls.return_value.process.assert_not_called()
-    sent = deliver.await_args.args[0]["messageText"]
-    assert "Welcome to TNEB" in sent
-    assert "Press 1" in sent and "Press 2" in sent and "Press 3" in sent
-    assert "#" in sent, "every message must offer the way back to the main menu"
+    payload = deliver.await_args.args[0]
+    assert "Welcome to TNEB" in payload["messageText"]
+    # Feature 28: the options ride as tappable buttons, and the # escape as the footer.
+    assert [b["title"] for b in payload["buttons"]] == ["Ticket status", "New ticket", "End chat"]
+    assert "#" in payload["footer"], "every message must offer the way back to the main menu"
 
 
 def test_the_menu_can_be_switched_off_per_tenant(fake_valkey):
@@ -201,15 +202,32 @@ def test_the_hint_is_not_added_to_email(fake_valkey):
     assert "#" not in deliver.await_args.args[0]["messageText"]
 
 
-def test_the_hint_is_not_added_when_no_menu_session_is_live(fake_valkey):
-    """A citizen whose session has ended must not be pointed at a menu that is
-    gone — their next message re-opens it from the welcome instead."""
+def test_the_hint_is_added_even_without_a_menu_session(fake_valkey):
+    """Feature 28: a citizen answering an agent's follow-up has no menu session,
+    and `#` still works for them — handle_inbound treats it as the top-level
+    escape from any state. Gating the hint on a session hid the way out from
+    exactly the people most likely to want it."""
     from app.events.dispatcher import _handle_ai_reply_send
 
     with patch("app.events.dispatcher.deliver_reply",
                new=AsyncMock(return_value={"delivered": True})) as deliver, \
          patch("app.identity.db_client.DbWriterClient.get_tenant_config",
                new=AsyncMock(return_value={})):
+        _run(_handle_ai_reply_send("t1", {"traceId": "tr-h", "payload": {
+            "channel": "whatsapp", "channelIdentityValue": "+919000000002",
+            "messageText": "Which street?"}}))
+
+    assert "press # at any time" in deliver.await_args.args[0]["messageText"]
+
+
+def test_the_hint_is_not_added_when_the_menu_is_disabled(fake_valkey):
+    """A tenant that switched the menu off has no main menu to return to."""
+    from app.events.dispatcher import _handle_ai_reply_send
+
+    with patch("app.events.dispatcher.deliver_reply",
+               new=AsyncMock(return_value={"delivered": True})) as deliver, \
+         patch("app.identity.db_client.DbWriterClient.get_tenant_config",
+               new=AsyncMock(return_value={"whatsappMenu": {"enabled": False}})):
         _run(_handle_ai_reply_send("t1", {"traceId": "tr-h", "payload": {
             "channel": "whatsapp", "channelIdentityValue": "+919000000002",
             "messageText": "Which street?"}}))

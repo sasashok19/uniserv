@@ -196,11 +196,13 @@ async def _append_menu_hint(tenant_id: str, payload: dict, trace_id: str | None)
     if payload.get("channel") != menu.CHANNEL or not payload.get("messageText"):
         return payload
     try:
-        thread_key = payload.get("threadId") or f"{menu.CHANNEL}:{payload.get('channelIdentityValue')}"
-        if not await menu.load_session(tenant_id, thread_key):
-            return payload
         content = menu.menu_content.resolve(
             await DbWriterClient().get_tenant_config(tenant_id, trace_id=trace_id))
+        if not content.get("enabled", True):
+            return payload
+        # Not gated on an active session (Feature 28): a citizen answering an
+        # agent's follow-up has no menu session, and `#` works for them too —
+        # handle_inbound treats it as the top-level escape from any state.
         hint = menu.menu_content.render(content, "menuHint")
         if not hint or hint in payload["messageText"]:
             return payload
@@ -278,17 +280,21 @@ async def _run_menu(
         outcome = await menu.handle_inbound(
             db, tenant_id, thread_key, req.rawText,
             identity_value=req.channelIdentity.value, tenant_config=tenant_config,
-            trace_id=trace_id)
+            trace_id=trace_id, in_reply_to=req.inReplyTo)
     except Exception:  # noqa: BLE001 - see the docstring
         logger.exception("whatsapp menu failed traceId=%s; falling through to the AI pipeline", trace_id)
         return menu.MenuOutcome(replies=[], stop=False, text=req.rawText)
 
-    for text in outcome.replies:
+    for message in outcome.replies:
         try:
             await deliver_reply({
                 "channel": req.channel,
                 "channelIdentityValue": req.channelIdentity.value,
-                "messageText": text,
+                "messageText": message.text,
+                # Feature 28: present only on the main menu, which renders as
+                # tappable reply buttons instead of "press 1".
+                "buttons": message.buttons,
+                "footer": message.footer,
             }, trace_id=trace_id)
         except Exception:  # noqa: BLE001 - one failed send must not swallow the rest
             logger.exception("failed to send a menu reply traceId=%s", trace_id)
@@ -351,12 +357,14 @@ async def _handle_complaint_ready(tenant_id: str, event: dict) -> None:
             logger.exception("menu registration close-out failed traceId=%s", trace_id)
             closing = None
         if closing:
-            for text in closing:
+            for message in closing:
                 try:
                     await deliver_reply({
                         "channel": menu.CHANNEL,
                         "channelIdentityValue": payload.get("channelIdentityValue"),
-                        "messageText": text,
+                        "messageText": message.text,
+                        "buttons": message.buttons,
+                        "footer": message.footer,
                         "ticketNumber": result.get("ticketNumber"),
                     }, trace_id=trace_id)
                 except Exception:  # noqa: BLE001 - the ticket is saved either way

@@ -762,6 +762,12 @@ reads on WhatsApp, grouped in the order the conversation actually runs -
 welcome and menu, option 1 (existing ticket), option 2 (new ticket), duplicates,
 ending the chat - plus the `enabled` toggle and the session length.
 
+Feature 28 adds the three button labels (capped at WhatsApp's 20 characters and
+rejected on save if longer), the `menuIntro` line shown with them, a
+**"Show the options as tappable buttons"** toggle, and `complaintUnknown`. The
+`menuPrompt` field stays as the text fallback — used when buttons are off, and
+when an interactive send fails.
+
 Same conventions as the Landing Page panel, both load-bearing: **blank means
 "use the default"** (a blank welcome would otherwise send an empty WhatsApp
 message), and the server's RESOLVED view is echoed back after a save so a

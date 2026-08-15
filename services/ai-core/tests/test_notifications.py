@@ -132,7 +132,7 @@ def test_send_whatsapp_posts_to_whatsapp_send_endpoint():
 
     assert result["delivered"] is True
     kwargs = client.post.await_args.kwargs
-    assert kwargs["json"] == {"to": "+919876543210", "body": "hello", "contextMessageId": None}
+    assert kwargs["json"] == {"to": "+919876543210", "buttons": None, "footer": None, "body": "hello", "contextMessageId": None}
 
 
 def test_send_whatsapp_reports_failure_without_raising_when_gateway_says_not_sent():
