@@ -610,3 +610,61 @@ def test_the_registration_confirmation_also_names_the_complaint(fake_valkey):
     replies = _run(menu.finish_registration(db, TENANT, THREAD, "t-1", "TKT-00042", {}))
 
     assert "No water supply in Velachery" in replies[0].text
+
+
+def test_an_answer_reaches_the_ticket_even_with_a_live_menu_session(fake_valkey):
+    """The reported bug, exactly.
+
+    The citizen used the menu earlier, so a session is still alive (12h TTL).
+    An agent then replies "Is this resolved?" from the ticket screen and the
+    citizen answers. The answer matches no menu option, and the first version
+    of this fix only checked the NO-session branch — so they were told "Sorry,
+    I didn't catch that" and their answer never reached the ticket.
+    """
+    fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"] = json.dumps({"state": "menu"})
+    db = _awaiting_db(_outbound(content="Is this resolved?"))
+
+    out = _handle(db, "Yes it is resolved now")
+
+    assert out.stop is False, "the answer must reach the routing ladder"
+    assert out.replies == []
+    assert out.text == "Yes it is resolved now"
+    # The agent has taken the conversation over; a stale menu state would send
+    # the citizen's NEXT message somewhere wrong too.
+    assert f"wamenu:{TENANT}:{THREAD}" not in fake_valkey.store
+
+
+def test_a_swipe_reply_reaches_the_ticket_even_with_a_live_menu_session(fake_valkey):
+    fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"] = json.dumps({"state": "menu"})
+    db = _awaiting_db(None)
+    db.find_message_by_channel_id = AsyncMock(return_value={"id": "m-9", "ticket_id": "t-1"})
+
+    out = _run(menu.handle_inbound(db, TENANT, THREAD, "Yes", identity_value=PHONE,
+                                   tenant_config={}, in_reply_to="wamid.OURS"))
+
+    assert out.stop is False
+    assert out.text == "Yes"
+
+
+def test_choosing_an_option_still_wins_over_an_awaiting_ticket(fake_valkey):
+    """A citizen who deliberately taps "Ticket status" must get the menu flow,
+    even when a ticket also happens to be waiting on them."""
+    fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"] = json.dumps({"state": "menu"})
+    db = _awaiting_db(_outbound())
+
+    out = _handle(db, "Ticket status")
+
+    assert out.stop is True
+    assert "Ticket ID" in out.replies[0].text
+
+
+def test_a_mis_key_with_nothing_awaiting_still_re_shows_the_menu(fake_valkey):
+    """The fix must not swallow genuine mis-keys into the routing ladder."""
+    fake_valkey.store[f"wamenu:{TENANT}:{THREAD}"] = json.dumps({"state": "menu"})
+    db = _awaiting_db({"direction": "inbound", "content": "hi",
+                       "created_at": "2999-01-01 00:00:00"})
+
+    out = _handle(db, "9")
+
+    assert out.stop is True
+    assert "didn't catch that" in out.replies[0].text

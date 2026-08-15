@@ -280,6 +280,16 @@ HTTP/1.1 200 OK
   menu session existed. `menu.awaiting_our_reply` now checks for a swipe-reply to
   one of our messages, or a recent unanswered outbound on one of their tickets,
   and hands those straight to the routing ladder.
+  - Checked in TWO places. "No session" is the obvious one; the one that
+    actually fires is the idle `MENU` state, because a citizen who used the menu
+    earlier still has a session for up to 12h and their answer matches no
+    option. A chosen option still wins over it, and a match clears the session
+    so the agent's conversation is not interrupted again next turn.
+  - `nothing is awaiting this citizen's reply ... rejected=[...]` is logged with
+    a per-ticket reason (`citizen-spoke-last`, `outside-reply-window`,
+    `intake-question`), alongside a `whatsapp menu inbound ... state=... option=...`
+    line — diagnosing this from the outside otherwise means reading the code
+    against a Valkey dump.
 - **Ask before creating a duplicate (Feature 26).** An ambiguous repeat
   complaint now asks the citizen a distinguishing question and creates nothing
   until they answer (`app/dedup/confirmation.py`, state at

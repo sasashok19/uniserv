@@ -52,7 +52,7 @@ CHANNEL = "whatsapp"
 # we are waiting on an answer. Bounded because this runs on every message that
 # arrives without a session; a citizen with more than a couple of live tickets
 # is rare, and the newest is overwhelmingly the one in play.
-_AWAITING_REPLY_CANDIDATES = 3
+_AWAITING_REPLY_CANDIDATES = 5
 
 # Meta's interactive reply-button limits. Enforced here as well as in the
 # gateway's validation: a payload Meta rejects means the citizen gets nothing.
@@ -305,6 +305,12 @@ async def handle_inbound(
     ttl = int(content.get("sessionTtlHours", menu_content.DEFAULT_SESSION_TTL_HOURS))
     text = (raw_text or "").strip()
     session = await load_session(tenant_id, thread_key)
+    # One line saying what state this message landed in and whether it looked
+    # like a menu option. Without it, "why did the citizen get the menu again?"
+    # can only be answered by reading the code against a Valkey dump.
+    logger.info("whatsapp menu inbound traceId=%s state=%s option=%s replyTo=%s",
+                trace_id, (session or {}).get("state", "none"),
+                _match_option(text, content), bool(in_reply_to))
 
     # `#` outranks every state, including "no session at all".
     if text == RETURN_TO_MENU:
@@ -333,7 +339,7 @@ async def handle_inbound(
     state = session.get("state")
     if state == STATE_MENU:
         return await _at_menu(db, tenant_id, thread_key, content, session, text, ttl,
-                              tenant_config, trace_id)
+                              tenant_config, trace_id, identity_value, in_reply_to)
     if state == STATE_AWAIT_TICKET_ID:
         return await _await_ticket_id(db, tenant_id, thread_key, content, session, text,
                                       identity_value, ttl, trace_id)
@@ -394,26 +400,37 @@ async def awaiting_our_reply(
         return False
 
     cutoff = _reply_window_cutoff(tenant_config)
+    # Why each candidate was rejected, logged as one line when none qualify.
+    # Diagnosing this from the outside otherwise means reading the whole
+    # conversation and guessing — which is exactly what it cost the first time.
+    rejected: list[str] = []
     for ticket in tickets[:_AWAITING_REPLY_CANDIDATES]:
+        number = ticket.get("ticket_number") or ticket.get("id")
         try:
             messages = await db.get_messages(ticket["id"], trace_id=trace_id)
         except Exception:  # noqa: BLE001 - one ticket failing must not decide the answer
+            rejected.append(f"{number}:messages-unreadable")
             continue
         if not messages:
+            rejected.append(f"{number}:no-messages")
             continue
         last = messages[-1]
         if last.get("direction") != "outbound":
+            rejected.append(f"{number}:citizen-spoke-last")
             continue
         if (last.get("created_at") or "") < cutoff:
+            rejected.append(f"{number}:outside-reply-window")
             continue
         # An intake request belongs to the menu's own option-2 flow, which has
-        # its own session. If we are here there is no session, so that exchange
-        # is over and this is not an answer to it.
+        # its own session, so an answer to it is not an answer to an agent.
         if last.get("is_intake_request"):
+            rejected.append(f"{number}:intake-question")
             continue
-        logger.info("ticket %s is awaiting the citizen's reply traceId=%s",
-                    ticket.get("ticket_number"), trace_id)
+        logger.info("ticket %s is awaiting the citizen's reply traceId=%s", number, trace_id)
         return True
+
+    logger.info("nothing is awaiting this citizen's reply traceId=%s checked=%d rejected=%s",
+                trace_id, len(tickets[:_AWAITING_REPLY_CANDIDATES]), rejected or "none")
     return False
 
 
@@ -472,6 +489,7 @@ def _match_option(text: str, content: Optional[dict] = None) -> Optional[str]:
 async def _at_menu(
     db: DbWriterClient, tenant_id: str, thread_key: str, content: dict, session: dict,
     text: str, ttl: int, tenant_config: Optional[dict], trace_id: Optional[str],
+    identity_value: Optional[str] = None, in_reply_to: Optional[str] = None,
 ) -> MenuOutcome:
     option = _match_option(text, content)
 
@@ -491,9 +509,27 @@ async def _at_menu(
         await clear_session(tenant_id, thread_key)
         return MenuOutcome(replies=[MenuMessage(menu_content.render(content, "farewell"))])
 
-    # Anything else at the menu is a mis-key. Re-show the options rather than
-    # guessing, and keep whatever they typed in case it was a complaint they
-    # will now register with 2.
+    # Not one of the options. Before calling it a mis-key, check whether it is
+    # an ANSWER to something we asked (Feature 28).
+    #
+    # This is the case the first version of the fix missed, and the one that
+    # actually happens: the citizen used the menu earlier, so a session is still
+    # alive for up to 12 hours. An agent then replies from the ticket screen,
+    # the citizen answers "yes it is" — which matches no option — and the old
+    # code showed them "Sorry, I didn't catch that" while their answer never
+    # reached the ticket. Checking only the no-session branch covered the empty
+    # case and left the common one broken.
+    if await awaiting_our_reply(db, tenant_id, identity_value, in_reply_to,
+                                tenant_config, trace_id):
+        logger.info("inbound at the menu answers a question we asked traceId=%s — "
+                    "handing it to the routing ladder", trace_id)
+        # The agent has taken this conversation over, so the menu step aside
+        # entirely rather than leaving a stale state for the next message.
+        await clear_session(tenant_id, thread_key)
+        return MenuOutcome(replies=[], stop=False, text=text)
+
+    # A genuine mis-key. Re-show the options rather than guessing, and keep
+    # whatever they typed in case it was a complaint they will now register with 2.
     if text and not session.get("carryOver"):
         session["carryOver"] = text
         await save_session(tenant_id, thread_key, session, ttl)

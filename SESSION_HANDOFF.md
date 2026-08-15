@@ -296,7 +296,31 @@ New config keys: `menuIntro`, `option1Label`/`option2Label`/`option3Label`,
 covered by the drift guard — whose own key regex was `[A-Za-z]+` and could not
 match `option1Label`; now `[A-Za-z][A-Za-z0-9]*`.
 
-Counts after F28: db-writer **52**, api-gateway **171**, ai-core **426**,
+### F28 follow-up: the first cut of fix (1) did not fire in production
+
+Reported still broken after deploy. The ai-core log gave it away — between the
+tenant-config read and the send there was **no `find_by_phone` and no
+`find_message_by_channel_id`**, so `awaiting_our_reply` never ran at all.
+
+Cause: it was only checked on the **no-session** branch. The citizen had used the
+menu earlier, so a session was still live (12h TTL); their answer arrived at the
+idle `MENU` state, matched no option, and fell straight to "Sorry, I didn't catch
+that". The empty case was covered and the common one was not.
+
+Now checked at `MENU` too, after option matching and before the mis-key
+fallback, and a match **clears the session** (the agent has taken the
+conversation over). Candidate cap raised 3 -> 5. Two new log lines make the next
+one diagnosable without sending logs to anyone:
+`whatsapp menu inbound ... state=... option=... replyTo=...` and
+`nothing is awaiting this citizen's reply ... rejected=[TKT-x:citizen-spoke-last, ...]`.
+
+Pinned by `test_an_answer_reaches_the_ticket_even_with_a_live_menu_session`.
+
+Note on the gateway log: three consecutive `WhatsApp webhook processed,
+published=0` right after an outbound send are Meta's sent/delivered/read status
+callbacks, which carry no `messages` array. Normal, not a dropped message.
+
+Counts after F28: db-writer **52**, api-gateway **171**, ai-core **430**,
 dashboard tsc + build clean.
 
 ## Deploying this

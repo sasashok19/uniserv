@@ -1805,8 +1805,8 @@ never reached the ticket and the agent never saw it. The agent's reply goes out
 through the **gateway**, which ai-core never sees, so no menu session existed for
 the citizen's answer to belong to.
 
-Fixed without weakening strict mode. Before greeting anyone, `awaiting_our_reply`
-asks whether we are waiting on them, cheapest signal first:
+Fixed without weakening strict mode. `awaiting_our_reply` asks whether we are
+waiting on them, cheapest signal first:
 
 1. **They swipe-replied to a message we sent** — Meta gives us its wamid as
    `context.id`, and if it matches a message we recorded this is unambiguous.
@@ -1827,8 +1827,22 @@ conversation); the outbound is older than the reply window; the outbound was an
 intake request (that belongs to option 2's own session, and reaching this code
 means the session is gone).
 
-An active menu session still wins — a citizen mid-way through "press 1" must not
-be diverted because a ticket also happens to be awaiting them.
+**It is checked in two places, and the second one is the one that matters.** The
+obvious place is "no session at all". But a citizen who used the menu earlier
+still has a live session for up to 12 hours, so their answer arrives at the idle
+`MENU` state, matches no option, and used to get "Sorry, I didn't catch that" —
+which is exactly the reported failure. So the check also runs at `MENU`, after
+option matching and before the mis-key fallback:
+
+- a tapped/typed **option always wins** (someone choosing "Ticket status" while a
+  ticket awaits them gets the menu flow they asked for);
+- anything else is tested against `awaiting_our_reply` before being called a
+  mis-key;
+- on a match the **session is cleared** — the agent has taken the conversation
+  over, and a stale menu state would misroute their next message too.
+
+Mid-flow states (`AWAIT_TICKET_ID`, `AWAIT_NOTE`, `INTAKE`) are untouched: there
+the citizen's text is that flow's input, and `#` is the way out.
 
 ### Tappable buttons instead of "Press 1" (Feature 28)
 
