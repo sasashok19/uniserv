@@ -262,12 +262,12 @@ cd services/db-writer  && mvn quarkus:dev
 - `app/events/dispatcher.py` — the live consumer loop: reads
   `channel.message.received` off Valkey and hands each event to
   `ConversationAgent.process()`. For WhatsApp the **conversation menu**
-  (`app/conversation/menu.py`, Feature 26) runs first and may answer the
-  message entirely on its own — options 1 and 3 create no ticket, so the menu
-  sits ahead of `ensure_ticket_stub`. It also appends the "press # for the main
-  menu" line to outgoing AI replies (`_append_menu_hint`) and, on
-  `complaint.ready`, closes out a menu-registered ticket with its details
-  instead of the ordinary acknowledgement. See
+  (`app/conversation/menu.py`, Features 26/29) runs first and may answer the
+  message entirely on its own — the profile, status and end-chat options create
+  no ticket, so the menu sits ahead of `ensure_ticket_stub`. It also appends the
+  "press # for the main menu" line to outgoing AI replies (`_append_menu_hint`)
+  and, on `complaint.ready`, closes out a menu-registered ticket with a single
+  details message instead of the ordinary acknowledgement. See
   [WhatsApp conversation menu](#whatsapp-conversation-menu).
 - `app/conversation/menu.py` + `menu_content.py` — the deterministic WhatsApp
   state machine and its tenant-configurable copy. No LLM: the status and ETA a
@@ -493,8 +493,9 @@ cd services/db-writer  && mvn quarkus:dev
   [Configurable landing page](#configurable-landing-page).
 - `src/components/admin/WhatsAppMenuPanel.tsx` — Administration → WhatsApp
   Menu sub-tab: every string a citizen reads on WhatsApp, grouped the way the
-  conversation actually runs (welcome & menu, option 1, option 2, duplicates,
-  ending the chat), plus the `enabled` toggle and the session length; saves to
+  conversation actually runs (welcome & menu, update my details, existing
+  ticket, new ticket, duplicates, ending the chat), plus the `enabled` toggle
+  and the session length; saves to
   `PUT /api/v1/tenant/whatsapp-menu`. Same convention as the landing page —
   **blank means "use the default"**, and the server's resolved view is echoed
   back after a save so a cleared field visibly refills. See
@@ -1679,35 +1680,38 @@ which cannot be bundled for the browser.
 
 ## WhatsApp conversation menu
 
-**Feature 26.** WhatsApp is now a guided conversation with a fixed menu, and the
-AI speaks first.
+**Feature 26**, restructured by **Feature 29**. WhatsApp is a guided
+conversation with a fixed menu, the AI speaks first, and it greets the citizen
+by name when it recognises the number.
 
 ### What the citizen sees
 
 ```
 Citizen: hi
-   AI:   Welcome to TNEB!
+   AI:   Hello Ashok, welcome back to TNEB!
 
          Please choose an option:
-         Press 1 to know the status, ETA and last update for an existing ticket.
-         Press 2 to register a new ticket.
-         Press 3 to end this chat.
-
-         You can press # at any time to return to the main menu.
+         [ Choose an option ▾ ]   ← a list, because four options cannot be buttons
+             Update my details
+             Ticket status
+             New ticket
+             End chat
 ```
 
 | Option | What happens |
 |---|---|
-| **1** | Asks for a Ticket ID, then returns **that one ticket only** — status, ETA, last updated — and invites a note. A note is appended to the ticket's conversation, acknowledged ("the team will revert"), and the conversation ends. |
-| **2** | Lists the details needed (the tenant's own [intake fields](#configurable-per-channel-intake-fields)), then hands off to the existing AI intake and routing ladder. On creation the citizen gets the ticket details and the conversation ends. |
-| **3** | "Thanks for reaching out. Have a great time" — session cleared, no hint appended. |
-| **#** | Returns to the main menu from any state. |
+| **1 — Update my details** | Name / Email / Main menu. Whichever they pick, we ask and **their next message is the answer**; the Main menu option on the ask is the cancel. Saved against their identity as a *correction*, not an enrichment. |
+| **2 — Ticket status** | Lists their **open and resolved** tickets as tappable rows (number + complaint, with status and last-updated underneath). More than five and it asks for the number instead, still offering the ten most recent. Tapping one returns **that ticket only** — status, ETA, last updated — and invites a note. |
+| **3 — New ticket** | Lists the details needed (the tenant's own [intake fields](#configurable-per-channel-intake-fields)), then hands off to the existing AI intake and routing ladder. On creation the citizen gets **one** message: the ticket details and a Main menu option. |
+| **4 — End chat** | "Thanks for reaching out. Have a great time" — session cleared, no way back offered. |
+| **#** / **Main menu** | Returns to the main menu from any state. |
 
-Every message except the goodbye carries the `#` hint. For menu-owned messages
-that is part of the composed text; for the AI's own replies during option 2 it
-is appended in `dispatcher._append_menu_hint`, deterministically rather than by
-asking the model — "in all conversation" is not something a prompt instruction
-delivers reliably.
+Every message except the goodbye carries a way back. Below the top level that is
+a **Main menu** option on the message itself — "press #" was always true and
+always invisible, because the citizen is looking at buttons. For the AI's own
+replies during registration the `#` hint is appended in
+`dispatcher._append_menu_hint`, deterministically rather than by asking the model
+— "in all conversation" is not something a prompt instruction delivers reliably.
 
 ### The state machine
 
@@ -1716,18 +1720,52 @@ delivers reliably.
 `whatsapp:<phone>`).
 
 ```
-(no session)     --any message-->  MENU              [welcome + 1/2/3]
-MENU             --"1"-->          AWAIT_TICKET_ID
-MENU             --"2"-->          INTAKE            [hands off to the AI pipeline]
-MENU             --"3"-->          (cleared)         [farewell]
-AWAIT_TICKET_ID  --ticket id-->    AWAIT_NOTE        [details: status/ETA/updated]
-AWAIT_NOTE       --any message-->  (cleared)         [note appended to the ticket]
-INTAKE           --ticket filed--> (cleared)         [details + "message us again"]
-any              --"#"-->          MENU
+(no session)     --any message-->  MENU              [welcome, by name if known]
+MENU  --"update my details"-->     PROFILE           [Name / Email / Main menu]
+MENU  --"ticket status"----->      AWAIT_TICKET_CHOICE  [their tickets, tappable]
+                              or   AWAIT_TICKET_ID      [>5: ask for the number]
+MENU  --"new ticket"------->       INTAKE            [hands off to the AI pipeline]
+MENU  --"end chat"--------->       (cleared)         [farewell]
+PROFILE          --"name"-->       AWAIT_NAME
+PROFILE          --"email"-->      AWAIT_EMAIL
+AWAIT_NAME       --text-->         MENU              [saved, or told why not]
+AWAIT_EMAIL      --text-->         MENU              [saved, invalid, or in use]
+AWAIT_TICKET_CHOICE --tap-->       AWAIT_NOTE        [details: status/ETA/updated]
+AWAIT_TICKET_ID  --ticket id-->    AWAIT_NOTE        [same]
+AWAIT_NOTE       --any message-->  MENU              [note appended to the ticket]
+INTAKE           --ticket filed--> MENU              [one message + Main menu]
+any     --"#" or "Main menu"-->    MENU
 ```
 
-It runs **before** `ensure_ticket_stub`, because options 1 and 3 must create no
-ticket at all.
+It runs **before** `ensure_ticket_stub`, because the profile, status and
+end-chat options must create no ticket at all.
+
+### Four options need a list, not buttons
+
+Meta caps interactive **reply-buttons at three** and rejects the whole send past
+that. The main menu has four, and a ticket list has up to ten rows, so both go
+out as Meta **list messages** — see
+[the adapter doc](docs/02b_ADAPTER_WHATSAPP.md). ai-core does not choose the
+shape: it hands the adapter a list of options and `WhatsAppAdapter.needsList`
+picks buttons or a list from the options themselves (more than three, or any
+option carrying a `description`).
+
+That description field is also what makes the ticket list readable. A row title
+is clipped to 24 characters — barely past `TKT-00042` — but the description
+holds 72, which is where the complaint and status actually fit.
+
+### The free-text rule is scoped, not global
+
+"Any message outside the options goes back to the main menu" applies **only at
+the main menu, when nothing is awaiting the citizen's reply**. Inside a flow
+their text is that flow's input: a ticket number, a name, a note, a complaint
+and a duplicate-disambiguation answer are all, technically, "outside the
+options". Applied literally the rule would undo every Feature 28 follow-up —
+starting with an agent's question, whose answer must reach the ticket rather
+than be greeted.
+
+At the menu, unrecognised text now gets the greeting *and* the menu back, rather
+than a bare "Sorry, I didn't catch that".
 
 ### Decisions worth knowing
 
@@ -1749,18 +1787,40 @@ is only a menu key is not carried over ("2" is not a complaint).
 with `whatsappMenu.enabled = false`, which restores the pre-Feature-26 behaviour
 exactly.
 
-**Ownership is checked on option 1.** Ticket numbers are sequential and
+**Ownership is checked on the status option.** Ticket numbers are sequential and
 guessable, so a ticket that exists but belongs to someone else is reported
 exactly like one that does not exist — saying "that ticket isn't yours" would
-itself confirm it exists.
+itself confirm it exists. A number typed after tapping a row is no more trusted
+than any other: the same ownership-checked lookup handles both.
+
+**Correcting a profile is not enriching one.** db-writer's
+`PATCH /api/v1/db/identities/{id}` has always refused to overwrite a field it
+already holds, which is exactly the value a citizen using "update my details" is
+trying to fix. Feature 29 added an explicit `overwrite: true` for this path only,
+so every enrichment caller keeps the old guarantee. Taking an email another
+identity already holds is refused with **409 `EMAIL_IN_USE`** rather than merged:
+only a human can tell "I mistyped it last time" from "that is my colleague's
+address", and the silent version would hand one person another's tickets.
 
 **Composed in code, never paraphrased.** The status and ETA read back to a
 citizen are facts, built from the ticket row — the same rule
 `status_lookup.py` already follows.
 
-**Button replies work.** WhatsApp interactive buttons arrive as the button's
-*title*, not its number (see `WhatsAppParser`), so the option matcher accepts
-`1`, `1.`, `1)`, `one`, `status`, and a leading word from a button title.
+**Taps work.** WhatsApp interactive replies arrive as the button's or row's
+*title*, not its number (see `WhatsAppParser`), so taps are matched against the
+tenant's own configured labels — a tenant that renames an option to "Pukaar darj
+karein" must still have the tap land on it. Typed keys (`1`, `1.`, `1)`, `one`,
+`status`) still work alongside. Whole-message match only: the first-word rule
+that used to catch button titles read "new water logging problem in my street"
+as the new-ticket option and lost the complaint.
+
+**The options are named, not numbered, in config.** Feature 29 inserted "update
+my details" at the top. Renumbering `option1Label`…`option3Label` would have
+silently relabelled every tenant that had customised its menu — their "Ticket
+status" wording would have started appearing on a button that edits their name.
+The keys are `labelProfile` / `labelStatus` / `labelNewTicket` / `labelEndChat`,
+and the old numbered keys are read as aliases keeping their **original**
+meanings.
 
 ### Configuration
 
@@ -1771,20 +1831,38 @@ Admin → **WhatsApp Menu** (`WhatsAppMenuPanel.tsx`), stored as
 | Key | Default | Notes |
 |---|---|---|
 | `companyName` | *(blank)* | Cascades to `landingPage.brandName`, then `"UniServe"`. Fills `{company}`. |
-| `welcome` | `Welcome to {company}!` | |
-| `menuPrompt` | the 1/2/3 block | Rejected on save if it has lost an option number |
+| `welcome` | `Welcome to {company}!` | A number we don't recognise |
+| `welcomeNamed` | `Hello {name}, welcome back to {company}!` | A number we do. Rejected on save without `{name}` |
+| `menuPrompt` | the 1/2/3/4 block | Rejected on save if it has lost an option number |
 | `menuHint` | `You can press # …` | Appended to every message except the goodbye |
 | `unknownOption`, `askTicketId`, `ticketNotFound` | see `WhatsAppMenuContent.java` | |
 | `ticketDetails`, `ticketCreated` | `{ticket}/{status}/{eta}/{updated}` | Rejected on save without `{ticket}` |
 | `inviteNote`, `noteAdded`, `registerIntro` | | |
+| `askComplaint` | `Please type your complaint …` | Used instead of `registerIntro` when the tenant has no intake fields configured |
 | `duplicateAsk`, `duplicateMerged` | | `{existing}`, `{question}` |
 | `conversationEnd`, `farewell`, `etaUnknown` | | |
-| `menuIntro` | `Please choose an option:` | Shown with the buttons (interactive mode only) |
-| `option1Label` / `option2Label` / `option3Label` | `Ticket status` / `New ticket` / `End chat` | The button titles. **Max 20 chars** — Meta's cap; rejected on save if longer |
+| `menuIntro` | `Please choose an option:` | Shown with the options (interactive mode only) |
+| `labelProfile` / `labelStatus` / `labelNewTicket` / `labelEndChat` | `Update my details` / `Ticket status` / `New ticket` / `End chat` | The option titles, in menu order. `option1Label`…`option3Label` are read as aliases for the last three |
+| `labelMainMenu` | `Main menu` | The way back on every sub-message |
+| `listButtonLabel` | `Choose an option` | The strip that opens the list panel |
+| `profilePrompt`, `labelNameOption`, `labelEmailOption` | `What would you like to update?` / `Name` / `Email` | The profile sub-menu — three options, so still reply-buttons |
+| `askName`, `askEmail`, `profileUnknownName` | | `profileUnknownName` is used when we hold no name yet, so the ask needs explaining |
+| `nameUpdated`, `emailUpdated` | | `{name}`, `{email}` |
+| `nameInvalid`, `emailInvalid`, `emailInUse` | | `emailInUse` is the 409 from db-writer, not a merge |
+| `ticketListIntro`, `ticketListEmpty`, `ticketListMany` | | `{count}` on the last one |
+| `ticketRowTitle` | `{ticket} {complaint}` | Clipped to **24** by Meta. Rejected on save without `{ticket}` |
+| `ticketRowDescription` | `{status} · updated {updated}` | Clipped to **72** — this is where the detail fits |
+| `labelTypeTicketId` | `Not listed — type ID` | The escape row when they have more than five |
 | `complaintUnknown` | `not summarised yet` | Fills `{complaint}` when the ticket has no chief complaint |
-| `useInteractiveButtons` | `true` | `false` sends the numbered `menuPrompt` text instead |
+| `useInteractiveButtons` | `true` | `false` sends the numbered `menuPrompt` text instead, and the status option falls back to asking for the number |
 | `enabled` | `true` | `false` restores the pre-menu behaviour |
 | `sessionTtlHours` | `12` | 1-24. Capped at 24 because Meta only permits a free-form reply within 24h of the citizen's last message, so a longer session could never be answered. Clamped on read as well as write. |
+
+Every `label*` key and `listButtonLabel` is capped at **20 characters** and
+rejected on save if longer. A list row title may be 24, but the same label
+appears in both shapes — "Main menu" is a row on the ticket list and a button in
+the profile sub-menu — so only the stricter cap is always safe, and Meta rejects
+the entire send if one is exceeded.
 
 Blank means **use the default**, everywhere — a blank welcome would otherwise
 send an empty WhatsApp message. Placeholders are filled by plain string

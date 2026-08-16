@@ -61,6 +61,7 @@ public class WhatsAppWebhookResource {
 | image / document | → rawMediaUrls |
 | audio | → rawMediaUrls, flag for STT (Phase 2) |
 | interactive button reply | → extract button title as rawText |
+| interactive list reply | → extract row title as rawText (Feature 29 sends these) |
 
 This message's own wamid (`message.id`) is captured into `messageId`
 (Feature 15 parity with email's `Message-ID`) — persisted as the ticket's
@@ -274,6 +275,47 @@ HTTP/1.1 200 OK
     `button_reply` branch reachable. A tap arrives as the button's **title**, so
     ai-core matches taps against the tenant's configured labels.
   - `WhatsAppInteractiveTest` covers the payload shape and every cap.
+- **Interactive list messages (Feature 29).** Three buttons could not carry a
+  four-option main menu or a citizen's ticket list, so `buildPayload` gained
+  Meta's second interactive shape, `interactive.type: "list"`: one section, up
+  to 10 rows of `{id, title, description}`, opened by a labelled strip.
+  - **The caller does not choose the shape — `WhatsAppAdapter.needsList` does.**
+    Reply-buttons stay the default because the choices sit in the thread instead
+    of behind a tap. A list is used only when buttons cannot express the ask:
+    more than 3 options, or any option carrying a `description` (a button has no
+    second line, and dropping it would silently lose the detail that tells one
+    ticket from another).
+  - This **replaces Feature 28's truncation** of surplus buttons. Clipping to
+    three was survivable when the menu had exactly three options; it would now
+    mean the citizen never sees "End chat".
+  - New caps, same truncate-don't-trust rule: 10 rows, 24-char row title,
+    72-char row description, 200-char row id, 20-char list button label
+    (defaulting to `Choose`). Body and footer caps are shared with buttons.
+  - **Row ids are forced unique.** Meta rejects the whole send on a duplicate,
+    and two rows collide easily once an id defaults to a title that is then
+    clipped to 24 characters (`TKT-00042 · Power cut in Madambakkam` and
+    `... in Selaiyur` are the same 24 characters).
+  - `POST /api/v1/internal/adapters/whatsapp/send` keeps the field name
+    `buttons` for wire compatibility and adds an optional `listLabel`. Entries
+    may now carry `description`.
+  - A row set that comes out empty falls back to text, exactly as buttons do.
+  - The 72-char description is what gives a ticket row room to name its
+    complaint alongside `TKT-00042` in a 24-char title.
+  - `WhatsAppListMessageTest` covers shape selection, every cap, id uniqueness
+    and the parser reading back a tapped row.
+- **The conversation the list messages carry (Feature 29).** Four main-menu
+  options (update my details / ticket status / new ticket / end chat), the
+  citizen greeted by name when the number resolves to an identity, their tickets
+  listed as tappable rows instead of asked for by number, a **Main menu** option
+  on every message below the top level, and one message — not two — to close out
+  a registration. The flow, its states and every config key are documented in
+  the README's *WhatsApp conversation menu* section.
+  - **No text-box-with-Submit.** WhatsApp has no inline form outside a published
+    **Flow**, which is a Meta-console asset rather than something in this repo.
+    The name/email/complaint steps therefore ask and take the citizen's next
+    message as the answer, with the Main menu option as the cancel. Converting a
+    step to a Flow later is contained: the state machine does not care where the
+    text came from.
 - **Answering us is not starting a chat (Feature 28).** A citizen replying to an
   agent's follow-up used to get the welcome menu, losing their answer: the
   agent's message goes out through the gateway, so ai-core never saw it and no

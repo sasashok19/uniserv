@@ -39,33 +39,54 @@ const GROUPS: { title: string; blurb: string; fields: Field[] }[] = [
       {
         key: "welcome",
         label: "Welcome message",
-        help: "Sent when a conversation starts.",
+        help: "Sent when a conversation starts from a number we don't recognise.",
         placeholders: ["{company}"],
       },
       {
-        key: "menuIntro",
-        label: "Prompt above the buttons",
-        help: "Shown with the tappable buttons. Only used when buttons are on.",
+        key: "welcomeNamed",
+        label: "Welcome message (known number)",
+        help: "Used when the number is already in the system. Must include {name}.",
+        placeholders: ["{name}", "{company}"],
       },
       {
-        key: "option1Label",
-        label: "Button 1 — existing ticket",
+        key: "menuIntro",
+        label: "Prompt above the options",
+        help: "Shown with the tappable options. Only used when they are on.",
+      },
+      {
+        key: "labelProfile",
+        label: "Option 1 — update my details",
         help: "Max 20 characters (WhatsApp's limit).",
       },
       {
-        key: "option2Label",
-        label: "Button 2 — new ticket",
+        key: "labelStatus",
+        label: "Option 2 — existing ticket",
         help: "Max 20 characters.",
       },
       {
-        key: "option3Label",
-        label: "Button 3 — end chat",
+        key: "labelNewTicket",
+        label: "Option 3 — new ticket",
         help: "Max 20 characters.",
+      },
+      {
+        key: "labelEndChat",
+        label: "Option 4 — end chat",
+        help: "Max 20 characters.",
+      },
+      {
+        key: "labelMainMenu",
+        label: "Back to the main menu",
+        help: "On every message below the top level. Max 20 characters.",
+      },
+      {
+        key: "listButtonLabel",
+        label: "Label that opens the list",
+        help: "Four options can't be buttons — WhatsApp caps those at three — so they arrive as a list behind this label. Max 20 characters.",
       },
       {
         key: "menuPrompt",
         label: "Menu options (text fallback)",
-        help: "Used when buttons are switched off, and if WhatsApp rejects an interactive send. Must still offer 1, 2 and 3.",
+        help: "Used when the tappable options are switched off, and if WhatsApp rejects an interactive send. Must still offer 1, 2, 3 and 4.",
         rows: 5,
       },
       {
@@ -73,13 +94,71 @@ const GROUPS: { title: string; blurb: string; fields: Field[] }[] = [
         label: "Return-to-menu hint",
         help: "Appended to every message except the goodbye. Leave blank only if you mean to remove it.",
       },
-      { key: "unknownOption", label: "Unrecognised input", help: "Shown when the reply isn't 1, 2 or 3." },
+      {
+        key: "unknownOption",
+        label: "Unrecognised input",
+        help: "Shown with the menu when the citizen types something instead of choosing — but only at the main menu, never mid-flow.",
+      },
     ],
   },
   {
-    title: "Option 1 — existing ticket",
-    blurb: "Status, ETA and last update for one ticket, then the chance to add a note.",
+    title: "Option 1 — update my details",
+    blurb:
+      "The citizen correcting their own name or email. WhatsApp has no form outside a published Flow, so we ask and their reply is the answer.",
     fields: [
+      { key: "profilePrompt", label: "Name or email?", help: "" },
+      { key: "labelNameOption", label: "Button — name", help: "Max 20 characters." },
+      { key: "labelEmailOption", label: "Button — email", help: "Max 20 characters." },
+      { key: "askName", label: "Ask for the name", help: "" },
+      {
+        key: "profileUnknownName",
+        label: "Ask for the name (first time)",
+        help: "Used when we hold no name for this number, so the ask needs explaining.",
+        rows: 2,
+      },
+      { key: "askEmail", label: "Ask for the email", help: "" },
+      { key: "nameUpdated", label: "Name saved", help: "", placeholders: ["{name}"] },
+      { key: "emailUpdated", label: "Email saved", help: "", placeholders: ["{email}"] },
+      { key: "nameInvalid", label: "That isn't a name", help: "", rows: 2 },
+      { key: "emailInvalid", label: "That isn't an email address", help: "", rows: 2 },
+      {
+        key: "emailInUse",
+        label: "Email belongs to someone else",
+        help: "Refused rather than moved: taking an address that identifies another person would reassign their tickets.",
+        rows: 3,
+      },
+    ],
+  },
+  {
+    title: "Option 2 — existing ticket",
+    blurb: "Their open and resolved tickets, tappable — or a request for the number when there are more than five.",
+    fields: [
+      { key: "ticketListIntro", label: "Above the list", help: "" },
+      { key: "ticketListEmpty", label: "No tickets to show", help: "", rows: 2 },
+      {
+        key: "ticketListMany",
+        label: "Too many to list",
+        help: "Shown above the ten most recent when they have more than five.",
+        rows: 3,
+        placeholders: ["{count}"],
+      },
+      {
+        key: "ticketRowTitle",
+        label: "List row — title",
+        help: "Clipped to 24 characters by WhatsApp. Must include {ticket}.",
+        placeholders: ["{ticket}", "{complaint}"],
+      },
+      {
+        key: "ticketRowDescription",
+        label: "List row — second line",
+        help: "Clipped to 72 characters. This is where the detail fits.",
+        placeholders: ["{status}", "{eta}", "{updated}", "{complaint}"],
+      },
+      {
+        key: "labelTypeTicketId",
+        label: "Row — none of these",
+        help: "Max 20 characters.",
+      },
       { key: "askTicketId", label: "Ask for the Ticket ID", help: "" },
       {
         key: "ticketNotFound",
@@ -111,14 +190,20 @@ const GROUPS: { title: string; blurb: string; fields: Field[] }[] = [
     ],
   },
   {
-    title: "Option 2 — new ticket",
+    title: "Option 3 — new ticket",
     blurb: "The details needed are appended automatically from your Intake Fields configuration.",
     fields: [
       { key: "registerIntro", label: "Start registration", help: "", rows: 2 },
       {
+        key: "askComplaint",
+        label: "Ask for the complaint",
+        help: "Used instead of the above when no intake fields are configured, so the citizen is never asked to 'reply with the following details' and then shown nothing.",
+        rows: 3,
+      },
+      {
         key: "ticketCreated",
         label: "Ticket registered",
-        help: "Must include {ticket}.",
+        help: "The single message that closes out a registration. Must include {ticket}.",
         rows: 4,
         placeholders: ["{ticket}", "{complaint}", "{status}", "{eta}", "{updated}"],
       },
@@ -150,7 +235,12 @@ const GROUPS: { title: string; blurb: string; fields: Field[] }[] = [
     blurb: "",
     fields: [
       { key: "conversationEnd", label: "Conversation ended", help: "", rows: 3 },
-      { key: "farewell", label: "Goodbye (option 3)", help: "The one message with no return-to-menu hint.", rows: 2 },
+      {
+        key: "farewell",
+        label: "Goodbye (end chat)",
+        help: "The one message with no way back on it — offering a menu we have just closed contradicts the goodbye.",
+        rows: 2,
+      },
     ],
   },
 ];

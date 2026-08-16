@@ -60,37 +60,54 @@ def sent_count():
         return sum(1 for _ in f)
 
 
+def readable(body):
+    """One sent payload as the text a check can assert on.
+
+    An interactive message keeps its words in `interactive.body.text` rather
+    than `text.body`, and the options themselves are the part that matters most
+    — so the titles are flattened onto the end. Before Features 28/29 this
+    script only ever read `text.body`, which now returns an empty string for
+    every menu message.
+    """
+    if body.get("type") != "interactive":
+        return body.get("text", {}).get("body", "")
+    interactive = body.get("interactive", {})
+    action = interactive.get("action", {})
+    titles = [b.get("reply", {}).get("title", "") for b in action.get("buttons", [])]
+    for section in action.get("sections", []):
+        titles += [row.get("title", "") for row in section.get("rows", [])]
+    parts = [interactive.get("body", {}).get("text", ""),
+             interactive.get("footer", {}).get("text", "")]
+    if titles:
+        parts.append("[options] " + " | ".join(t for t in titles if t))
+    return "\n".join(p for p in parts if p)
+
+
+def _bodies_since(from_index, want):
+    out = []
+    if not os.path.exists(SENT):
+        return out
+    with open(SENT, encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            if i < from_index:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("body", {}).get("to") == want:
+                out.append(readable(rec["body"]))
+    return out
+
+
 def sent_to(from_index, to_phone, timeout=40):
-    """Every message body the stub received for this phone since from_index."""
+    """Every message the stub received for this phone since from_index."""
     want = to_phone.lstrip("+")
     deadline = time.time() + timeout
     while time.time() < deadline:
-        out = []
-        if os.path.exists(SENT):
-            with open(SENT, encoding="utf-8") as f:
-                for i, line in enumerate(f):
-                    if i < from_index:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if rec.get("body", {}).get("to") == want:
-                        out.append(rec["body"].get("text", {}).get("body", ""))
-        if out:
+        if _bodies_since(from_index, want):
             time.sleep(2)   # let a second message of the same turn land
-            out = []
-            with open(SENT, encoding="utf-8") as f:
-                for i, line in enumerate(f):
-                    if i < from_index:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if rec.get("body", {}).get("to") == want:
-                        out.append(rec["body"].get("text", {}).get("body", ""))
-            return out
+            return _bodies_since(from_index, want)
         time.sleep(1)
     return []
 
@@ -121,6 +138,23 @@ def create_ticket(**extra):
     body = {"tenantId": TENANT, "channelOrigin": "whatsapp"}
     body.update(extra)
     r = httpx.post(f"{DBWRITER}/api/v1/db/tickets", json=body, headers=INTERNAL, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+
+def identity_for(p):
+    """The identity behind a phone number, created if this is a new one.
+
+    The Feature 29 ticket list is looked up BY IDENTITY, so a ticket created
+    straight through the db API has to carry one or it will not appear.
+    """
+    found = httpx.get(f"{DBWRITER}/api/v1/db/identities",
+                      params={"tenantId": TENANT, "phone": p}, headers=INTERNAL,
+                      timeout=20).json().get("data", [])
+    if found:
+        return found[0]
+    r = httpx.post(f"{DBWRITER}/api/v1/db/identities",
+                   json={"tenantId": TENANT, "phone": p}, headers=INTERNAL, timeout=20)
     r.raise_for_status()
     return r.json()
 
@@ -175,76 +209,140 @@ def _restore_tenant_config():
 print("\n=== Scenario B: the WhatsApp menu, through the real webhook ===", flush=True)
 
 p = phone()
+identity = identity_for(p)
+
 reply = turn(p, "hi")
 check("B1 the AI sends the first message", bool(reply), "nothing delivered")
 check("B2 it welcomes with the company name", "Welcome to" in reply, reply[:200])
-check("B3 it offers all three options",
-      all(x in reply for x in ("Press 1", "Press 2", "Press 3")), reply[:200])
-check("B4 it mentions the # shortcut", "#" in reply, reply[:200])
+check("B3 it offers all four options (Feature 29)",
+      all(x in reply for x in ("Update my details", "Ticket status", "New ticket", "End chat")),
+      reply[:300])
+check("B4 it mentions the # shortcut", "#" in reply, reply[:300])
 check("B5 a menu session exists", (session(p) or {}).get("state") == "menu", str(session(p)))
 check("B6 no ticket was created for a greeting",
       httpx.get(f"{DBWRITER}/api/v1/db/tickets", params={"tenantId": TENANT,
                 "threadId": f"whatsapp:{p}"}, headers=INTERNAL, timeout=20).json().get("data") == [])
 
 reply = turn(p, "9")
-check("B7 an unrecognised key re-shows the options",
-      "didn't catch that" in reply and "Press 1" in reply, reply[:200])
+check("B7 free text at the menu greets and re-shows the options",
+      "didn't catch that" in reply and "Ticket status" in reply, reply[:300])
 
-reply = turn(p, "1")
-check("B8 option 1 asks for the Ticket ID", "Ticket ID" in reply, reply[:200])
-check("B9 ...and moves the session", (session(p) or {}).get("state") == "await_ticket_id")
+# A ticket that IS theirs, with a real ETA. It carries the identity because the
+# Feature 29 list is looked up by identity, not by thread.
+mine = create_ticket(threadId=f"whatsapp:{p}", identityId=identity["master_id"],
+                     chiefComplaint="Power cut in Madambakkam")
+httpx.post(f"{DBWRITER}/api/v1/db/tickets/{mine['id']}/transition",
+           json={"toStatus": "in_progress", "eta": future(4)}, headers=INTERNAL, timeout=20)
+
+reply = turn(p, "2")
+check("B8 the status option lists their tickets", mine["ticketNumber"] in reply, reply[:400])
+check("B9 ...with a way back on it", "Main menu" in reply, reply[:400])
+check("B10 ...and moves the session",
+      (session(p) or {}).get("state") == "await_ticket_choice", str(session(p)))
 
 reply = turn(p, "TKT-99999")
-check("B10 an unknown ticket ID is reported as not found", "couldn't find" in reply, reply[:200])
+check("B11 an unknown ticket ID is reported as not found", "couldn't find" in reply, reply[:200])
 
 other = create_ticket(identityId="somebody-else-entirely")
 reply = turn(p, other["ticketNumber"])
-check("B11 another citizen's ticket is not readable by guessing its number",
+check("B12 another citizen's ticket is not readable by guessing its number",
       "couldn't find" in reply, reply[:250])
 
-# A ticket that IS theirs, with a real ETA
-mine = create_ticket(threadId=f"whatsapp:{p}")
-httpx.post(f"{DBWRITER}/api/v1/db/tickets/{mine['id']}/transition",
-           json={"toStatus": "in_progress", "eta": future(4)}, headers=INTERNAL, timeout=20)
 reply = turn(p, mine["ticketNumber"])
-check("B12 their own ticket returns status, ETA and last updated",
+check("B13 their own ticket returns status, ETA and last updated",
       mine["ticketNumber"] in reply and "Work in progress" in reply
       and time.strftime("%d %b %Y", time.gmtime(time.time() + 4 * 86400)) in reply, reply[:300])
-check("B13 ...and invites a note", "add" in reply.lower(), reply[:300])
-check("B14 ...and the session waits for one", (session(p) or {}).get("state") == "await_note")
+check("B14 ...and invites a note", "add" in reply.lower(), reply[:300])
+check("B15 ...and the session waits for one", (session(p) or {}).get("state") == "await_note")
 
 reply = turn(p, "The power is still off after three days")
-check("B15 the note is acknowledged and the conversation ends",
-      "team will revert" in reply and "main menu will open again" in reply, reply[:300])
-check("B16 the session is cleared", session(p) is None)
+check("B16 the note is acknowledged", "team will revert" in reply, reply[:300])
+check("B17 ...and the session returns to the menu",
+      (session(p) or {}).get("state") == "menu", str(session(p)))
 timeline = [m.get("content") for m in messages(mine["id"])]
-check("B17 the note actually landed on the ticket",
+check("B18 the note actually landed on the ticket",
       any("still off after three days" in (c or "") for c in timeline), str(timeline)[:250])
-check("B18 ...and is auditable as a citizen note",
+check("B19 ...and is auditable as a citizen note",
       any(e.get("event_type") == "ticket.citizen_note" for e in events(mine["id"])))
 
 reply = turn(p, "hello again")
-check("B19 a message after the end re-opens the main menu", "Press 1" in reply, reply[:200])
-
-reply = turn(p, "2")
-check("B20 option 2 lists the details needed",
-      "register a new ticket" in reply.lower() and "1." in reply, reply[:300])
-check("B21 ...and hands off to intake", (session(p) or {}).get("state") == "intake")
-
-reply = turn(p, "#")
-check("B22 # returns to the main menu", "Press 1" in reply and "Welcome" not in reply, reply[:200])
-check("B23 ...and resets the state", (session(p) or {}).get("state") == "menu")
+check("B20 a message after the end re-opens the main menu", "Ticket status" in reply, reply[:300])
 
 reply = turn(p, "3")
-check("B24 option 3 says goodbye", "Thanks for reaching out" in reply, reply[:200])
-check("B25 ...with no menu hint attached", "#" not in reply, reply[:200])
-check("B26 ...and clears the session", session(p) is None)
+check("B21 the new-ticket option lists the details needed",
+      "register a new ticket" in reply.lower() and "1." in reply, reply[:300])
+check("B22 ...and hands off to intake", (session(p) or {}).get("state") == "intake")
+
+reply = turn(p, "#")
+check("B23 # returns to the main menu",
+      "Ticket status" in reply and "Welcome" not in reply, reply[:300])
+check("B24 ...and resets the state", (session(p) or {}).get("state") == "menu")
+
+# --- Feature 29: update my details ----------------------------------------
+reply = turn(p, "1")
+check("B25 the profile option offers name and email",
+      "Name" in reply and "Email" in reply and "Main menu" in reply, reply[:300])
+check("B26 ...and moves the session", (session(p) or {}).get("state") == "profile")
+
+reply = turn(p, "Name")
+check("B27 it asks for the name", "name" in reply.lower(), reply[:200])
+check("B28 ...and waits for it", (session(p) or {}).get("state") == "await_name")
+
+reply = turn(p, "Ashok Srinivasan")
+check("B29 the name is confirmed back", "Ashok Srinivasan" in reply, reply[:200])
+check("B30 ...and actually saved against the identity",
+      identity_for(p).get("name") == "Ashok Srinivasan", str(identity_for(p))[:200])
+check("B31 ...and the session is back at the menu", (session(p) or {}).get("state") == "menu")
+
+reply = turn(p, "1")
+reply = turn(p, "Email")
+reply = turn(p, "not-an-email")
+check("B32 an invalid email is refused before any write",
+      "email address" in reply.lower(), reply[:200])
+
+# Unique per run: a fixed address is claimed by the first run and then correctly
+# refused to every later one by the collision guard below.
+my_email = f"ashok.{p.lstrip('+')}@example.com"
+reply = turn(p, my_email)
+check("B33 a valid email is saved", identity_for(p).get("email") == my_email,
+      str(identity_for(p))[:200])
+
+# An address that already identifies somebody else is a reassignment of whoever
+# owns their tickets, not an edit — db-writer 409s it and the citizen is told.
+taken = f"priya.{p.lstrip('+')}@example.com"
+httpx.post(f"{DBWRITER}/api/v1/db/identities",
+           json={"tenantId": TENANT, "phone": phone(), "email": taken},
+           headers=INTERNAL, timeout=20).raise_for_status()
+turn(p, "1")
+turn(p, "Email")
+reply = turn(p, taken)
+check("B33b an email another identity holds is refused",
+      "already registered" in reply, reply[:250])
+check("B33c ...and their own address is left alone",
+      identity_for(p).get("email") == my_email, str(identity_for(p))[:200])
+
+reply = turn(p, "Main menu")
+check("B34 the Main menu option comes back to the menu",
+      "Ticket status" in reply, reply[:300])
+check("B35 ...without greeting someone mid-conversation again",
+      "Welcome" not in reply and "Hello Ashok" not in reply, reply[:300])
+
+reply = turn(p, "4")
+check("B36 the end-chat option says goodbye", "Thanks for reaching out" in reply, reply[:200])
+check("B37 ...with no way back attached", "#" not in reply and "Main menu" not in reply, reply[:200])
+check("B38 ...and clears the session", session(p) is None)
+
+# Now that the session is gone, the next message is a fresh contact — and this
+# number has a name on it, saved through the menu a few turns ago.
+reply = turn(p, "hi")
+check("B39 a recognised number is greeted by name",
+      "Ashok Srinivasan" in reply, reply[:300])
 
 # Carry-over
 p2 = phone()
 reply = turn(p2, "Power cut in Madambakkam since yesterday")
-check("B27 a complaint sent first still gets the menu", "Press 1" in reply, reply[:200])
-check("B28 ...and is carried over, not discarded",
+check("B40 a complaint sent first still gets the menu", "Ticket status" in reply, reply[:300])
+check("B41 ...and is carried over, not discarded",
       "Madambakkam" in ((session(p2) or {}).get("carryOver") or ""), str(session(p2)))
 
 # ---------------------------------------------------------------------------
@@ -264,7 +362,7 @@ p3 = phone()
 reply = turn(p3, "hi")
 check("C1 the configured company name reaches the welcome",
       "Welcome to TNEB Integration" in reply, reply[:200])
-reply = turn(p3, "3")
+reply = turn(p3, "4")
 check("C2 the configured farewell reaches the citizen", "Nandri" in reply, reply[:200])
 
 # ---------------------------------------------------------------------------
@@ -280,7 +378,7 @@ send_whatsapp(p4, "hi")
 time.sleep(12)
 check("D1 a disabled menu creates no session", session(p4) is None)
 check("D2 ...and sends no welcome",
-      not any("Press 1" in m for m in sent_to(start, p4, timeout=1)))
+      not any("Ticket status" in m for m in sent_to(start, p4, timeout=1)))
 
 put_tenant_config(original_config)
 check("D3 the tenant config was restored", tenant_config() == original_config)

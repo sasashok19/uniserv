@@ -438,3 +438,240 @@ The existing `original_complaint` carry-forward already covers this.
 was deliberately not merged to `main`: this repo auto-deploys all four services
 from `main` with no ordering control, and the V14 migration needs db-writer to
 land first. Merge when someone can watch the deploy order.
+
+---
+
+# Feature 29 — structured/standardised WhatsApp conversation (2026-08-16)
+
+Requested by the user by email. Scope agreed, decisions locked.
+**Stage 1 DONE** (api-gateway **177** green, was 171); stages 2-7 not started.
+
+## The target conversation
+
+Inbound message → identity check by phone → greet **by name** if known → main menu:
+
+| # | Option | Behaviour |
+|---|---|---|
+| 1 | Update my details | sub-menu: **Name** / **Email** / Main menu |
+| 2 | Ticket status | list their open+resolved tickets, or ask for a number if >5 |
+| 3 | New ticket | prompt for the complaint, run existing intake + dedup |
+| 4 | End chat | as today's option 3 |
+
+Every sub-message carries a **Main menu** way back. Selecting a ticket returns
+its full details (status, ETA, last updated, chief complaint) + Main menu.
+A newly created ticket returns **exactly one** message with the ticket ID and a
+single Main menu button.
+
+## Decisions the user locked in (2026-08-16)
+
+1. **The free-text rule is scoped, not global.** "Any message outside the
+   options goes back to the main menu" applies **only when nothing is awaiting
+   the citizen's reply**. When we (or an agent) asked a question, their next
+   message is the ANSWER to that question and must reach the ticket. This
+   preserves every F28 follow-up fix — 1, 3, 4 and 5 all exist because the
+   literal reading broke live conversations. What DOES change: unrecognised
+   text at the idle `MENU` state now gets a greeting + the menu instead of
+   today's flat "Sorry, I didn't catch that".
+2. **Prompt-and-reply now, WhatsApp Flows later.** No native form panel. We ask
+   ("What's your new email address?") with a Main menu button as the cancel;
+   their reply is the submit. Flows was rejected for now because the Flow JSON
+   is a Meta-console asset living outside git — the same objection that brought
+   the F27 prompt home — and because the flow design is still moving (five live
+   fixes in a fortnight). Converting a step to Flows later is contained: the
+   state machine does not care where the text came from.
+
+## Assumptions I am proceeding on (user did not specify; flag if wrong)
+
+- **Unidentified number** → generic greeting, and option 1 doubles as new-user
+  onboarding ("I don't have your name yet").
+- **Ticket list scope** = `OPEN_STATUSES` (`app/dedup/service.py:18` — open,
+  assigned, in_progress, pending_customer, reopened) **plus `resolved`**.
+  `closed` excluded as instructed; `cancelled` excluded too.
+- **>5 tickets** → show the **10 most recent** as list rows plus a final
+  "Not listed — type the ticket number" row, rather than jumping straight to
+  "key in the number". List messages allow 10 rows, so this is free.
+- **Email collision** → if the new address already belongs to another identity,
+  REJECT ("that address is already in use"). Never silently reassign — that is
+  an identity merge and could hand one person another's tickets. Audit event on
+  every profile edit.
+
+## Platform constraints that drive the design
+
+- **Four options do not fit reply-buttons.** Meta caps at 3 and rejects the
+  whole send past that (`WhatsAppAdapter.java:149`). The main menu (4) and the
+  ticket list (up to 6-11 rows) need **List Messages**
+  (`interactive.type = "list"`) — up to 10 rows, row title **24**, row
+  description **72**, section title 24, action button label 20.
+  The adapter today only builds `type: "button"`.
+- **Inbound is already done.** `WhatsAppParser.java:85` already parses
+  `interactive.list_reply.title`. Only the outbound builder is missing.
+- **The 72-char description solves the chief-complaint truncation worry.**
+  Row title = `TKT-00042 · Power cut` (24), description = trimmed chief
+  complaint + reported date (72). Reuse `app/tickets/chief_complaint.py`.
+- **Profile sub-menu is exactly 3 options** (Name / Email / Main menu) → plain
+  reply-buttons, no list needed.
+
+## ⚠️ Trap to avoid: do NOT renumber the option keys
+
+Stored tenant config already has `option1Label = "Ticket status"`,
+`option2Label = "New ticket"`, `option3Label = "End chat"` (F28). Inserting
+"Update my details" as the new option 1 by renumbering would silently relabel
+every existing tenant's menu. Add **semantically named** keys instead
+(profile/status/newTicket/endChat) with a back-compat read of the numbered ones
+in `resolve`, and keep the drift guard passing on both sides.
+
+## Staged plan (not started)
+
+| Stage | What | State |
+|---|---|---|
+| 1 | api-gateway `WhatsAppAdapter` — list-message payload + caps + text fallback | **DONE** |
+| 2 | api-gateway `WhatsAppMenuContent` — new semantic copy keys, back-compat, normalise/clamp; admin validation | **DONE** |
+| 2b | **db-writer — `overwrite: true` on the identity PATCH** (unplanned; see below) | **DONE** |
+| 3 | ai-core `menu.py` — greet by name; new states `profile`, `await_name`, `await_email`, `await_ticket_choice`; ticket-list builder | **DONE** |
+| 4 | ai-core — profile write via `update_identity` + collision handling | **DONE** |
+| 5 | ai-core — the scoped free-text rule: greeting + menu at idle `MENU` only, leaving `awaiting_our_reply` and every in-flow state untouched | **DONE** |
+| 6 | dashboard — the new copy keys in the WhatsApp Menu admin tab | **DONE** |
+| 7 | integration harness (`scripts/integration/`), README + docs pass, push on green | **DONE** |
+
+## Feature 29 status: ALL STAGES DONE — unit + live-stack integration green
+
+| Suite | Before | Now |
+|---|---|---|
+| db-writer | 52 | **59** |
+| api-gateway | 171 | **185** |
+| ai-core | 445 | **469** |
+| dashboard | — | tsc + `next build` clean |
+| **live-stack integration** | 46 | **61** (`feature26_eta` 13/13, `feature26_whatsapp_menu` **48/48**) |
+
+The menu harness was run against a real Valkey + db-writer + api-gateway +
+ai-core with `meta_stub.py` on 9099, and it now exercises the whole Feature 29
+conversation end to end: the four-option list, the ticket list, tapping a row,
+the note, the profile name AND email writes reaching the database, the 409
+collision, the named greeting, and the tenant on/off switches.
+
+Two harness bugs found while doing it, both written up in
+`scripts/integration/README.md`:
+
+1. **It could not see interactive messages at all.** It read only `text.body`,
+   which is empty for every interactive send — so it had been blind since
+   Feature 28. `readable()` now flattens body + footer + every button/row title.
+2. **`.env.local` beats your shell.** `dev-local.sh` sources the gateway's
+   `.env.local` *inside* the service subshell and it sets
+   `WHATSAPP_ACCESS_TOKEN=` empty, so exporting the integration values before
+   `./scripts/dev.sh` does nothing and every send 500s. The gateway has to be
+   restarted alone with the exports applied after the source.
+
+Also: anything the harness writes to an identity must be unique per run, or the
+email collision guard correctly refuses it on every run after the first.
+
+### Stage 2b — the unplanned db-writer change
+
+`PATCH /api/v1/db/identities/{id}` has always been an **enrichment**: it only
+fills a field that is currently blank, so a later channel can never clobber a
+confirmed value (Features 03/06). Feature 29's whole point is CHANGING a name or
+email we already hold, so it would have silently done nothing.
+
+`IdentityService.update` now takes **`overwrite: true`**, off by default so every
+enrichment caller keeps the old guarantee. That path — and only that path —
+rejects an email another non-merged identity in the tenant holds with
+**409 `EMAIL_IN_USE`**: taking an address that identifies someone else is a
+reassignment of whoever owns those tickets, not an edit, and only a human can
+tell "I mistyped it" from "that is my colleague's address". Enrichment is left
+alone; a shared email there is the duplicate-identity case `merge` exists for.
+
+There is **no general audit table** in db-writer (only ticket-scoped
+`ticket_events`), so a profile correction is recorded as a log line rather than
+a row. Adding a table would have meant a V15 migration for something the user
+did not ask for. Flag if a real audit trail is wanted.
+
+New `IdentityOverwriteTest` (7). db-writer **59** (was 52).
+
+### Stages 3-6 as built (ai-core 445 -> **469**)
+
+`app/conversation/menu.py`:
+
+- **Options are named, not numbered.** `OPTION_PROFILE/STATUS/NEW/END` with
+  `OPTION_LABELS` mapping each to its config key. Typed `1`-`4` still work via
+  `_OPTION_ALIASES`. Button ids are `menu_profile` etc.
+- New states `profile`, `await_name`, `await_email`, `await_ticket_choice`
+  alongside the existing `menu`, `await_ticket_id`, `await_note`, `intake`.
+- `MenuMessage` gained `list_label`; `_compose` puts body/options/hint where each
+  fits; **`_sub_message`** is the new "every message below the top level carries
+  a Main menu option" helper, and `_wants_main_menu` handles that tap (and `#`)
+  above every state.
+- `citizen_name` -> `welcomeNamed`. A lookup failure costs the name, not the
+  greeting.
+- `_show_ticket_list` lists `LISTED_STATUSES` (open set + `resolved`) by
+  identity, newest first. <=5 -> all + Main menu; >5 -> `ticketListMany` + the 8
+  most recent + "type ID" + Main menu (10 rows is Meta's cap, two of them
+  navigation). Row id is the ticket NUMBER, not the title — titles clip at 24
+  and would collide.
+- `_save_profile_field` writes with `overwrite: True`, creates an identity when
+  the number has none (onboarding), and maps a 409 to `emailInUse` by reading
+  `exc.response.status_code` (no httpx import needed).
+- `finish_registration` now sends **one** message with a Main menu option and
+  leaves the session at `MENU` instead of clearing it.
+- `_register_intro` falls back to `askComplaint` when the tenant has no intake
+  fields, instead of ending on "reply with the following details:" and nothing.
+
+`sender.py` + `dispatcher.py` thread `listLabel` through to the gateway.
+Dashboard `WhatsAppMenuPanel.tsx` regrouped around the four options with all the
+new keys.
+
+**Tests.** `test_whatsapp_menu.py` 59 -> **83**; the F26/F28 cases were rewritten
+where F29 deliberately changes the contract (four options, renumbered keys,
+one-message registration, session back at `MENU` after a note) and 24 new cases
+cover the new flows. `test_dispatcher.py` and `test_notifications.py` updated for
+the four-option payload and `listLabel`.
+
+### Stage 1 as built (api-gateway 171 -> **177**)
+
+- `WhatsAppAdapter.buildPayload` gained a 6th arg `listLabel` and now picks the
+  shape itself via **`needsList`**: a list when >3 options OR any option has a
+  `description`, reply-buttons otherwise. Callers pass options; they do not pick
+  a rendering.
+- **This replaced F28's truncation of surplus buttons**, and the F28 test
+  `moreThanThreeButtonsAreDroppedRatherThanFailingTheSend` was rewritten
+  accordingly (clipping to 3 would now hide "End chat"). `exactlyThreeOptionsStayButtons`
+  pins the boundary.
+- Caps: 10 rows / 24-char title / 72-char description / 200-char id / 20-char
+  list label (default `Choose`). Body + footer caps shared with buttons.
+- **Row ids forced unique** — Meta rejects the whole send on a duplicate, and
+  ids defaulting to a title clipped at 24 chars collide easily
+  (`TKT-00042 · Power cut in Madambakkam` vs `... in Selaiyur`).
+- One unnamed section (a title is only required when there are several).
+- `SendRequest` gained `listLabel`; the field stays named `buttons` for wire
+  compatibility, so ai-core's existing sender is untouched until Stage 3.
+- New `WhatsAppListMessageTest` (14). Docs updated in `docs/02b_ADAPTER_WHATSAPP.md`.
+
+### Stage 2 as built (api-gateway 177 -> **185**)
+
+`WhatsAppMenuContent` — the option labels are **named, not numbered**, via
+`LEGACY_LABELS`: `option1Label -> labelStatus`, `option2Label -> labelNewTicket`,
+`option3Label -> labelEndChat`, each keeping its ORIGINAL meaning. Applied in
+`resolve` (legacy first, current wins) and in `normalise` (a body carrying only
+legacy names keeps its wording instead of being dropped as unknown keys).
+
+New keys — **all of these still need the Python mirror in Stage 3, and the ai-core
+drift guard is RED until then**:
+
+- menu: `welcomeNamed` ({name} required), `labelProfile`, `labelStatus`,
+  `labelNewTicket`, `labelEndChat`, `labelMainMenu`, `listButtonLabel`
+- profile: `profilePrompt`, `labelNameOption`, `labelEmailOption`, `askName`,
+  `askEmail`, `nameUpdated`, `emailUpdated`, `nameInvalid`, `emailInvalid`,
+  `emailInUse`, `profileUnknownName`
+- ticket list: `ticketListIntro`, `ticketListEmpty`, `ticketListMany` ({count}),
+  `ticketRowTitle` ({ticket} required), `ticketRowDescription`,
+  `labelTypeTicketId`
+- new ticket: `askComplaint`
+
+Also: `menuPrompt` now must offer options **1-4** (a stored three-option prompt
+fails the admin's next save — it no longer describes the menu); `unknownOption`
+re-worded to lead into the re-shown menu (Stage 5 uses it as the preamble);
+**every** label is capped at 20, not just the old three, because "Main menu" is a
+list row in one place and a reply button in another and only the stricter cap is
+always safe.
+
+Deploy note: no migration in this feature so far, so the strict db-writer-first
+ordering of F26 does not apply to F29 on its own — but this branch still carries
+V14, so the F26 deploy order above still governs the branch as a whole.

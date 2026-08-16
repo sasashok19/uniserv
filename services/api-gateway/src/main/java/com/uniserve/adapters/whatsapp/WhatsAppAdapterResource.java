@@ -28,12 +28,19 @@ public class WhatsAppAdapterResource {
      * known, so this reply renders as a quoted reply-to instead of a fresh message.
      *
      * <p>{@code buttons} and {@code footer} (Feature 28) turn the send into an
-     * interactive reply-buttons message: up to 3 entries of
-     * {@code {"id": ..., "title": ...}}. Both optional — omitting them sends
-     * plain text exactly as before, so every existing caller is unaffected.
+     * interactive message: entries of {@code {"id": ..., "title": ...}}, with an
+     * optional {@code "description"} (Feature 29). Both optional — omitting them
+     * sends plain text exactly as before, so every existing caller is unaffected.
+     *
+     * <p>The field is still called {@code buttons} for wire compatibility, but
+     * the adapter decides the rendering: more than three entries, or any entry
+     * with a description, goes out as a <b>list</b> message instead, since Meta
+     * caps reply-buttons at three. {@code listLabel} names the strip that opens
+     * that list and is ignored when the entries render as buttons.
      */
     public record SendRequest(String to, String body, String contextMessageId,
-                              java.util.List<Map<String, String>> buttons, String footer) {
+                              java.util.List<Map<String, String>> buttons, String footer,
+                              String listLabel) {
     }
 
     @POST
@@ -51,7 +58,8 @@ public class WhatsAppAdapterResource {
                 request.body() == null ? "" : request.body(),
                 request.contextMessageId(),
                 request.buttons(),
-                request.footer());
+                request.footer(),
+                request.listLabel());
         // Feature 24: the wamid goes back to the caller (ai-core) so it can
         // stamp it onto the ticket_message row it already persisted — that is
         // what makes the citizen's reply to THIS message routable.

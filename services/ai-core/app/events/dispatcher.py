@@ -232,6 +232,7 @@ async def _offer_menu_after_dead_end(
             "messageText": message.text,
             "buttons": message.buttons,
             "footer": message.footer,
+            "listLabel": message.list_label,
         }, trace_id=trace_id)
         logger.info("offered the main menu after a routing dead end traceId=%s", trace_id)
     except Exception:  # noqa: BLE001 - see the docstring
@@ -347,6 +348,7 @@ async def _run_menu(
                 # tappable reply buttons instead of "press 1".
                 "buttons": message.buttons,
                 "footer": message.footer,
+                "listLabel": message.list_label,
             }, trace_id=trace_id)
         except Exception:  # noqa: BLE001 - one failed send must not swallow the rest
             logger.exception("failed to send a menu reply traceId=%s", trace_id)
@@ -417,6 +419,7 @@ async def _handle_complaint_ready(tenant_id: str, event: dict) -> None:
                         "messageText": message.text,
                         "buttons": message.buttons,
                         "footer": message.footer,
+                        "listLabel": message.list_label,
                         "ticketNumber": result.get("ticketNumber"),
                     }, trace_id=trace_id)
                 except Exception:  # noqa: BLE001 - the ticket is saved either way

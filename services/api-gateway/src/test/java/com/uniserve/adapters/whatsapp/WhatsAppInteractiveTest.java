@@ -114,10 +114,26 @@ class WhatsAppInteractiveTest {
     // ---- limits Meta enforces by rejecting the whole send ----------------
 
     @Test
-    void moreThanThreeButtonsAreDroppedRatherThanFailingTheSend() {
+    void moreThanThreeOptionsBecomeAListRatherThanLosingTheSurplus() {
+        // Feature 28 clipped to three, so options four and five never reached
+        // the citizen at all — survivable when the menu had exactly three, not
+        // once it had four. Feature 29 sends them as a list instead; the
+        // three-button cap now decides the SHAPE rather than truncating.
         Map<String, Object> payload = WhatsAppAdapter.buildPayload(
                 "+91987", "hi", null, buttons("A", "B", "C", "D", "E"), null);
 
+        assertEquals("list", interactiveOf(payload).get("type"));
+        assertTrue(WhatsAppAdapter.needsList(buttons("A", "B", "C", "D", "E")));
+        assertFalse(interactiveOf(payload).toString().contains("\"buttons\""));
+    }
+
+    @Test
+    void exactlyThreeOptionsStayButtons() {
+        // The boundary the shape choice turns on.
+        Map<String, Object> payload = WhatsAppAdapter.buildPayload(
+                "+91987", "hi", null, buttons("A", "B", "C"), null);
+
+        assertEquals("button", interactiveOf(payload).get("type"));
         assertEquals(WhatsAppAdapter.MAX_BUTTONS, repliesOf(payload).size());
     }
 

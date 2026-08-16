@@ -137,7 +137,9 @@ def test_a_whatsapp_first_contact_gets_the_welcome_menu_and_creates_no_ticket(fa
     payload = deliver.await_args.args[0]
     assert "Welcome to TNEB" in payload["messageText"]
     # Feature 28: the options ride as tappable buttons, and the # escape as the footer.
-    assert [b["title"] for b in payload["buttons"]] == ["Ticket status", "New ticket", "End chat"]
+    assert [b["title"] for b in payload["buttons"]] == [
+        "Update my details", "Ticket status", "New ticket", "End chat"]
+    assert payload["listLabel"] == "Choose an option", "four options cannot be reply-buttons"
     assert "#" in payload["footer"], "every message must offer the way back to the main menu"
 
 

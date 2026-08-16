@@ -8,6 +8,7 @@ import com.uniserve.dbwriter.util.SqliteTime;
 import io.quarkus.hibernate.orm.panache.Panache;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.transaction.Transactional;
+import org.jboss.logging.Logger;
 
 import java.util.List;
 import java.util.Map;
@@ -21,6 +22,8 @@ import java.util.UUID;
  */
 @ApplicationScoped
 public class IdentityService {
+
+    private static final Logger LOG = Logger.getLogger(IdentityService.class);
 
     @Transactional
     public Map<String, Object> create(Map<String, Object> body) {
@@ -117,6 +120,12 @@ public class IdentityService {
      * Accepts {@code name}/{@code email}/{@code phone}; only overwrites a
      * field when it's currently blank, so a later channel never clobbers an
      * already-confirmed value.
+     *
+     * <p><b>{@code overwrite: true}</b> (Feature 29) is the one exception: the
+     * citizen is correcting their own record from the WhatsApp menu, and a
+     * correction that silently does nothing because we already hold a stale
+     * value is the whole thing they were trying to fix. Off by default, so
+     * every enrichment caller keeps the guarantee above.
      */
     @Transactional
     public Map<String, Object> update(String id, Map<String, Object> body) {
@@ -127,10 +136,25 @@ public class IdentityService {
         String name = str(body, "name");
         String email = str(body, "email");
         String phone = str(body, "phone");
-        if (name != null && (p.name == null || p.name.isBlank())) {
+        boolean overwrite = Boolean.parseBoolean(String.valueOf(body.get("overwrite")));
+
+        if (name != null && (overwrite || p.name == null || p.name.isBlank())) {
+            if (overwrite && !name.equals(p.name)) {
+                LOG.infof("identity %s name corrected by the citizen", id);
+            }
             p.name = name;
         }
-        if (email != null && (p.email == null || p.email.isBlank())) {
+        if (email != null && (overwrite || p.email == null || p.email.isBlank())) {
+            if (overwrite && !email.equalsIgnoreCase(p.email)) {
+                // Checked only on the overwrite path, deliberately. Two profiles
+                // sharing an email is the duplicate-identity case that `merge`
+                // exists for, and enrichment has always been allowed to walk
+                // into it. What must not happen is a citizen TAKING an address
+                // that already identifies someone else: that is not an edit,
+                // it is a silent reassignment of whoever owns those tickets.
+                requireEmailFree(p, email);
+                LOG.infof("identity %s email corrected by the citizen", id);
+            }
             p.email = email;
         }
         if (phone != null && (p.phone == null || p.phone.isBlank())) {
@@ -138,6 +162,17 @@ public class IdentityService {
         }
         Panache.getEntityManager().flush();
         return p.toMap();
+    }
+
+    /** 409 rather than a merge: only a human can tell "I mistyped it last time"
+     * from "that is my colleague's address". */
+    private void requireEmailFree(IdentityProfile p, String email) {
+        findByEmail(p.tenantId, email)
+                .filter(other -> !String.valueOf(other.get("id")).equals(String.valueOf(p.id)))
+                .ifPresent(other -> {
+                    throw new ApiException(409, "EMAIL_IN_USE",
+                            "another identity in this tenant already uses that email");
+                });
     }
 
     public List<Map<String, Object>> all(String tenantId) {

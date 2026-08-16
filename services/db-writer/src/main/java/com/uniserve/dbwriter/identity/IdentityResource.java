@@ -77,7 +77,9 @@ public class IdentityResource {
         return identities.merge(id, body);
     }
 
-    /** Enrich with a newly-learned name/email/phone (Feature 03/06) — never overwrites a set field. */
+    /** Enrich with a newly-learned name/email/phone (Feature 03/06) — never overwrites a set field,
+     * unless the body carries {@code overwrite: true} (Feature 29: the citizen correcting their own
+     * record from the WhatsApp menu), which also 409s on an email another identity already holds. */
     @PATCH
     @Path("/{id}")
     @Consumes(MediaType.APPLICATION_JSON)

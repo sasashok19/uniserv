@@ -25,7 +25,9 @@ import java.util.Map;
  *
  * <p><b>Placeholders.</b> Any text field may contain {@code {company}}, which is
  * substituted at send time. The reply-composing fields may additionally use
- * {@code {ticket}}, {@code {status}}, {@code {eta}} and {@code {updated}}.
+ * {@code {ticket}}, {@code {complaint}}, {@code {status}}, {@code {eta}} and
+ * {@code {updated}}; the Feature 29 fields add {@code {name}} (the greeting and
+ * the name confirmation), {@code {email}} and {@code {count}}.
  * Substitution is plain string replacement into a plain-text WhatsApp body —
  * there is no markup, no template engine and no HTML sink here, which is why
  * these fields need length caps but not the URL/colour validation the landing
@@ -51,12 +53,32 @@ final class WhatsAppMenuContent {
 
     /** Meta caps an interactive reply-button title at 20 characters, and rejects
      * the whole send if one is longer — so the citizen would receive nothing at
-     * all. Enforced on write here and clamped again on read/send in ai-core. */
+     * all. Enforced on write here and clamped again on read/send in ai-core.
+     *
+     * <p>A list row title may be 24, but the same label appears in both shapes
+     * ("Main menu" is a row on the ticket list and a button in the profile
+     * sub-menu), so the stricter cap is the only one that is always safe. */
     static final int MAX_BUTTON_LABEL = 20;
 
-    /** The three option labels, which become the reply buttons. */
-    private static final List<String> BUTTON_LABELS =
-            List.of("option1Label", "option2Label", "option3Label");
+    /** Every label that reaches Meta as a button title or a list row title, and
+     * so has to obey {@link #MAX_BUTTON_LABEL}. */
+    private static final List<String> BUTTON_LABELS = List.of(
+            "labelProfile", "labelStatus", "labelNewTicket", "labelEndChat",
+            "labelMainMenu", "labelNameOption", "labelEmailOption",
+            "labelTypeTicketId", "listButtonLabel");
+
+    /** Feature 28 numbered the options; Feature 29 inserted "update my details"
+     * at the top and names them instead. Renumbering would have silently
+     * relabelled every tenant that had customised its menu — their
+     * {@code option1Label} of "Ticket status" would have started reading
+     * "Update my details" while still doing the old thing. Read-time aliases
+     * instead: legacy key -> the key that replaced it, each keeping its ORIGINAL
+     * meaning. A GET now returns the new names, so the admin panel's
+     * read-modify-write carries the customisation forward on the next save. */
+    private static final Map<String, String> LEGACY_LABELS = Map.of(
+            "option1Label", "labelStatus",
+            "option2Label", "labelNewTicket",
+            "option3Label", "labelEndChat");
 
     /** Text fields: key -> default. Order here is the order the admin panel shows them. */
     private static final Map<String, String> TEXT_DEFAULTS = new LinkedHashMap<>();
@@ -64,20 +86,60 @@ final class WhatsAppMenuContent {
     static {
         TEXT_DEFAULTS.put("companyName", "");
         TEXT_DEFAULTS.put("welcome", "Welcome to {company}!");
+        // Feature 29: the greeting when the number is already known to us.
+        TEXT_DEFAULTS.put("welcomeNamed", "Hello {name}, welcome back to {company}!");
         TEXT_DEFAULTS.put("menuPrompt",
                 "Please choose an option:\n"
-                        + "Press 1 to know the status, ETA and last update for an existing ticket.\n"
-                        + "Press 2 to register a new ticket.\n"
-                        + "Press 3 to end this chat.");
+                        + "Press 1 to update your name or email.\n"
+                        + "Press 2 to know the status, ETA and last update for an existing ticket.\n"
+                        + "Press 3 to register a new ticket.\n"
+                        + "Press 4 to end this chat.");
         TEXT_DEFAULTS.put("menuIntro", "Please choose an option:");
-        TEXT_DEFAULTS.put("option1Label", "Ticket status");
-        TEXT_DEFAULTS.put("option2Label", "New ticket");
-        TEXT_DEFAULTS.put("option3Label", "End chat");
+        TEXT_DEFAULTS.put("labelProfile", "Update my details");
+        TEXT_DEFAULTS.put("labelStatus", "Ticket status");
+        TEXT_DEFAULTS.put("labelNewTicket", "New ticket");
+        TEXT_DEFAULTS.put("labelEndChat", "End chat");
+        TEXT_DEFAULTS.put("labelMainMenu", "Main menu");
+        TEXT_DEFAULTS.put("listButtonLabel", "Choose an option");
         TEXT_DEFAULTS.put("menuHint", "You can press # at any time to return to the main menu.");
         TEXT_DEFAULTS.put("unknownOption",
-                "Sorry, I didn't catch that. Please reply with 1, 2 or 3.");
+                "Sorry, I didn't catch that. Please pick one of the options below.");
+        // ---- Feature 29: update my details -------------------------------
+        TEXT_DEFAULTS.put("profilePrompt", "What would you like to update?");
+        TEXT_DEFAULTS.put("labelNameOption", "Name");
+        TEXT_DEFAULTS.put("labelEmailOption", "Email");
+        TEXT_DEFAULTS.put("askName", "Please type your full name and send it.");
+        TEXT_DEFAULTS.put("askEmail", "Please type your email address and send it.");
+        TEXT_DEFAULTS.put("nameUpdated", "Thanks {name}, I've updated your name.");
+        TEXT_DEFAULTS.put("emailUpdated", "Thank you — I've updated your email to {email}.");
+        TEXT_DEFAULTS.put("nameInvalid",
+                "That doesn't look like a name. Please send it as plain text, "
+                        + "between 2 and 60 characters.");
+        TEXT_DEFAULTS.put("emailInvalid",
+                "That doesn't look like an email address. Please check it and send it again.");
+        TEXT_DEFAULTS.put("emailInUse",
+                "That email address is already registered against another account, so I can't "
+                        + "move it. Please send a different address, or contact us if you think "
+                        + "this is a mistake.");
+        TEXT_DEFAULTS.put("profileUnknownName",
+                "I don't have your name yet. Please type it and send it, and I'll save it "
+                        + "against this number.");
+
+        // ---- Feature 29: the ticket list ---------------------------------
+        TEXT_DEFAULTS.put("ticketListIntro", "Here are your tickets. Tap one to see its details.");
+        TEXT_DEFAULTS.put("ticketListEmpty",
+                "You don't have any open or recently resolved tickets with us right now.");
+        TEXT_DEFAULTS.put("ticketListMany",
+                "You have {count} tickets that are open or resolved — more than I can show in one "
+                        + "list. Tap one below, or type the Ticket ID you want (for example TKT-00042).");
+        TEXT_DEFAULTS.put("ticketRowTitle", "{ticket} {complaint}");
+        TEXT_DEFAULTS.put("ticketRowDescription", "{status} · updated {updated}");
+        TEXT_DEFAULTS.put("labelTypeTicketId", "Not listed — type ID");
         TEXT_DEFAULTS.put("askTicketId",
                 "Please share your Ticket ID (for example TKT-00042).");
+        TEXT_DEFAULTS.put("askComplaint",
+                "Please type your complaint and send it — a line or two about what the problem "
+                        + "is and where, and I'll register it.");
         TEXT_DEFAULTS.put("ticketNotFound",
                 "I couldn't find a ticket with that ID against this number. "
                         + "Please check the Ticket ID and send it again.");
@@ -112,7 +174,8 @@ final class WhatsAppMenuContent {
     /** Fields long enough to need the body cap rather than the short one. */
     private static final List<String> LONG_FIELDS = List.of(
             "menuPrompt", "ticketNotFound", "ticketDetails", "inviteNote", "noteAdded",
-            "registerIntro", "ticketCreated", "conversationEnd", "duplicateAsk", "duplicateMerged");
+            "registerIntro", "ticketCreated", "conversationEnd", "duplicateAsk", "duplicateMerged",
+            "ticketListMany", "askComplaint", "emailInUse", "profileUnknownName");
 
     private WhatsAppMenuContent() {
     }
@@ -146,6 +209,15 @@ final class WhatsAppMenuContent {
         Object raw = config == null ? null : config.get("whatsappMenu");
         Map<String, Object> stored = raw instanceof Map ? (Map<String, Object>) raw : Map.of();
 
+        // Feature 28's numbered labels first, so a tenant that customised them
+        // keeps its wording under the new names...
+        LEGACY_LABELS.forEach((legacy, current) -> {
+            String v = str(stored.get(legacy));
+            if (!v.isEmpty()) {
+                out.put(current, v);
+            }
+        });
+        // ...and the current names second, so they win once both are stored.
         for (String key : TEXT_DEFAULTS.keySet()) {
             String v = str(stored.get(key));
             if (!v.isEmpty()) {
@@ -199,9 +271,19 @@ final class WhatsAppMenuContent {
         if (body == null) {
             throw new InvalidContentException("Request body is required");
         }
+        // A caller posting only the Feature 28 names — the dashboard always
+        // round-trips a GET, but an API client need not — would otherwise have
+        // its labels dropped as unknown keys and silently reset to default.
+        Map<String, Object> input = new LinkedHashMap<>(body);
+        LEGACY_LABELS.forEach((legacy, current) -> {
+            if (str(input.get(current)).isEmpty() && !str(input.get(legacy)).isEmpty()) {
+                input.put(current, input.get(legacy));
+            }
+        });
+
         Map<String, Object> out = new LinkedHashMap<>();
         for (String key : TEXT_DEFAULTS.keySet()) {
-            out.put(key, checked(body.get(key), key, LONG_FIELDS.contains(key) ? MAX_BODY : MAX_SHORT));
+            out.put(key, checked(input.get(key), key, LONG_FIELDS.contains(key) ? MAX_BODY : MAX_SHORT));
         }
 
         // The menu is what tells a citizen an option exists, so a menuPrompt
@@ -210,7 +292,10 @@ final class WhatsAppMenuContent {
         // to a support ticket about "option 3 doesn't exist".
         String prompt = str(out.get("menuPrompt"));
         if (!prompt.isEmpty()) {
-            for (String option : List.of("1", "2", "3")) {
+            // Four options since Feature 29. A prompt saved against the old
+            // three-option menu fails here on the admin's next save, which is
+            // the point: it no longer describes the menu the citizen sees.
+            for (String option : List.of("1", "2", "3", "4")) {
                 if (!prompt.contains(option)) {
                     throw new InvalidContentException(
                             "'menuPrompt' must still offer option " + option
@@ -220,11 +305,17 @@ final class WhatsAppMenuContent {
         }
         // {ticket} is the citizen's only handle on their complaint; a details
         // template without it reads out a status with nothing to attach it to.
-        for (String key : List.of("ticketDetails", "ticketCreated")) {
+        for (String key : List.of("ticketDetails", "ticketCreated", "ticketRowTitle")) {
             String template = str(out.get(key));
             if (!template.isEmpty() && !template.contains("{ticket}")) {
                 throw new InvalidContentException("'" + key + "' must include the {ticket} placeholder");
             }
+        }
+        // Without {name} the "we know who you are" greeting is indistinguishable
+        // from the anonymous one, and the identity lookup buys nothing.
+        String named = str(out.get("welcomeNamed"));
+        if (!named.isEmpty() && !named.contains("{name}")) {
+            throw new InvalidContentException("'welcomeNamed' must include the {name} placeholder");
         }
 
         // A button label longer than Meta's cap fails the whole send, so this is

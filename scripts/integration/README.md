@@ -19,10 +19,12 @@ cd services/ai-core && ./.venv/Scripts/python.exe ../../scripts/integration/feat
 
 # The WhatsApp menu — needs the whole stack plus the Meta stub below
 python scripts/integration/meta_stub.py &        # listens on 9099
-# restart api-gateway with:
-#   WHATSAPP_ACCESS_TOKEN=integration-test-token \
-#   WHATSAPP_PHONE_NUMBER_ID=1234567890 \
-#   WHATSAPP_GRAPH_API_BASE_URL=http://127.0.0.1:9099
+# restart api-gateway ALONE, exporting AFTER its .env.local is sourced (that
+# file sets WHATSAPP_ACCESS_TOKEN= empty and would otherwise win):
+#   cd services/api-gateway && bash -c 'set -a; source .env.local; set +a; \
+#     export WHATSAPP_ACCESS_TOKEN=integration-test-token \
+#            WHATSAPP_PHONE_NUMBER_ID=1234567890 \
+#            WHATSAPP_GRAPH_API_BASE_URL=http://127.0.0.1:9099; exec mvn -o quarkus:dev'
 cd services/ai-core && ./.venv/Scripts/python.exe ../../scripts/integration/feature26_whatsapp_menu.py
 ```
 
@@ -44,8 +46,33 @@ send to `sent.jsonl`, which is how the menu script reads the exact text a citize
 would have received. Without it, a dev box with no `WHATSAPP_ACCESS_TOKEN` fails
 every outbound send and the replies are invisible.
 
+## Reading interactive messages
+
+`feature26_whatsapp_menu.py` originally read only `text.body` out of each
+recorded send. Features 28 and 29 made the menu an **interactive** message,
+whose words live in `interactive.body.text` and whose options are the part that
+matters most — so `readable()` now flattens body, footer and every button/row
+title into one string the checks assert on. Without it every menu check reads an
+empty string and "passes" nothing.
+
+The Feature 29 scenarios also need an **identity** behind the test phone number:
+the ticket list is looked up by identity, so a ticket created straight through
+the db API has to carry one (`identity_for()`), and the profile checks assert
+the name and email actually landed on that row.
+
+Anything a check writes to an identity must be **unique per run** — the email
+collision guard (409 `EMAIL_IN_USE`) will correctly refuse a fixed address on
+every run after the first, which looks like a bug in the feature and is not.
+
 ## Things that will bite you
 
+- **`.env.local` beats your shell.** `dev-local.sh` sources each service's
+  `.env.local` with `set -a` *inside* the service subshell, and the gateway's
+  sets `WHATSAPP_ACCESS_TOKEN=` (empty). Exporting the integration values before
+  `./scripts/dev.sh` therefore does nothing: every send fails with
+  `WHATSAPP_ACCESS_TOKEN is not set` and the stub records nothing. Restart the
+  gateway on its own with the exports applied **after** the source, as the
+  snippet above does.
 - **The dev Valkey accumulates a backlog.** Seeded email events are replayed on
   every gateway start and each one makes real (slow) OpenAI calls, so ai-core's
   consumer can be hundreds of messages behind. The menu script advances the

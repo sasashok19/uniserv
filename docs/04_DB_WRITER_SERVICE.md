@@ -120,8 +120,29 @@ Validates mandatory note rules. Returns 422 if note missing/too short.
 POST   /api/v1/db/identities               → create profile
 GET    /api/v1/db/identities?email=        → find by email
 GET    /api/v1/db/identities?phone=        → find by phone
+PATCH  /api/v1/db/identities/{id}          → enrich (or correct, see below)
 PATCH  /api/v1/db/identities/{id}/merge    → merge two profiles
 ```
+
+**`PATCH /identities/{id}` is an enrichment, not an edit.** It accepts
+`name`/`email`/`phone` and only fills a field that is currently blank, so a
+later channel can never clobber an already-confirmed value (Features 03/06).
+
+**`overwrite: true` is the exception** (Feature 29): the citizen correcting
+their own record through the WhatsApp menu. A correction that silently does
+nothing because we already hold a stale value is the very thing they were trying
+to fix. It is off by default, so every enrichment caller keeps the guarantee
+above, and it is the only path that checks email uniqueness:
+
+- Setting an email another non-merged identity in the tenant already holds
+  returns **409 `EMAIL_IN_USE`**. That is not an edit but a silent reassignment
+  of whoever owns those tickets, and only a human can tell "I mistyped it last
+  time" from "that is my colleague's address" — so it is refused rather than
+  merged.
+- The check is deliberately scoped to this path. Enrichment has always been
+  allowed to walk into a shared email; that is the duplicate-identity case
+  `merge` exists for.
+- Covered by `IdentityOverwriteTest`.
 
 ### Agents
 ```

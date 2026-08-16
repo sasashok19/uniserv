@@ -62,7 +62,7 @@ class WhatsAppMenuResourceTest {
     private static Map<String, Object> validBody() {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("companyName", "TNEB");
-        body.put("menuPrompt", "Press 1 for status, 2 to register, 3 to end");
+        body.put("menuPrompt", "Press 1 for details, 2 for status, 3 to register, 4 to end");
         body.put("ticketDetails", "Ticket {ticket} is {status}");
         body.put("ticketCreated", "Registered {ticket}");
         return body;
@@ -302,7 +302,7 @@ class WhatsAppMenuResourceTest {
         // shorter wording that still reads well.
         tenantConfig("{}");
         Map<String, Object> body = validBody();
-        body.put("option1Label", "Check the status of an existing ticket");
+        body.put("labelStatus", "Check the status of an existing ticket");
 
         Response response = resource.update(body);
 
@@ -313,11 +313,110 @@ class WhatsAppMenuResourceTest {
 
     @Test
     void anOverlongLabelThatBypassedTheGatewayIsClampedOnRead() {
-        tenantConfig("{\"whatsappMenu\":{\"option1Label\":\"Check the status of an existing ticket\"}}");
+        tenantConfig("{\"whatsappMenu\":{\"labelStatus\":\"Check the status of an existing ticket\"}}");
 
-        String label = String.valueOf(content(resource.get()).get("option1Label"));
+        String label = String.valueOf(content(resource.get()).get("labelStatus"));
 
         assertEquals(WhatsAppMenuContent.MAX_BUTTON_LABEL, label.length());
+    }
+
+    // ---- Feature 29: renaming the options without relabelling anyone ------
+
+    @Test
+    void aFeature28NumberedLabelIsReadBackUnderItsNewNameWithItsOldMeaning() {
+        // The trap this avoids: "Update my details" became the new option 1, so
+        // renumbering would have turned this tenant's "Ticket status" wording
+        // into the label on a button that updates their name.
+        tenantConfig("{\"whatsappMenu\":{\"option1Label\":\"Complaint status\","
+                + "\"option2Label\":\"Raise a complaint\",\"option3Label\":\"Bye\"}}");
+
+        Map<String, Object> content = content(resource.get());
+
+        assertEquals("Complaint status", content.get("labelStatus"));
+        assertEquals("Raise a complaint", content.get("labelNewTicket"));
+        assertEquals("Bye", content.get("labelEndChat"));
+        assertEquals("Update my details", content.get("labelProfile"), "the new option gets the default");
+    }
+
+    @Test
+    void theCurrentNameWinsWhenBothAreStored() {
+        tenantConfig("{\"whatsappMenu\":{\"option1Label\":\"Old wording\",\"labelStatus\":\"New wording\"}}");
+
+        assertEquals("New wording", content(resource.get()).get("labelStatus"));
+    }
+
+    @Test
+    void aBodyCarryingOnlyTheLegacyNamesKeepsItsWording() {
+        // The dashboard round-trips a GET so it always sends the new names; an
+        // API client need not, and its labels must not be dropped as unknown
+        // keys and silently reset to default.
+        tenantConfig("{}");
+        Map<String, Object> body = validBody();
+        body.put("option2Label", "Raise a complaint");
+
+        assertEquals("Raise a complaint", content(resource.update(body)).get("labelNewTicket"));
+    }
+
+    @Test
+    void everyLabelIsCappedNotJustTheOldThree() {
+        // "Main menu" is a list row on the ticket list and a reply button in the
+        // profile sub-menu, so the stricter of Meta's two caps is the only one
+        // that is always safe.
+        tenantConfig("{}");
+        for (String key : new String[]{"labelProfile", "labelMainMenu", "labelNameOption",
+                "labelTypeTicketId", "listButtonLabel"}) {
+            Map<String, Object> body = validBody();
+            body.put(key, "A label far longer than Meta will ever accept");
+
+            assertEquals(422, resource.update(body).getStatus(), key + " must be capped");
+        }
+    }
+
+    @Test
+    void aMenuPromptStillOfferingOnlyThreeOptionsIsRejected() {
+        // The old default. It no longer describes the menu the citizen sees, so
+        // the admin has to say what option 4 is.
+        tenantConfig("{}");
+        Map<String, Object> body = validBody();
+        body.put("menuPrompt", "Press 1 for status, 2 to register, 3 to end");
+
+        assertEquals(422, resource.update(body).getStatus());
+    }
+
+    @Test
+    void aNamedWelcomeWithoutTheNamePlaceholderIsRejected() {
+        tenantConfig("{}");
+        Map<String, Object> body = validBody();
+        body.put("welcomeNamed", "Welcome back!");
+
+        Response response = resource.update(body);
+
+        assertEquals(422, response.getStatus());
+        assertTrue(String.valueOf(response.getEntity()).contains("{name}"));
+    }
+
+    @Test
+    void aTicketRowTitleWithoutTheTicketPlaceholderIsRejected() {
+        // A row the citizen taps has to say which ticket it is.
+        tenantConfig("{}");
+        Map<String, Object> body = validBody();
+        body.put("ticketRowTitle", "{complaint}");
+
+        assertEquals(422, resource.update(body).getStatus());
+    }
+
+    @Test
+    void theNewFlowsAllHaveDefaultCopy() {
+        tenantConfig(null);
+        Map<String, Object> content = content(resource.get());
+
+        for (String key : new String[]{"welcomeNamed", "profilePrompt", "askName", "askEmail",
+                "nameUpdated", "emailUpdated", "emailInvalid", "emailInUse", "nameInvalid",
+                "profileUnknownName", "ticketListIntro", "ticketListEmpty", "ticketListMany",
+                "ticketRowTitle", "ticketRowDescription", "askComplaint"}) {
+            assertNotNull(content.get(key), key + " must have a default");
+            assertFalse(String.valueOf(content.get(key)).isBlank(), key + " must not be blank");
+        }
     }
 
     @Test

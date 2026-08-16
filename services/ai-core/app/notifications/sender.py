@@ -113,6 +113,7 @@ async def send_whatsapp(
     to_phone: str, body: str, trace_id: Optional[str] = None,
     context_message_id: Optional[str] = None,
     buttons: Optional[list[dict]] = None, footer: Optional[str] = None,
+    list_label: Optional[str] = None,
 ) -> dict:
     """Deliver a WhatsApp message via api-gateway's `WhatsAppAdapter.sendReply`
     (reused through its `/send` endpoint rather than talking to Meta's Graph API
@@ -122,23 +123,29 @@ async def send_whatsapp(
     email's `in_reply_to`), when known — makes the reply render as a quoted
     reply-to in WhatsApp instead of a fresh, disconnected message.
 
-    `buttons` (Feature 28) renders the message as Meta interactive reply
-    buttons: up to 3 `{"id", "title"}` entries, with `footer` as the small grey
-    line beneath them. **A failed interactive send is retried as plain text** —
-    the body already spells out the same options, so a citizen must never be
-    left with nothing because Meta disliked a button.
+    `buttons` (Feature 28) renders the message as a Meta interactive message:
+    `{"id", "title"}` entries, optionally with a `"description"`, and `footer`
+    as the small grey line beneath them. Whether that goes out as reply-buttons
+    or as a list is the gateway adapter's decision — more than three entries, or
+    any description, has to be a list because Meta caps buttons at three — and
+    `list_label` (Feature 29) names the strip that opens the list panel.
+    **A failed interactive send is retried as plain text** — the body already
+    spells out the same options, so a citizen must never be left with nothing
+    because Meta disliked a button.
     """
-    result = await _post_whatsapp(to_phone, body, trace_id, context_message_id, buttons, footer)
+    result = await _post_whatsapp(to_phone, body, trace_id, context_message_id, buttons,
+                                  footer, list_label)
     if buttons and not result.get("delivered"):
         logger.warning("interactive whatsapp send failed traceId=%s to=%s — retrying as plain text",
                        trace_id, to_phone)
-        return await _post_whatsapp(to_phone, body, trace_id, context_message_id, None, None)
+        return await _post_whatsapp(to_phone, body, trace_id, context_message_id, None, None, None)
     return result
 
 
 async def _post_whatsapp(
     to_phone: str, body: str, trace_id: Optional[str],
     context_message_id: Optional[str], buttons: Optional[list[dict]], footer: Optional[str],
+    list_label: Optional[str] = None,
 ) -> dict:
     url = f"{settings.api_gateway_url.rstrip('/')}/api/v1/internal/adapters/whatsapp/send"
     headers = {"Content-Type": "application/json"}
@@ -149,7 +156,7 @@ async def _post_whatsapp(
         async with httpx.AsyncClient(timeout=settings.whatsapp_send_timeout_seconds) as client:
             resp = await client.post(url, headers=headers, json={
                 "to": to_phone, "body": body, "contextMessageId": context_message_id,
-                "buttons": buttons, "footer": footer,
+                "buttons": buttons, "footer": footer, "listLabel": list_label,
             })
         resp.raise_for_status()
         body_json = resp.json()
@@ -190,7 +197,8 @@ async def deliver_reply(payload: dict, trace_id: Optional[str] = None) -> dict:
         # ticket-number tag (see docs/09... subject-line threading is email-only).
         return await send_whatsapp(
             to_address, message_text, trace_id, context_message_id=origin_message_id,
-            buttons=payload.get("buttons"), footer=payload.get("footer"))
+            buttons=payload.get("buttons"), footer=payload.get("footer"),
+            list_label=payload.get("listLabel"))
 
     logger.info(
         "ai.reply.send recorded but not delivered: traceId=%s channel=%s "
