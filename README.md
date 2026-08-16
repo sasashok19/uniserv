@@ -510,7 +510,10 @@ cd services/db-writer  && mvn quarkus:dev
   **danger-zone database reset** — a non-dismissible modal requiring the
   admin's current password AND typing `RESET` exactly; the confirm button
   stays disabled until both are valid, then handles 401 (wrong password),
-  429 (rate-limited), and success (toast + redirect to login).
+  429 (rate-limited), and success (toast + redirect to login). The modal spells
+  out what is deleted **and what is kept** (your account, the default staff
+  accounts, and every setting including the WhatsApp menu wording) — "all data
+  for this tenant" alone reads as though the tenant's configuration goes too.
 - `src/app/dashboard/tickets/[id]/page.tsx` — ticket detail, two equal
   columns: the **left column is reference material** — the conversation
   timeline (own scroll region) above the **Audit trail** (own scroll,
@@ -2327,10 +2330,28 @@ roles, `announcements.manage` = admin)
   like the citizen status lookup).
 
 **Admin system operations** (UI_REVAMP_v2 Feature D; RBAC `admin.system.reset`)
-- `POST /api/v1/admin/reset` `{password, confirmation:"RESET"}` — wipes ALL
-  tenant data (tickets/messages/notes/events, identities, pending queue,
-  announcements, non-admin agents) keeping the tenants row and the calling
-  admin. Layered safeguards: JWT (`/api/v1/admin` in `AuthFilter`), admin role,
+- `POST /api/v1/admin/reset` `{password, confirmation:"RESET"}` — wipes a
+  tenant's DATA: tickets/messages/notes/events, **unrouted messages**,
+  identities, the pending queue, announcements, and any staff account added
+  since setup.
+
+  **What survives, deliberately:**
+  - the `tenants` row and **all of `config_json`** — WhatsApp menu copy,
+    landing page, intake fields, categories, SLA, news. A reset clears data; it
+    is not a factory reset of setup, and it does not restore defaults over
+    wording an admin has tuned.
+  - the calling admin, **and the seeded staff accounts**
+    (`AdminResetService.SEED_AGENT_IDS` = `a1`/`a2`/`a3`, the Admin, Lead and
+    Field agents). These used to be deleted with nothing to bring them back —
+    `V3__seed_dev_data.sql` is `INSERT OR IGNORE` and Flyway never re-runs an
+    applied migration — so "reset" permanently removed the staff an admin needs
+    to demo or test the role-based views.
+
+  Seeded **citizen** profiles are not preserved: they are data, they reappear
+  the moment anyone messages in, and a stale demo citizen in a freshly reset
+  tenant is clutter. Ticket numbering restarts at `TKT-00001`.
+
+  Layered safeguards: JWT (`/api/v1/admin` in `AuthFilter`), admin role,
   bcrypt re-verification of the admin's CURRENT password (401
   `INVALID_PASSWORD`), literal `RESET` confirmation (400
   `CONFIRMATION_REQUIRED`, re-checked in db-writer), and a 60s per-tenant rate

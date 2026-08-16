@@ -566,6 +566,28 @@ Create/Edit modal (shadcn Dialog):
 - Audit log entry written BEFORE reset executes
 - Admin's own account preserved after reset
 
+### What a reset keeps (revised after live use)
+
+As built, a reset also preserves:
+
+- **All tenant configuration** (`config_json`) — WhatsApp menu copy, landing
+  page, intake fields, categories, SLA, news. This clears a tenant's DATA; it is
+  not a factory reset of its setup.
+- **The seeded staff accounts** (`a1`/`a2`/`a3` — Admin, Lead, Field), not just
+  the caller. They used to be deleted with nothing to restore them:
+  `V3__seed_dev_data.sql` is `INSERT OR IGNORE` and Flyway never re-runs an
+  applied migration, so a reset permanently removed the staff needed to demo or
+  test the role-based views. Staff added since setup are still deleted.
+
+Seeded **citizen** profiles are still deleted — they are data, they reappear as
+soon as anyone messages in, and a stale demo citizen in a fresh tenant is
+clutter.
+
+`unrouted_messages` was missing from the delete list entirely, so the Unrouted
+queue survived a reset holding `resolved_ticket_id` / `resolved_by` values
+pointing at rows that had just been deleted. It is now cleared first, since it
+references both tickets and agents. Pinned by `AdminResetTest`.
+
 ### db-writer endpoint **[CONFIRM #3 before implementing]**
 
 Show the delete sequence to the user and wait for confirmation.

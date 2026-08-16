@@ -167,7 +167,13 @@ function ResetModal({ onClose }: { onClose: () => void }) {
         ) : (
           <>
             <p className="text-sm text-muted-foreground">
-              This will permanently delete all data for this tenant. Your admin account will be preserved.
+              This permanently deletes every ticket, message, note, unrouted message, announcement
+              and citizen profile for this tenant.
+            </p>
+            <p className="text-sm text-muted-foreground">
+              <span className="font-medium text-slate-700">Kept:</span> your account, the default
+              staff accounts, and all settings — including your WhatsApp menu wording, landing page
+              and intake fields. Any staff account added since setup is deleted.
             </p>
             <label className="block text-xs text-slate-600">
               Enter your password:
